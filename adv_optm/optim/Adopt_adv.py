@@ -48,7 +48,7 @@ class Adopt_adv(torch.optim.Optimizer):
             combined with the primary momentum (`mt`) to stabilize updates,
             especially in noisy, small-batch settings. If `False`, the
             optimizer behaves as standard ADOPT. (default: False)
-        beta3 (float): The decay rate for the slow exponential moving average of
+        beta3_ema (float): The decay rate for the slow exponential moving average of
             the momentum (only used when `use_AdEMAMix` is `True`). A higher
             value (e.g., 0.9999) gives the EMA a longer memory, making it more
             stable but slower to adapt. A lower value (e.g., 0.999) is often
@@ -83,7 +83,7 @@ class Adopt_adv(torch.optim.Optimizer):
         use_grams: bool = False,
         use_orthograd: bool = False,
         use_AdEMAMix: bool = False,
-        beta3: float = 0.9999,
+        beta3_ema: float = 0.9999,
         alpha: float = 5.0,
         t_alpha: int | None = None,
         factored: bool = True,
@@ -99,7 +99,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
-            "vector_reshape": vector_reshape, "beta3": beta3, "alpha": alpha,
+            "vector_reshape": vector_reshape, "beta3_ema": beta3_ema, "alpha": alpha,
             "t_alpha": t_alpha,
         }
         self.clip_lambda = clip_lambda
@@ -179,7 +179,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
         beta1, beta2 = group['betas']
         if self.use_AdEMAMix:
-            beta3 = group['beta3']
+            beta3_ema = group['beta3_ema']
             alpha = group['alpha']
             t_alpha = group['t_alpha']
             # Use step+1 for 1-based step count in scheduler
@@ -236,7 +236,7 @@ class Adopt_adv(torch.optim.Optimizer):
                 del mask
 
             if self.use_AdEMAMix:
-                mt_slow = mt_slow_prev.mul_(beta3).add_(normalized_grad, alpha=1.0 - beta3)
+                mt_slow = mt_slow_prev.mul_(beta3_ema).add_(normalized_grad, alpha=1.0 - beta3_ema)
                 update = mt + (alpha_t * mt_slow)
                 update = update.view(p.shape)
             else:
@@ -293,7 +293,7 @@ class Adopt_adv(torch.optim.Optimizer):
                 del mask
 
             if self.use_AdEMAMix:
-                m_slow.mul_(beta3).add_(normalized_grad, alpha=1.0 - beta3)
+                m_slow.mul_(beta3_ema).add_(normalized_grad, alpha=1.0 - beta3_ema)
                 update = m + (alpha_t * m_slow)
             else:
                 update = m

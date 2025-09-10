@@ -1,5 +1,6 @@
 import torch
-from typing import Optional
+import torch.distributed as dist
+
 import math
 
 from ..util.BF16_Stochastic_Rounding import add_stochastic_
@@ -54,6 +55,23 @@ class Prodigy_adv(torch.optim.Optimizer):
             the scheduler is disabled and th
         factored (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: True)
+        d0 (float):
+            Initial D estimate for D-adaptation (default 1e-6). Rarely needs changing.
+        d_coef (float):
+            Coefficient in the expression for the estimate of d (default 1.0).
+            Values such as 0.5 and 2.0 typically work as well. 
+            Changing this parameter is the preferred way to tune the method.
+        growth_rate (float):
+            prevent the D estimate from growing faster than this multiplicative rate.
+            Default is inf, for unrestricted. Values like 1.02 give a kind of learning
+            rate warmup effect.
+        fsdp_in_use (bool):
+            If you're using sharded parameters, this should be set to True. The optimizer
+            will attempt to auto-detect this, but if you're using an implementation other
+            than PyTorch's builtin version, the auto-detection won't work.
+        slice_p (int): Reduce memory usage by calculating LR adaptation statistics on only every 
+            pth entry of each tensor. For values greater than 1 this an an approximation to standard 
+            Prodigy. Values ~11 are reasonable (default 1).
     """
 
     def __init__(
@@ -80,6 +98,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         d_coef: float = 1,
         growth_rate: float = float('inf'),
         safeguard_warmup: bool = False,
+        fsdp_in_use: bool = False,
         slice_p: int = 11,
     ):
         if not (lr >= 0.0):
@@ -98,12 +117,14 @@ class Prodigy_adv(torch.optim.Optimizer):
             "beta3_ema": beta3_ema, "alpha": alpha, "t_alpha": t_alpha,
             "beta3": beta3, "d": d0, "d0": d0, "d_max": d0, "d_numerator": 0.0, "d_coef": d_coef,
             "growth_rate": growth_rate, "safeguard_warmup": safeguard_warmup, "k": 0, "slice_p": slice_p,
+            "fsdp_in_use": fsdp_in_use,
         }
         self.stochastic_rounding = stochastic_rounding
         self.use_cautious = use_cautious
         self.use_grams = use_grams
         self.use_AdEMAMix = use_AdEMAMix
         self.factored = factored
+        self.fsdp_in_use = fsdp_in_use
         super().__init__(params, defaults)
         self.init_step()
 
@@ -141,6 +162,9 @@ class Prodigy_adv(torch.optim.Optimizer):
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
         if p.grad is None:
             return
+
+        if hasattr(p, "_fsdp_flattened"):
+            self.fsdp_in_use = True
 
         grad = p.grad
         if grad.dtype != torch.float32 and self.factored:
@@ -349,8 +373,16 @@ class Prodigy_adv(torch.optim.Optimizer):
         g_group = self.param_groups[0]
         d_max, d_coef, growth_rate = g_group['d_max'], g_group['d_coef'], g_group['growth_rate']
         
-        global_d_numerator = self.d_numerator
-        global_d_denom = self.d_denom
+        if self.fsdp_in_use and dist.is_available() and dist.is_initialized():
+            # Use the device of the first parameter to avoid hardcoding '.cuda()'
+            device = self.param_groups[0]['params'][0].device
+            dist_tensor = torch.tensor([self.d_numerator, self.d_denom], device=device)
+            dist.all_reduce(dist_tensor, op=dist.ReduceOp.SUM)
+            global_d_numerator = dist_tensor[0].item()
+            global_d_denom = dist_tensor[1].item()
+        else:
+            global_d_numerator = self.d_numerator
+            global_d_denom = self.d_denom
 
         d_hat = self.d
         if global_d_denom > 0:

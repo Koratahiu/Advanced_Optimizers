@@ -37,7 +37,7 @@ class AdamW_adv(torch.optim.Optimizer):
             combined with the primary momentum (`mt`) to stabilize updates,
             especially in noisy, small-batch settings. If `False`, the
             optimizer behaves as standard AdamW. (default: False)
-        beta3 (float): The decay rate for the slow exponential moving average of
+        beta3_ema (float): The decay rate for the slow exponential moving average of
             the momentum (only used when `use_AdEMAMix` is `True`). A higher
             value (e.g., 0.9999) gives the EMA a longer memory, making it more
             stable but slower to adapt. A lower value (e.g., 0.999) is often
@@ -71,7 +71,7 @@ class AdamW_adv(torch.optim.Optimizer):
         use_grams: bool = False,
         use_orthograd: bool = False,
         use_AdEMAMix: bool = False,
-        beta3: float = 0.9999,
+        beta3_ema: float = 0.9999,
         alpha: float = 5.0,
         t_alpha: int | None = None,
         factored: bool = True,
@@ -89,7 +89,7 @@ class AdamW_adv(torch.optim.Optimizer):
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "vector_reshape": vector_reshape, "use_atan2": use_atan2,
             "use_orthograd": use_orthograd, "use_bias_correction": use_bias_correction,
-            "beta3": beta3, "alpha": alpha, "t_alpha": t_alpha,
+            "beta3_ema": beta3_ema, "alpha": alpha, "t_alpha": t_alpha,
         }
         self.stochastic_rounding = stochastic_rounding
         self.use_cautious = use_cautious
@@ -162,7 +162,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
         beta1, beta2 = group['betas']
         if self.use_AdEMAMix:
-            beta3 = group['beta3']
+            beta3_ema = group['beta3_ema']
             alpha = group['alpha']
             t_alpha = group['t_alpha']
             current_step = state['step'] + 1
@@ -201,7 +201,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 torch.where(unpacked_sign_slow, mt_slow, -mt_slow, out=mt_slow)
                 del unpacked_sign_slow
 
-                mt_slow.mul_(beta3).add_(grad_reshaped, alpha=1.0 - beta3)
+                mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=1.0 - beta3_ema)
                 update_m = mt + (alpha_t * mt_slow)
             else:
                 update_m = mt
@@ -245,7 +245,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
             if self.use_AdEMAMix:
                 exp_avg_slow = state['exp_avg_slow']
-                exp_avg_slow.mul_(beta3).add_(grad, alpha=1 - beta3)
+                exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=1 - beta3_ema)
                 update_m = exp_avg + (alpha_t * exp_avg_slow)
             else:
                 update_m = exp_avg
