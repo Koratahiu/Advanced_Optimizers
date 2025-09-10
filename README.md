@@ -41,7 +41,7 @@ The core innovation:
 - **Adopt_Factored with AdEMAMix**: ~12s/it
 - **Adafactor**: ~8.5s/it  
 → Overhead from compression/reconstruction cycles.
-→ It's faster than [MLorc]() (~12s/it), which uses RSVD compression, and should be the fastest momentum compression (AFAIK).
+→ It's faster than [MLorc](https://arxiv.org/abs/2506.01897) (~12s/it), which uses RSVD compression, and should be the fastest momentum compression (AFAIK).
 
 ---
 
