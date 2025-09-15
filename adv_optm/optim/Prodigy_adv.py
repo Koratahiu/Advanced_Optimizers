@@ -194,11 +194,12 @@ class Prodigy_adv(torch.optim.Optimizer):
                 d1, d2 = state['effective_shape']
 
                 # First moment (m)
-                state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
-                state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
-                if not self.use_grams:
-                    packed_d2 = (d2 + 7) // 8
-                    state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                if self.beta1 > 0:
+                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
+                    state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+                    if not self.use_grams:
+                        packed_d2 = (d2 + 7) // 8
+                        state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
                 if self.use_AdEMAMix:
                     state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
                     state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
@@ -208,7 +209,8 @@ class Prodigy_adv(torch.optim.Optimizer):
                 state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
                 state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
             else:  # Fallback to standard AdamW for non-factored tensors
-                state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
+                if self.beta1 > 0:
+                    state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
                 if self.use_AdEMAMix:
                     state['exp_avg_slow'] = torch.zeros_like(p, dtype=dtype)
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
@@ -231,22 +233,24 @@ class Prodigy_adv(torch.optim.Optimizer):
         if state['factored']:
             d1, d2 = state['effective_shape']
 
-            # Reconstruct momentum from previous step's factors
-            mt = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
-            if not self.use_grams:
-                unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
-                torch.where(unpacked_sign, mt, -mt, out=mt)
-                del unpacked_sign
-            # Update momentum in full-size
             grad_reshaped = grad.view(d1, d2)
-            mt.mul_(self.beta1).add_(grad_reshaped, alpha=self.d * (1.0 - self.beta1))
-            if self.use_grams:
-                mt.copy_(grad_reshaped.sign() * mt.abs())
-            elif self.use_cautious:
-                mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
-                mask.div_(mask.mean().clamp_(min=1e-3))
-                mt.mul_(mask)
-                del mask
+
+            # Reconstruct momentum from previous step's factors
+            if self.beta1 > 0:
+                mt = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
+                if not self.use_grams:
+                    unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
+                    torch.where(unpacked_sign, mt, -mt, out=mt)
+                    del unpacked_sign
+                # Update momentum in full-size
+                mt.mul_(self.beta1).add_(grad_reshaped, alpha=self.d * (1.0 - self.beta1))
+                if self.use_grams:
+                    mt.copy_(grad_reshaped.sign() * mt.abs())
+                elif self.use_cautious:
+                    mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
+                    mask.div_(mask.mean().clamp_(min=1e-3))
+                    mt.mul_(mask)
+                    del mask
 
             vt = _unnmf((state['mu_v_nmf'], state['mv_v_nmf']))
             vt.mul_(self.beta2).addcmul_(grad_reshaped, grad_reshaped, value=self.d * self.d * (1.0 - self.beta2))
@@ -258,30 +262,29 @@ class Prodigy_adv(torch.optim.Optimizer):
                 unpacked_sign_slow = _unpack_bools(state['sign_slow'], original_m=d2)
                 torch.where(unpacked_sign_slow, mt_slow, -mt_slow, out=mt_slow)
                 del unpacked_sign_slow
-
                 mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=self.d * (1.0 - beta3_ema))
-                update_m = mt + (alpha_t * mt_slow)
+                update = mt + (alpha_t * mt_slow) if self.beta1 > 0 else grad_reshaped + (alpha_t * mt_slow)
             else:
-                update_m = mt
+                update = mt if self.beta1 > 0 else grad_reshaped
             del grad_reshaped
 
             if group['use_atan2']:
                 a = 1.2732395
                 denom = vt.sqrt()
-                update = torch.atan2(update_m, denom).mul_(a)
+                update.atan2_(denom).mul_(a)
             else:
-                denom = vt.sqrt().add_(self.d * group['eps'])
-                update = update_m / denom
-            del update_m, denom
+                denom = vt.sqrt()
+                update.div_(denom.add_(self.d * group['eps']))
+            del denom
 
-            update = update.view(p.shape)
-            update.mul_(self.dlr)
+            update.view(p.shape).mul_(self.dlr)
 
             # Compress updated moments and store new factors
-            if not self.use_grams:
-                state['sign'] = _pack_bools(mt > 0)
-            _nnmf(mt.abs(), out=(state['mu_m_nmf'], state['mv_m_nmf']))
-            del mt
+            if self.beta1 > 0:
+                if not self.use_grams:
+                    state['sign'] = _pack_bools(mt > 0)
+                _nnmf(mt.abs(), out=(state['mu_m_nmf'], state['mv_m_nmf']))
+                del mt
             if self.use_AdEMAMix:
                 state['sign_slow'] = _pack_bools(mt_slow > 0)
                 _nnmf(mt_slow.abs(), out=(state['mu_m_slow_nmf'], state['mv_m_slow_nmf']))
@@ -290,36 +293,38 @@ class Prodigy_adv(torch.optim.Optimizer):
             del vt
 
         else:  # Standard AdamW logic for non-factored tensors
-            exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+            exp_avg_sq = state['exp_avg_sq']
 
-            exp_avg.mul_(self.beta1).add_(grad, alpha=self.d * (1.0 - self.beta1))
-            if self.use_grams:
-                exp_avg = grad.sign() * exp_avg.abs()
-            elif self.use_cautious:
-                mask = (exp_avg * grad > 0).to(grad.dtype)
-                mask.div_(mask.mean().clamp_(min=1e-3))
-                exp_avg.mul_(mask)
-                del mask
+            if self.beta1 > 0:
+                exp_avg = state['exp_avg']
+                exp_avg.mul_(self.beta1).add_(grad, alpha=self.d * (1.0 - self.beta1))
+                if self.use_grams:
+                    exp_avg = grad.sign() * exp_avg.abs()
+                elif self.use_cautious:
+                    mask = (exp_avg * grad > 0).to(grad.dtype)
+                    mask.div_(mask.mean().clamp_(min=1e-3))
+                    exp_avg.mul_(mask)
+                    del mask
 
             if self.use_AdEMAMix:
                 exp_avg_slow = state['exp_avg_slow']
                 exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=self.d * (1.0 - beta3_ema))
-                update_m = exp_avg + (alpha_t * exp_avg_slow)
+                update = exp_avg + (alpha_t * exp_avg_slow) if self.beta1 > 0 else grad + (alpha_t * exp_avg_slow)
             else:
-                update_m = exp_avg
+                update = exp_avg if self.beta1 > 0 else grad
 
             exp_avg_sq.mul_(self.beta2).addcmul_(grad, grad.conj(), value=self.d * self.d * (1.0 - self.beta2))
 
             if group['use_atan2']:
                 a = 1.2732395
                 denom = exp_avg_sq.sqrt()
-                update = torch.atan2(update_m, denom).mul_(a)
+                update.atan2_(denom).mul_(a)
             else:
-                denom = exp_avg_sq.sqrt().add_(self.d * group['eps'])
-                update = update_m / denom
-            del update_m, denom
+                denom = exp_avg_sq.sqrt()
+                update.div_(denom.add_(self.d * group['eps']))
+            del denom
 
-            update = update.mul_(self.dlr)
+            update.mul_(self.dlr)
 
         # --- Accumulate Prodigy stats ---
         d0, safeguard_warmup, slice_p = group['d0'], group['safeguard_warmup'], group['slice_p']

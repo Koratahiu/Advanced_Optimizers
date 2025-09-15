@@ -82,8 +82,6 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             raise ValueError(f"Betas should be in [0.0, 1.0], but got {betas}")
         if not weight_decay >= 0.0:
             raise ValueError(f"Weight decay must be >= 0.0, but got {weight_decay}")
-        if variance_reduction and use_cautious:
-            print("Warning: Using both 'variance_reduction' and 'use_cautious' is not recommended and may lead to unintended effects.")
 
         defaults = dict(
             lr=lr,
