@@ -30,8 +30,6 @@ class Adopt_adv(torch.optim.Optimizer):
         clip_lambda (Callable, optional): A function that takes the current step
             and returns a value to clip the normalized gradient. Only used when
             `use_atan2` is False. (default: `lambda step: step**0.25`)
-        rank (int): the rank for the low-rank approximation (default: 4).
-        oversampling (int): oversampling parameter for Randomized SVD. (default: 0).
         vector_reshape (bool): whether to reshape 1D vectors into 2D
             matrices for low-rank compression (default: True).
         stochastic_rounding (bool): whether to use stochastic
@@ -192,29 +190,29 @@ class Adopt_adv(torch.optim.Optimizer):
             d1, d2 = state['effective_shape']
 
             # Reconstruct m_{t-1}
-            mt_prev = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
+            mt = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
             if not self.use_grams:
                 if state['sign'].dtype != torch.uint8:
                     state['sign'] = state['sign'].to(torch.uint8)
                 unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
-                torch.where(unpacked_sign, mt_prev, -mt_prev, out=mt_prev)
+                torch.where(unpacked_sign, mt, -mt, out=mt)
                 del unpacked_sign
 
             # Reconstruct AdEMAMix EMA
             if self.use_AdEMAMix:
-                mt_slow_prev = _unnmf((state['mu_m_slow_nmf'], state['mv_m_slow_nmf']))
+                mt_slow = _unnmf((state['mu_m_slow_nmf'], state['mv_m_slow_nmf']))
                 if state['sign_slow'].dtype != torch.uint8:
                     state['sign_slow'] = state['sign_slow'].to(torch.uint8)
                 unpacked_sign_slow = _unpack_bools(state['sign_slow'], original_m=d2)
-                torch.where(unpacked_sign_slow, mt_slow_prev, -mt_slow_prev, out=mt_slow_prev)
+                torch.where(unpacked_sign_slow, mt_slow, -mt_slow, out=mt_slow)
                 del unpacked_sign_slow
 
             # Reconstruct v_{t-1} using NNMF
-            vt_prev = _unnmf((state['mu_v_nmf'], state['mv_v_nmf']))
+            vt = _unnmf((state['mu_v_nmf'], state['mv_v_nmf']))
 
             # ADOPT Step A: Decorrelate g_t using v_{t-1}
             grad_reshaped = grad.view(d1, d2)
-            denom = vt_prev.sqrt()
+            denom = vt.sqrt()
 
             if self.use_atan2:
                 normalized_grad = torch.atan2(grad_reshaped, denom)
@@ -226,7 +224,7 @@ class Adopt_adv(torch.optim.Optimizer):
             del denom
 
             # ADOPT Step B: Update momentum m_t using normalized gradient
-            mt = mt_prev.mul_(beta1).add_(normalized_grad, alpha=1.0 - beta1)
+            mt.mul_(beta1).add_(normalized_grad, alpha=1.0 - beta1)
             if self.use_grams:
                 mt = grad_reshaped.sign() * mt.abs()
             elif self.use_cautious:
@@ -236,7 +234,7 @@ class Adopt_adv(torch.optim.Optimizer):
                 del mask
 
             if self.use_AdEMAMix:
-                mt_slow = mt_slow_prev.mul_(beta3_ema).add_(normalized_grad, alpha=1.0 - beta3_ema)
+                mt_slow.mul_(beta3_ema).add_(normalized_grad, alpha=1.0 - beta3_ema)
                 update = mt + (alpha_t * mt_slow)
                 update = update.view(p.shape)
             else:
@@ -248,20 +246,23 @@ class Adopt_adv(torch.optim.Optimizer):
                 update.mul_(group['lr']) 
 
             # Update second moment v_t for the *next* step using raw g_t
-            vt_updated = vt_prev.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
+            vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
             del grad_reshaped
 
             # Compress and store new factors
             if not self.use_grams:
                 state['sign'] = _pack_bools(mt > 0)
             _nnmf(mt.abs(), out=(state['mu_m_nmf'], state['mv_m_nmf']))
+            del mt
 
             if self.use_AdEMAMix:
                 state['sign_slow'] = _pack_bools(mt_slow > 0)
                 _nnmf(mt_slow.abs(), out=(state['mu_m_slow_nmf'], state['mv_m_slow_nmf']))
+                del mt_slow
 
             # factorize v_t using NMF compression
-            _nnmf(vt_updated, out=(state['mu_v_nmf'], state['mv_v_nmf']))
+            _nnmf(vt, out=(state['mu_v_nmf'], state['mv_v_nmf']))
+            del vt
 
         else: # Standard ADOPT logic for non-factored tensors
             m, v = state['exp_avg'], state['exp_avg_sq'] # m_{t-1}, v_{t-1}

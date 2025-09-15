@@ -18,7 +18,7 @@ class Prodigy_adv(torch.optim.Optimizer):
     Args:
         params (iterable): iterable of parameters to optimize or dicts defining
             parameter groups
-        lr (float): learning rate (default: 1e-3)
+        lr (float): learning rate (default: 1)
         betas (tuple[float, float]): coefficients used for computing running
             averages of gradient and its square (default: (0.9, 0.999))
         eps (float): term added to the denominator to improve
@@ -71,13 +71,13 @@ class Prodigy_adv(torch.optim.Optimizer):
             than PyTorch's builtin version, the auto-detection won't work.
         slice_p (int): Reduce memory usage by calculating LR adaptation statistics on only every 
             pth entry of each tensor. For values greater than 1 this an an approximation to standard 
-            Prodigy. Values ~11 are reasonable (default 1).
+            Prodigy. Values ~11 are reasonable (default 11).
     """
 
     def __init__(
         self,
         params,
-        lr: float = 1e-3,
+        lr: float = 1,
         betas: tuple[float, float] = (0.9, 0.999),
         eps: float = 1e-8,
         weight_decay: float = 0.0,
@@ -270,7 +270,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 denom = vt.sqrt()
                 update = torch.atan2(update_m, denom).mul_(a)
             else:
-                denom = vt.sqrt().add_(group['eps'])
+                denom = vt.sqrt().add_(self.d * group['eps'])
                 update = update_m / denom
             del update_m, denom
 
@@ -315,7 +315,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 denom = exp_avg_sq.sqrt()
                 update = torch.atan2(update_m, denom).mul_(a)
             else:
-                denom = exp_avg_sq.sqrt().add_(group['eps'])
+                denom = exp_avg_sq.sqrt().add_(self.d * group['eps'])
                 update = update_m / denom
             del update_m, denom
 
