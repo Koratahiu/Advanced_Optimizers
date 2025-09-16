@@ -145,7 +145,7 @@ class Lion_adv(torch.optim.Optimizer):
             if exp_avg.dtype != torch.float32:
                 exp_avg = exp_avg.float()
 
-            # Compute update term c_t = β1*m_{t-1} + (1-β1)*g_t
+            # Compute update term c_t
             signed_update = exp_avg.clone().mul_(beta1).add_(grad_reshaped, alpha=(1-beta1)).sign_()
 
             if self.use_cautious:
@@ -154,18 +154,24 @@ class Lion_adv(torch.optim.Optimizer):
                 signed_update.mul_(mask)
                 del mask
 
-            # Parameter update: p_t = p_{t-1} - lr * sign(c_t)
+            # Parameter update
             update_for_param = signed_update.view(p.shape).mul_(lr)
 
-            # Update momentum m_t = β2*m_{t-1} + (1-β2)*lr*g_t
+            # Update momentum
             if self.variance_reduction:
-                vr_term = grad_reshaped - state['prev_grad']
-                exp_avg.mul_(beta2).add_(grad_reshaped, alpha=1-beta2).add_(vr_term, alpha=beta2)
-                del vr_term
+                if state['step'] == 1:
+                    exp_avg.copy_(grad_reshaped)
+                else:
+                    # Use the simplified STORM update: m_t = g_t + β₂ * (m_{t-1} - g_{t-1})
+                    correction = exp_avg.sub(state['prev_grad'])
+                    # Calculate the new momentum and store it back into exp_avg
+                    exp_avg.copy_(grad_reshaped).add_(correction, alpha=beta2)
+                    del correction
+                # Update prev_grad for the next iteration
                 state['prev_grad'].copy_(grad_reshaped)
             else:
+                # Standard Lion momentum update
                 exp_avg.mul_(beta2).add_(grad_reshaped, alpha=1-beta2)
-            del grad_reshaped
 
             # Compress new momentum m_t and store factors
             state['sign'] = _pack_bools(exp_avg > 0)
@@ -191,10 +197,18 @@ class Lion_adv(torch.optim.Optimizer):
 
             # Update momentum 
             if self.variance_reduction:
-                vr_term = grad - state['prev_grad']
-                exp_avg.mul_(beta2).add_(grad, alpha=1-beta2).add_(vr_term, alpha=beta2)
+                if state['step'] == 1:
+                    exp_avg.copy_(grad)
+                else:
+                    # Use the simplified STORM update: m_t = g_t + β₂ * (m_{t-1} - g_{t-1})
+                    correction = exp_avg.sub(state['prev_grad'])
+                    # Calculate the new momentum and store it back into exp_avg
+                    exp_avg.copy_(grad).add_(correction, alpha=beta2)
+                    del correction
+                # Update prev_grad for the next iteration
                 state['prev_grad'].copy_(grad)
             else:
+                # Standard Lion momentum update
                 exp_avg.mul_(beta2).add_(grad, alpha=1-beta2)
 
         if group["weight_decay"] != 0:

@@ -216,11 +216,19 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
 
             # Update momentum m_t = β2*m_{t-1} + (1-β2)*lr*g_t
             if self.variance_reduction:
-                vr_term = grad_reshaped - state['prev_grad']
-                exp_avg.mul_(self.beta2).add_(grad_reshaped, alpha=self.d * (1-self.beta2)).add_(vr_term, alpha=self.beta2)
+                if state['step'] == 1:
+                    exp_avg.copy_(grad_reshaped)
+                else:
+                    # Heuristic Prodigy-STORM update
+                    correction = exp_avg.sub(state['prev_grad'])
+                    grad_alpha = self.d * (1 - self.beta2) + self.beta2
+                    exp_avg.copy_(grad_reshaped).mul_(grad_alpha).add_(correction, alpha=self.beta2)
+                    del correction, grad_alpha
                 state['prev_grad'].copy_(grad_reshaped)
             else:
-                exp_avg.mul_(self.beta2).add_(grad_reshaped, alpha=self.d * (1-self.beta2))
+                # Standard Prodigy-Lion
+                alpha = self.d * (1 - self.beta2)
+                exp_avg.mul_(self.beta2).add_(grad_reshaped, alpha=alpha)
             del grad_reshaped
 
             # Compress new momentum m_t and store factors
@@ -247,11 +255,19 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
 
             # Update momentum 
             if self.variance_reduction:
-                vr_term = grad - state['prev_grad']
-                exp_avg.mul_(self.beta2).add_(grad, alpha=self.d * (1-self.beta2)).add_(vr_term, alpha=self.beta2)
+                if state['step'] == 1:
+                    exp_avg.copy_(grad)
+                else:
+                    # Heuristic Prodigy-STORM update
+                    correction = exp_avg.sub(state['prev_grad'])
+                    grad_alpha = self.d * (1 - self.beta2) + self.beta2
+                    exp_avg.copy_(grad).mul_(grad_alpha).add_(correction, alpha=self.beta2)
+                    del grad_alpha, correction
                 state['prev_grad'].copy_(grad)
             else:
-                exp_avg.mul_(self.beta2).add_(grad, alpha=self.d * (1-self.beta2))
+                # Standard Prodigy-Lion
+                alpha = self.d * (1 - self.beta2)
+                exp_avg.mul_(self.beta2).add_(grad, alpha=alpha)
 
         # --- Accumulate Prodigy stats ---
         d0, safeguard_warmup, slice_p = group['d0'], group['safeguard_warmup'], group['slice_p']
