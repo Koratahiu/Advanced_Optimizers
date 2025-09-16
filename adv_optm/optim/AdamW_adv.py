@@ -230,7 +230,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 update.div_(denom)
             del denom
 
-            update.view(p.shape).mul_(step_size)
+            update = update.view(p.shape).mul_(step_size)
 
             # Compress updated moments and store new factors
             if beta1 > 0:

@@ -277,7 +277,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 update.div_(denom.add_(self.d * group['eps']))
             del denom
 
-            update.view(p.shape).mul_(self.dlr)
+            update = update.view(p.shape).mul_(self.dlr)
 
             # Compress updated moments and store new factors
             if self.beta1 > 0:
