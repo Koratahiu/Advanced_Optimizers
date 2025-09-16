@@ -21,7 +21,10 @@ class AdamW_adv(torch.optim.Optimizer):
             averages of gradient and its square (default: (0.9, 0.999))
         eps (float): term added to the denominator to improve
             numerical stability (default: 1e-8)
-        weight_decay (float): weight decay (L2 penalty) (default: 0)
+        weight_decay (float): weight decay (L2 penalty) (default: 0).
+        use_bias_correction (bool): whether to use bias correction for the first
+            and second moment estimates, as in the original Adam paper.
+            (default: True)
         vector_reshape (bool): whether to reshape 1D vectors into 2D
             matrices to apply low-rank compression (default: True).
         stochastic_rounding (bool): whether to use stochastic
@@ -50,7 +53,7 @@ class AdamW_adv(torch.optim.Optimizer):
             highly recommended to prevent instability at the beginning of training,
             as it gradually introduces the stabilizing slow momentum term. During
             the warmup, `alpha` ramps from 0 to its target value. If `None`,
-            the scheduler is disabled and th
+            the scheduler is disabled. (default: None)
         factored (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: True)
     """
@@ -62,6 +65,7 @@ class AdamW_adv(torch.optim.Optimizer):
         betas: tuple[float, float] = (0.9, 0.999),
         eps: float = 1e-8,
         weight_decay: float = 0.0,
+        use_bias_correction: bool = True,
         vector_reshape: bool = True,
         stochastic_rounding: bool = True,
         use_atan2: bool = False,
@@ -86,7 +90,7 @@ class AdamW_adv(torch.optim.Optimizer):
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "vector_reshape": vector_reshape, "use_atan2": use_atan2,
-            "use_orthograd": use_orthograd,
+            "use_orthograd": use_orthograd, "use_bias_correction": use_bias_correction,
             "beta3_ema": beta3_ema, "alpha": alpha, "t_alpha": t_alpha,
         }
         self.stochastic_rounding = stochastic_rounding
@@ -159,17 +163,25 @@ class AdamW_adv(torch.optim.Optimizer):
                 if beta1 > 0:
                     state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
                 if self.use_AdEMAMix:
-                    state['exp_avg_slow'] = torch.zeros_like(p, dtype=dtype)
+                    state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
+
+        step = state['step'] + 1
+        if group['use_bias_correction']:
+            bias_correction1 = 1.0 - beta1 ** step
+            bias_correction2 = 1.0 - beta2 ** step
+        else:
+            bias_correction1 = 1
+            bias_correction2 = 1
+        step_size = group['lr'] / bias_correction1
 
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
             alpha = group['alpha']
             t_alpha = group['t_alpha']
-            current_step = state['step'] + 1
             alpha_t = alpha
-            if t_alpha is not None and t_alpha > 0 and current_step < t_alpha:
-                alpha_t = min(current_step * alpha / t_alpha, alpha)
+            if t_alpha is not None and t_alpha > 0 and step < t_alpha:
+                alpha_t = min(step * alpha / t_alpha, alpha)
 
         if state['factored']:
             d1, d2 = state['effective_shape']
@@ -206,19 +218,19 @@ class AdamW_adv(torch.optim.Optimizer):
                 mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=1.0 - beta3_ema)
                 update = mt + (alpha_t * mt_slow) if beta1 > 0 else grad_reshaped + (alpha_t * mt_slow)
             else:
-                update = mt if beta1 > 0 else grad_reshaped
+                update = mt.clone() if beta1 > 0 else grad_reshaped.clone()
             del grad_reshaped
 
             if group['use_atan2']:
                 a = 1.2732395
-                denom = vt.sqrt()
+                denom = (vt.sqrt() / (bias_correction2**0.5))
                 update.atan2_(denom).mul_(a)
             else:
-                denom = vt.sqrt()
-                update.div_(denom.add_(group['eps']))
+                denom = (vt.sqrt() / (bias_correction2**0.5)).add_(group['eps'])
+                update.div_(denom)
             del denom
 
-            update.view(p.shape).mul_(group['lr'])
+            update.view(p.shape).mul_(step_size)
 
             # Compress updated moments and store new factors
             if beta1 > 0:
@@ -252,20 +264,20 @@ class AdamW_adv(torch.optim.Optimizer):
                 exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=1 - beta3_ema)
                 update = exp_avg + (alpha_t * exp_avg_slow) if beta1 > 0 else grad + (alpha_t * exp_avg_slow)
             else:
-                update = exp_avg if beta1 > 0 else grad
+                update = exp_avg.clone() if beta1 > 0 else grad.clone()
 
             exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
 
             if group['use_atan2']:
                 a = 1.2732395
-                denom = exp_avg_sq.sqrt()
+                denom = (exp_avg_sq.sqrt() / (bias_correction2**0.5))
                 update.atan2_(denom).mul_(a)
             else:
-                denom = exp_avg_sq.sqrt()
-                update.div_(denom.add_(group['eps']))
+                denom = (exp_avg_sq.sqrt() / (bias_correction2**0.5)).add_(group['eps'])
+                update.div_(denom)
             del denom
 
-            update.mul_(group['lr'])
+            update.mul_(step_size)
 
         # Decoupled weight decay
         if group["weight_decay"] != 0:

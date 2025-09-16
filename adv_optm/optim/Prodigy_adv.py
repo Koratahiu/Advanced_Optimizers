@@ -265,7 +265,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=self.d * (1.0 - beta3_ema))
                 update = mt + (alpha_t * mt_slow) if self.beta1 > 0 else grad_reshaped + (alpha_t * mt_slow)
             else:
-                update = mt if self.beta1 > 0 else grad_reshaped
+                update = mt.clone() if self.beta1 > 0 else grad_reshaped.clone()
             del grad_reshaped
 
             if group['use_atan2']:
@@ -311,7 +311,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=self.d * (1.0 - beta3_ema))
                 update = exp_avg + (alpha_t * exp_avg_slow) if self.beta1 > 0 else grad + (alpha_t * exp_avg_slow)
             else:
-                update = exp_avg if self.beta1 > 0 else grad
+                update = exp_avg.clone() if self.beta1 > 0 else grad.clone()
 
             exp_avg_sq.mul_(self.beta2).addcmul_(grad, grad.conj(), value=self.d * self.d * (1.0 - self.beta2))
 
