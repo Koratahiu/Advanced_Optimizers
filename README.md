@@ -85,6 +85,7 @@ This library integrates multiple state-of-the-art optimization techniques valida
 | **OrthoGrad** | Removes gradient component parallel to weights | Full finetuning without weight decay | +33% time overhead, no memory impact | [Grokking at Edge](https://github.com/LucasPrietoAl/grokking-at-the-edge-of-numerical-stability) | All optimizers |
 | **Stochastic Rounding** | Improves precision for BF16 training | BF16 training | Minimal overhead (<5%) | [Revisiting BFloat16 Training](https://arxiv.org/abs/2010.06192) | All optimizers |
 | **atan2** | Robust eps replacement + built-in clipping | Use with Adopt or unstable training | No overhead | [Adam-atan2](https://github.com/lucidrains/adam-atan2-pytorch) | Adam/Adopt/prodigy |
+| **Cautious** | Update only when the direction align with the gradients | should faster the convergence | No overhead | [C-Optim](https://github.com/kyleliang919/C-Optim) | Adam/Adopt/prodigy |
 | **Grams** | Update direction from the gradients | should have a stronger effect than cautious | No overhead | [Grams](https://github.com/Gunale0926/Grams) | Adam/Adopt/prodigy |
 
 ---
@@ -130,10 +131,6 @@ Small Batch Training (SDXL, BS=2, 1.8K steps)
 ### 2. Aggressive Learning Rates
 - Can destabilize factored first moment
 - **Recommendation**: Check Prodigy learning rate as reference for safe LR threshold
-
-### 3. Simplified_AdEMAMix Compatibility
-- Incompatible with: Grams, atan2, normal clipping methods
-- Compatible with: OrthoGrad, Prodigy's D-adaptation.
 
 ---
 
