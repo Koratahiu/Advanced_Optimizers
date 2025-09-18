@@ -52,7 +52,7 @@ This library integrates multiple state-of-the-art optimization techniques valida
 | Optimizer | Description | Best For |
 |-----------|-------------|----------|
 | `Adam_Adv` | Advanced Adam implementation | General purpose |
-| `Adopt_Adv` | Adam with adaptive clipping | Stable training for small batch size regimes |
+| `Adopt_Adv` | Adam-variant with independent beta2 | Stable training for small batch size regimes |
 | `Prodigy_Adv` | Prodigy with D-Adaptation | Adam with automatic LR tuning |
 | `Simplified_AdEMAMix` | Adam variant with accumulator momentum | Small/large batch training when tuned correctly |
 | `Lion_Adv` | Advanced Lion implementation | Memory-constrained environments |
