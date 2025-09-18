@@ -33,6 +33,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             (default: 0.0).
         factored (bool): whether to use the factorization or use the
             uncompressed optimizer. (default: True)
+        d0 (float):
             Initial D estimate for D-adaptation (default 1e-6). Rarely needs changing.
         d_coef (float):
             Coefficient in the expression for the estimate of d (default 1.0).
