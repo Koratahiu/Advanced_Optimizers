@@ -55,7 +55,7 @@ class AdamW_adv(torch.optim.Optimizer):
             the warmup, `alpha` ramps from 0 to its target value. If `None`,
             the scheduler is disabled. (default: None)
         factored (bool): whether to use the factorization or disable it to use
-            the uncompressed optimizer. (default: True)
+            the uncompressed optimizer. (default: False)
     """
 
     def __init__(
@@ -76,7 +76,7 @@ class AdamW_adv(torch.optim.Optimizer):
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
         t_alpha: int | None = None,
-        factored: bool = True,
+        factored: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -216,7 +216,10 @@ class AdamW_adv(torch.optim.Optimizer):
                 del unpacked_sign_slow
 
                 mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=1.0 - beta3_ema)
-                update = mt + (alpha_t * mt_slow) if beta1 > 0 else grad_reshaped + (alpha_t * mt_slow)
+                if beta1 > 0:
+                    update = torch.add(mt, mt_slow, alpha=alpha_t)
+                else:
+                    update = torch.add(grad_reshaped, mt_slow, alpha=alpha_t)
             else:
                 update = mt.clone() if beta1 > 0 else grad_reshaped.clone()
             del grad_reshaped
@@ -262,7 +265,10 @@ class AdamW_adv(torch.optim.Optimizer):
             if self.use_AdEMAMix:
                 exp_avg_slow = state['exp_avg_slow']
                 exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=1 - beta3_ema)
-                update = exp_avg + (alpha_t * exp_avg_slow) if beta1 > 0 else grad + (alpha_t * exp_avg_slow)
+                if beta1 > 0:
+                    update = torch.add(exp_avg, exp_avg_slow, alpha=alpha_t)
+                else:
+                    update = torch.add(grad, exp_avg_slow, alpha=alpha_t)
             else:
                 update = exp_avg.clone() if beta1 > 0 else grad.clone()
 

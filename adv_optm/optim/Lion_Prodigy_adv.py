@@ -33,9 +33,6 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             (default: 0.0).
         factored (bool): whether to use the factorization or use the
             uncompressed optimizer. (default: True)
-        variance_reduction (bool): whether to use the variance reduction technique
-            from "Convergence Analysis of the Lion Optimizer" (arXiv:2508.12327v1). (default: False).
-        d0 (float):
             Initial D estimate for D-adaptation (default 1e-6). Rarely needs changing.
         d_coef (float):
             Coefficient in the expression for the estimate of d (default 1.0).
@@ -66,7 +63,6 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         use_cautious: bool = False,
         clip_threshold: float = 0.0,
         factored: bool = True,
-        variance_reduction: bool = False,
         # prodigy parameters
         beta3: float = None,
         d0: float = 1e-6,
@@ -97,7 +93,6 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         self.stochastic_rounding = stochastic_rounding
         self.use_cautious = use_cautious
         self.factored = factored
-        self.variance_reduction = variance_reduction
         self.fsdp_in_use = fsdp_in_use
         super().__init__(params, defaults)
         # Global state for accumulating metrics across parameter updates within a single step.
@@ -183,12 +178,8 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                 packed_d2 = (d2 + 7) // 8
                 state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
-                if self.variance_reduction:
-                    state['prev_grad'] = torch.zeros((d1, d2), device=p.device, dtype=dtype)
             else: # Fallback to standard Lion
                 state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
-                if self.variance_reduction:
-                    state['prev_grad'] = torch.zeros_like(p, device=p.device, dtype=dtype)
 
         if state['factored']:
             # Factored Path
@@ -215,20 +206,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             update_for_param = signed_update.view(p.shape).mul(self.dlr)
 
             # Update momentum m_t = β2*m_{t-1} + (1-β2)*lr*g_t
-            if self.variance_reduction:
-                if state['step'] == 1:
-                    exp_avg.copy_(grad_reshaped)
-                else:
-                    # Heuristic Prodigy-STORM update
-                    correction = exp_avg.sub(state['prev_grad'])
-                    grad_alpha = self.d * (1 - self.beta2) + self.beta2
-                    exp_avg.copy_(grad_reshaped).mul_(grad_alpha).add_(correction, alpha=self.beta2)
-                    del correction, grad_alpha
-                state['prev_grad'].copy_(grad_reshaped)
-            else:
-                # Standard Prodigy-Lion
-                alpha = self.d * (1 - self.beta2)
-                exp_avg.mul_(self.beta2).add_(grad_reshaped, alpha=alpha)
+            exp_avg.mul_(self.beta2).add_(grad_reshaped, alpha=self.d * (1 - self.beta2))
             del grad_reshaped
 
             # Compress new momentum m_t and store factors
@@ -254,20 +232,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             update_for_param = signed_update.mul(self.dlr)
 
             # Update momentum 
-            if self.variance_reduction:
-                if state['step'] == 1:
-                    exp_avg.copy_(grad)
-                else:
-                    # Heuristic Prodigy-STORM update
-                    correction = exp_avg.sub(state['prev_grad'])
-                    grad_alpha = self.d * (1 - self.beta2) + self.beta2
-                    exp_avg.copy_(grad).mul_(grad_alpha).add_(correction, alpha=self.beta2)
-                    del grad_alpha, correction
-                state['prev_grad'].copy_(grad)
-            else:
-                # Standard Prodigy-Lion
-                alpha = self.d * (1 - self.beta2)
-                exp_avg.mul_(self.beta2).add_(grad, alpha=alpha)
+            exp_avg.mul_(self.beta2).add_(grad, alpha=self.d * (1 - self.beta2))
 
         # --- Accumulate Prodigy stats ---
         d0, safeguard_warmup, slice_p = group['d0'], group['safeguard_warmup'], group['slice_p']
@@ -298,7 +263,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         else:
             p.data.add_(-update_for_param)
 
-            del update_for_param
+        del update_for_param
 
     @torch.no_grad()
     def step(self, closure: Optional[callable] = None):

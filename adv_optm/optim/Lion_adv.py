@@ -33,8 +33,6 @@ class Lion_adv(torch.optim.Optimizer):
             (default: 0.0).
         factored (bool): whether to use the factorization or use the
             uncompressed optimizer. (default: True)
-        variance_reduction (bool): whether to use the variance reduction technique
-            from "Convergence Analysis of the Lion Optimizer" (arXiv:2508.12327v1). (default: False).
     """
 
     def __init__(
@@ -49,7 +47,6 @@ class Lion_adv(torch.optim.Optimizer):
         use_cautious: bool = False,
         clip_threshold: float = 0.0,
         factored: bool = True,
-        variance_reduction: bool = False,
     ):
         if not lr > 0.0:
             raise ValueError(f"Learning rate must be > 0.0, but got {lr}")
@@ -69,7 +66,6 @@ class Lion_adv(torch.optim.Optimizer):
         self.stochastic_rounding = stochastic_rounding
         self.use_cautious = use_cautious
         self.factored = factored
-        self.variance_reduction = variance_reduction
         super().__init__(params, defaults)
 
     @property
@@ -122,12 +118,8 @@ class Lion_adv(torch.optim.Optimizer):
                 state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                 packed_d2 = (d2 + 7) // 8
                 state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
-                if self.variance_reduction:
-                    state['prev_grad'] = torch.zeros((d1, d2), device=p.device, dtype=dtype)
             else: # Fallback to standard Lion
                 state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
-                if self.variance_reduction:
-                    state['prev_grad'] = torch.zeros_like(p, device=p.device, dtype=dtype)
 
         state['step'] += 1
         beta1, beta2 = group["betas"]
@@ -157,21 +149,9 @@ class Lion_adv(torch.optim.Optimizer):
             # Parameter update
             update_for_param = signed_update.view(p.shape).mul_(lr)
 
-            # Update momentum
-            if self.variance_reduction:
-                if state['step'] == 1:
-                    exp_avg.copy_(grad_reshaped)
-                else:
-                    # Use the simplified STORM update: m_t = g_t + β₂ * (m_{t-1} - g_{t-1})
-                    correction = exp_avg.sub(state['prev_grad'])
-                    # Calculate the new momentum and store it back into exp_avg
-                    exp_avg.copy_(grad_reshaped).add_(correction, alpha=beta2)
-                    del correction
-                # Update prev_grad for the next iteration
-                state['prev_grad'].copy_(grad_reshaped)
-            else:
-                # Standard Lion momentum update
-                exp_avg.mul_(beta2).add_(grad_reshaped, alpha=1-beta2)
+            # Standard Lion momentum update
+            exp_avg.mul_(beta2).add_(grad_reshaped, alpha=1-beta2)
+            del grad_reshaped
 
             # Compress new momentum m_t and store factors
             state['sign'] = _pack_bools(exp_avg > 0)
@@ -195,21 +175,8 @@ class Lion_adv(torch.optim.Optimizer):
 
             update_for_param = signed_update.mul_(lr)
 
-            # Update momentum 
-            if self.variance_reduction:
-                if state['step'] == 1:
-                    exp_avg.copy_(grad)
-                else:
-                    # Use the simplified STORM update: m_t = g_t + β₂ * (m_{t-1} - g_{t-1})
-                    correction = exp_avg.sub(state['prev_grad'])
-                    # Calculate the new momentum and store it back into exp_avg
-                    exp_avg.copy_(grad).add_(correction, alpha=beta2)
-                    del correction
-                # Update prev_grad for the next iteration
-                state['prev_grad'].copy_(grad)
-            else:
-                # Standard Lion momentum update
-                exp_avg.mul_(beta2).add_(grad, alpha=1-beta2)
+            # Standard Lion momentum update
+            exp_avg.mul_(beta2).add_(grad, alpha=1-beta2)
 
         if group["weight_decay"] != 0:
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
@@ -225,7 +192,7 @@ class Lion_adv(torch.optim.Optimizer):
         else:
             p.data.add_(-update_for_param)
 
-            del update_for_param
+        del update_for_param
 
     @torch.no_grad()
     def step(self, closure: Optional[callable] = None):

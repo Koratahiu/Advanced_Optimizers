@@ -63,7 +63,7 @@ class Adopt_adv(torch.optim.Optimizer):
             the scheduler is disabled and the full `alpha` value is used from
             the start. (default: None)
         factored (bool): whether to use the factorization or disable it to use
-            the uncompressed optimizer. (default: True)
+            the uncompressed optimizer. (default: False)
     """
 
     def __init__(
@@ -84,7 +84,7 @@ class Adopt_adv(torch.optim.Optimizer):
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
         t_alpha: int | None = None,
-        factored: bool = True,
+        factored: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -235,7 +235,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
             if self.use_AdEMAMix:
                 mt_slow.mul_(beta3_ema).add_(normalized_grad, alpha=1.0 - beta3_ema)
-                update = mt + (alpha_t * mt_slow)
+                update = torch.add(mt, m_slow, alpha=alpha_t)
                 update = update.view(p.shape)
             else:
                 update = mt.view(p.shape)
@@ -295,9 +295,9 @@ class Adopt_adv(torch.optim.Optimizer):
 
             if self.use_AdEMAMix:
                 m_slow.mul_(beta3_ema).add_(normalized_grad, alpha=1.0 - beta3_ema)
-                update = m + (alpha_t * m_slow)
+                update = torch.add(m, m_slow, alpha=alpha_t)
             else:
-                update = m
+                update = m.clone()
 
             if self.use_atan2:
                 update.mul_(group['lr'] * 1.2732395447351628)

@@ -64,7 +64,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             more responsive. For large batch sizes, use low values (e.g., 0-1) for
             stability. (default: 100.0)
         factored (bool): whether to use the factorization or disable it to use
-            the uncompressed optimizer. (default: True)
+            the uncompressed optimizer. (default: False)
         d0 (float):
             Initial D estimate for D-adaptation (default 1e-6). Rarely needs changing.
         d_coef (float):
@@ -82,6 +82,9 @@ class Prodigy_adv(torch.optim.Optimizer):
         slice_p (int): Reduce memory usage by calculating LR adaptation statistics on only every 
             pth entry of each tensor. For values greater than 1 this an an approximation to standard 
             Prodigy. Values ~11 are reasonable (default 11).
+        prodigy_steps (int): If greater than zero, disable Prodigy's stepsize adjustments
+            after the specified optimiser step and release all state memory required by Prodigy
+            (default: 0).
     """
 
     def __init__(
@@ -103,7 +106,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         t_alpha: int | None = None,
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
-        factored: bool = True,
+        factored: bool = False,
         # prodigy parameters
         beta3: float = None,
         d0: float = 1e-6,
@@ -112,6 +115,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         safeguard_warmup: bool = False,
         fsdp_in_use: bool = False,
         slice_p: int = 11,
+        prodigy_steps: int = 0,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -121,6 +125,8 @@ class Prodigy_adv(torch.optim.Optimizer):
             raise ValueError(f"Epsilon should be >= 0.0. Got {eps}")
         if not (weight_decay >= 0.0):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
+        if not (prodigy_steps >= 0):
+            raise ValueError(f"prodigy_steps should be >= 0. Got {prodigy_steps}")
         if betas[0] == 0.0 and Simplified_AdEMAMix:
             raise ValueError(f"Beta 1 cannot be 0.0 when using Simplified_AdEMAMix. Got {betas[0]}")
         if use_AdEMAMix and Simplified_AdEMAMix:
@@ -132,6 +138,9 @@ class Prodigy_adv(torch.optim.Optimizer):
         if use_atan2 and Simplified_AdEMAMix:
             print("Warning: use_atan2 is incompatible with Simplified_AdEMAMix. Disabling use_atan2.")
             use_atan2 = False
+        if Simplified_AdEMAMix and alpha_grad > 0:
+            # scales d_coef by alpha_grad, this force prodigy to behave well with Simplified_AdEMAMix
+            d_coef = d_coef/alpha_grad
 
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
@@ -140,7 +149,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             "beta3_ema": beta3_ema, "alpha": alpha, "t_alpha": t_alpha,
             "beta3": beta3, "d": d0, "d0": d0, "d_max": d0, "d_numerator": 0.0, "d_coef": d_coef,
             "growth_rate": growth_rate, "safeguard_warmup": safeguard_warmup, "k": 0, "slice_p": slice_p,
-            "fsdp_in_use": fsdp_in_use,
+            "fsdp_in_use": fsdp_in_use, "prodigy_steps": prodigy_steps,
             "alpha_grad": alpha_grad, 
         }
         self.stochastic_rounding = stochastic_rounding
@@ -293,7 +302,10 @@ class Prodigy_adv(torch.optim.Optimizer):
                 torch.where(unpacked_sign_slow, mt_slow, -mt_slow, out=mt_slow)
                 del unpacked_sign_slow
                 mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=self.d * (1.0 - beta3_ema))
-                update = mt + (alpha_t * mt_slow) if self.beta1 > 0 else grad_reshaped + (alpha_t * mt_slow)
+                if self.beta1 > 0:
+                    update = torch.add(mt, mt_slow, alpha=alpha_t)
+                else:
+                    update = torch.add(grad_reshaped, mt_slow, alpha=alpha_t)
             elif self.Simplified_AdEMAMix:
                 update = torch.add(mt, grad_reshaped, alpha=alpha_grad * self.d)
             else:
@@ -344,7 +356,10 @@ class Prodigy_adv(torch.optim.Optimizer):
             if self.use_AdEMAMix:
                 exp_avg_slow = state['exp_avg_slow']
                 exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=self.d * (1.0 - beta3_ema))
-                update = exp_avg + (alpha_t * exp_avg_slow) if self.beta1 > 0 else grad + (alpha_t * exp_avg_slow)
+                if self.beta1 > 0:
+                    update = torch.add(exp_avg, exp_avg_slow, alpha=alpha_t)
+                else:
+                    update = torch.add(grad, exp_avg_slow, alpha=alpha_t)
             elif self.Simplified_AdEMAMix:
                 update = torch.add(exp_avg, grad, alpha=alpha_grad * self.d)
             else:
@@ -364,19 +379,27 @@ class Prodigy_adv(torch.optim.Optimizer):
             update.mul_(self.dlr)
 
         # --- Accumulate Prodigy stats ---
-        d0, safeguard_warmup, slice_p = group['d0'], group['safeguard_warmup'], group['slice_p']
-        s, p0 = state['s'], state['p0']
-        grad_flat = grad.flatten().float()
-        p_flat = p.data.flatten().float()
-        p0 = p0.float()
+        prodigy_steps = group['prodigy_steps']
+        if prodigy_steps <= 0 or group['k'] < prodigy_steps:
+            d0, safeguard_warmup, slice_p = group['d0'], group['safeguard_warmup'], group['slice_p']
+            s, p0 = state['s'], state['p0']
+            grad_flat = grad.flatten().float()
+            p_flat = p.data.flatten().float()
+            p0 = p0.float()
 
-        self.d_numerator += (self.d / d0) * self.dlr * torch.dot(grad_flat[::slice_p], p0.data - p_flat[::slice_p]).item()
+            self.d_numerator += (self.d / d0) * self.dlr * torch.dot(grad_flat[::slice_p], p0.data - p_flat[::slice_p]).item()
 
-        alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
-        s.mul_(self.beta3).add_(grad_flat[::slice_p], alpha=alpha)
-        self.d_denom += s.abs().sum().item()
+            alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
+            s.mul_(self.beta3).add_(grad_flat[::slice_p], alpha=alpha)
+            self.d_denom += s.abs().sum().item()
 
-        del s, p0, grad_flat, p_flat, alpha
+            del s, p0, grad_flat, p_flat, alpha
+        else:
+            # Free memory if prodigy_steps is reached
+            if 's' in state:
+                del state['s']
+            if 'p0' in state:
+                del state['p0']
 
         # Decoupled weight decay
         if group["weight_decay"] != 0:
@@ -413,29 +436,37 @@ class Prodigy_adv(torch.optim.Optimizer):
     def calculate_d(self):
         """Calculates the new `d` based on the accumulated stats."""
         g_group = self.param_groups[0]
-        d_max, d_coef, growth_rate = g_group['d_max'], g_group['d_coef'], g_group['growth_rate']
         
-        if self.fsdp_in_use and dist.is_available() and dist.is_initialized():
-            # Use the device of the first parameter to avoid hardcoding '.cuda()'
-            device = self.param_groups[0]['params'][0].device
-            dist_tensor = torch.tensor([self.d_numerator, self.d_denom], device=device)
-            dist.all_reduce(dist_tensor, op=dist.ReduceOp.SUM)
-            global_d_numerator = dist_tensor[0].item()
-            global_d_denom = dist_tensor[1].item()
-        else:
-            global_d_numerator = self.d_numerator
-            global_d_denom = self.d_denom
+        # Only perform d-adaptation if prodigy_steps has not been reached
+        prodigy_active = not (g_group.get('prodigy_steps', 0) > 0 and g_group['k'] >= g_group['prodigy_steps'])
 
-        d_hat = self.d
-        if global_d_denom > 0:
-            d_hat = d_coef * global_d_numerator / global_d_denom
-            if self.d == g_group['d0']:
-                self.d = max(self.d, d_hat)
-            d_max = max(d_max, d_hat)
-            self.d = min(d_max, self.d * growth_rate)
+        if prodigy_active:
+            d_max, d_coef, growth_rate = g_group['d_max'], g_group['d_coef'], g_group['growth_rate']
+            
+            if self.fsdp_in_use and dist.is_available() and dist.is_initialized():
+                # Use the device of the first parameter to avoid hardcoding '.cuda()'
+                device = self.param_groups[0]['params'][0].device
+                dist_tensor = torch.tensor([self.d_numerator, self.d_denom], device=device)
+                dist.all_reduce(dist_tensor, op=dist.ReduceOp.SUM)
+                global_d_numerator = dist_tensor[0].item()
+                global_d_denom = dist_tensor[1].item()
+            else:
+                global_d_numerator = self.d_numerator
+                global_d_denom = self.d_denom
 
+            d_hat = self.d
+            if global_d_denom > 0:
+                d_hat = d_coef * global_d_numerator / global_d_denom
+                if self.d == g_group['d0']:
+                    self.d = max(self.d, d_hat)
+                d_max = max(d_max, d_hat)
+                self.d = min(d_max, self.d * growth_rate)
+
+            for group in self.param_groups:
+                group['d_numerator'] = global_d_numerator
+                group['d'] = self.d
+                group['d_max'] = d_max
+        
+        # Increment step counter for all groups, regardless of whether d was updated
         for group in self.param_groups:
-            group['d_numerator'] = global_d_numerator
-            group['d'] = self.d
-            group['d_max'] = d_max
             group['k'] += 1
