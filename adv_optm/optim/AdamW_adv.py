@@ -86,6 +86,9 @@ class AdamW_adv(torch.optim.Optimizer):
             raise ValueError(f"Epsilon should be >= 0.0. Got {eps}")
         if not (weight_decay >= 0.0):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
+        if use_cautious and use_grams:
+            print("Warning: use_cautious is incompatible with use_grams, Disabling use_cautious.")
+            use_cautious = False
 
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,

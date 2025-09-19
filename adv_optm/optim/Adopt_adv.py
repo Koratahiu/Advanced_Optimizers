@@ -62,6 +62,16 @@ class Adopt_adv(torch.optim.Optimizer):
             the warmup, `alpha` ramps from 0 to its target value. If `None`,
             the scheduler is disabled and the full `alpha` value is used from
             the start. (default: None)
+        Simplified_AdEMAMix (bool): whether to use the Simplified AdEMAMix update rule.
+            This changes the EMA to accumulator and the update numerator to `alpha_grad * grad + mt`, which can be
+            more responsive, especially for small batch sizes. Enabling this will
+            automatically disable `use_AdEMAMix`, `use_cautious`, `use_grams`,
+            and `use_atan2`. (default: False)
+        alpha_grad (float): Mixing coefficient for the Simplified AdEMAMix update rule
+            (only used when `Simplified_AdEMAMix` is `True`). Controls the weight of the
+            current gradient. For small batch sizes, use high values (e.g., 10-100) to be
+            more responsive. For large batch sizes, use low values (e.g., 0-1) for
+            stability. (default: 100.0)
         factored (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
     """
@@ -77,13 +87,15 @@ class Adopt_adv(torch.optim.Optimizer):
         vector_reshape: bool = True,
         stochastic_rounding: bool = True,
         use_atan2: bool = False,
-        use_cautious: bool = True,
+        use_cautious: bool = False,
         use_grams: bool = False,
         use_orthograd: bool = False,
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
         t_alpha: int | None = None,
+        Simplified_AdEMAMix: bool = False,
+        alpha_grad: float = 100.0,
         factored: bool = False,
     ):
         if not (lr >= 0.0):
@@ -94,19 +106,34 @@ class Adopt_adv(torch.optim.Optimizer):
             raise ValueError(f"Epsilon should be >= 0.0. Got {eps}")
         if not (weight_decay >= 0.0):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
+        if use_cautious and use_grams:
+            print("Warning: use_cautious is incompatible with use_grams, Disabling use_cautious.")
+            use_cautious = False
+        if betas[0] == 0.0 and Simplified_AdEMAMix:
+            raise ValueError(f"Beta1 cannot be 0.0 when using Simplified_AdEMAMix. Got {betas[0]}")
+        if use_AdEMAMix and Simplified_AdEMAMix:
+            print("Warning: use_AdEMAMix is incompatible with Simplified_AdEMAMix, Disabling use_AdEMAMix.")
+        if use_grams and Simplified_AdEMAMix:
+            print("Warning: use_grams is incompatible with Simplified_AdEMAMix, Disabling use_grams.")
+        if use_cautious and Simplified_AdEMAMix:
+            print("Warning: use_cautious is incompatible with Simplified_AdEMAMix, Disabling use_cautious.")
+        if use_atan2 and Simplified_AdEMAMix:
+            print("Warning: use_atan2 is incompatible with Simplified_AdEMAMix. Disabling use_atan2.")
+            use_atan2 = False
 
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "vector_reshape": vector_reshape, "beta3_ema": beta3_ema, "alpha": alpha,
-            "t_alpha": t_alpha,
+            "t_alpha": t_alpha, "alpha_grad": alpha_grad, 
         }
         self.clip_lambda = clip_lambda
         self.stochastic_rounding = stochastic_rounding
-        self.use_atan2 = use_atan2
-        self.use_cautious = use_cautious
-        self.use_grams = use_grams
+        self.use_atan2 = use_atan2 and not Simplified_AdEMAMix
+        self.use_cautious = use_cautious and not Simplified_AdEMAMix
+        self.use_grams = use_grams and not Simplified_AdEMAMix
         self.use_orthograd = use_orthograd
-        self.use_AdEMAMix = use_AdEMAMix
+        self.use_AdEMAMix = use_AdEMAMix and not Simplified_AdEMAMix
+        self.Simplified_AdEMAMix = Simplified_AdEMAMix
         self.factored = factored
         super().__init__(params, defaults)
 
@@ -185,6 +212,8 @@ class Adopt_adv(torch.optim.Optimizer):
             alpha_t = alpha
             if t_alpha is not None and t_alpha > 0 and current_step < t_alpha:
                 alpha_t = min(current_step * alpha / t_alpha, alpha)
+        if self.Simplified_AdEMAMix:
+            alpha_grad = group["alpha_grad"]
 
         if state['factored']:
             d1, d2 = state['effective_shape']
@@ -224,7 +253,10 @@ class Adopt_adv(torch.optim.Optimizer):
             del denom
 
             # ADOPT Step B: Update momentum m_t using normalized gradient
-            mt.mul_(beta1).add_(normalized_grad, alpha=1.0 - beta1)
+            if self.Simplified_AdEMAMix:
+                mt.mul_(beta1).add_(normalized_grad, alpha=1.0)
+            else:
+                mt.mul_(beta1).add_(normalized_grad, alpha=1.0 - beta1)
             if self.use_grams:
                 mt = grad_reshaped.sign() * mt.abs()
             elif self.use_cautious:
@@ -237,6 +269,8 @@ class Adopt_adv(torch.optim.Optimizer):
                 mt_slow.mul_(beta3_ema).add_(normalized_grad, alpha=1.0 - beta3_ema)
                 update = torch.add(mt, m_slow, alpha=alpha_t)
                 update = update.view(p.shape)
+            elif self.Simplified_AdEMAMix:
+                update = torch.add(mt, grad_reshaped, alpha=alpha_grad)
             else:
                 update = mt.view(p.shape)
 
@@ -283,7 +317,10 @@ class Adopt_adv(torch.optim.Optimizer):
             del denom
 
             # ADOPT Step B: Update momentum m_t
-            m.mul_(beta1).add_(normalized_grad, alpha=1.0 - beta1)
+            if self.Simplified_AdEMAMix:
+                m.mul_(beta1).add_(normalized_grad, alpha=1.0)
+            else:
+                m.mul_(beta1).add_(normalized_grad, alpha=1.0 - beta1)
 
             if self.use_grams:
                 m = grad.sign() * m.abs()
@@ -296,6 +333,8 @@ class Adopt_adv(torch.optim.Optimizer):
             if self.use_AdEMAMix:
                 m_slow.mul_(beta3_ema).add_(normalized_grad, alpha=1.0 - beta3_ema)
                 update = torch.add(m, m_slow, alpha=alpha_t)
+            elif self.Simplified_AdEMAMix:
+                update = torch.add(m, grad, alpha=alpha_grad)
             else:
                 update = m.clone()
 
