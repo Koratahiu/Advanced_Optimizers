@@ -141,6 +141,9 @@ class Prodigy_adv(torch.optim.Optimizer):
         if use_atan2 and Simplified_AdEMAMix:
             print("Warning: use_atan2 is incompatible with Simplified_AdEMAMix. Disabling use_atan2.")
             use_atan2 = False
+        if Simplified_AdEMAMix and alpha_grad > 0:
+            # scales d_coef by alpha_grad, this force prodigy to behave well with Simplified_AdEMAMix
+            d_coef = d_coef/alpha_grad
 
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
@@ -456,12 +459,6 @@ class Prodigy_adv(torch.optim.Optimizer):
 
             d_hat = self.d
             if global_d_denom > 0:
-                if self.Simplified_AdEMAMix and g_group['alpha_grad'] > 0:
-                    # A simple and effective hack to make prodigy compatible with Simplified_AdEMAMix large step sizes
-                    # by diving by alpha_grad we make sure that d_numerator that was influenced by (alpha_grad * grad)
-                    # are now normalized by /alpha_grad. this is a heuristic way since the update is also influenced by
-                    # the increasing and decaying accumulator but it's effective and it worked for me (for Lora/Finetune).
-                    global_d_numerator /= g_group['alpha_grad']
                 d_hat = d_coef * global_d_numerator / global_d_denom
                 if self.d == g_group['d0']:
                     self.d = max(self.d, d_hat)
