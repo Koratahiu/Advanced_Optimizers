@@ -36,9 +36,9 @@ class Adopt_adv(torch.optim.Optimizer):
             rounding for BF16 parameter updates (default: True).
         use_atan2 (bool): whether to use an atan2-based normalization, which can
             improve stability by removing the need for `eps`. (default: False)
-        use_cautious (bool):  whether to use cautious masking to align the gradient's
+        cautious_mask (bool):  whether to use cautious masking to align the gradient's
             direction with the first moment's.  (default: False)
-        use_grams (bool): whether to combine the gradient's direction with the
+        grams_moment (bool): whether to combine the gradient's direction with the
             first moment's magnitude (default: False).
         use_orthograd (bool): whether to use OrthoGrad. (default: False)
         use_AdEMAMix (bool): whether to enable the AdEMAMix feature. This adds
@@ -65,14 +65,14 @@ class Adopt_adv(torch.optim.Optimizer):
         Simplified_AdEMAMix (bool): whether to use the Simplified AdEMAMix update rule.
             This changes the EMA to accumulator and the update numerator to `alpha_grad * grad + mt`, which can be
             more responsive, especially for small batch sizes. Enabling this will
-            automatically disable `use_AdEMAMix`, `use_cautious`, `use_grams`,
+            automatically disable `use_AdEMAMix`, `cautious_mask`, `grams_moment`,
             and `use_atan2`. (default: False)
         alpha_grad (float): Mixing coefficient for the Simplified AdEMAMix update rule
             (only used when `Simplified_AdEMAMix` is `True`). Controls the weight of the
             current gradient. For small batch sizes, use high values (e.g., 10-100) to be
             more responsive. For large batch sizes, use low values (e.g., 0-1) for
             stability. (default: 100.0)
-        factored (bool): whether to use the factorization or disable it to use
+        nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
     """
 
@@ -87,8 +87,8 @@ class Adopt_adv(torch.optim.Optimizer):
         vector_reshape: bool = True,
         stochastic_rounding: bool = True,
         use_atan2: bool = False,
-        use_cautious: bool = False,
-        use_grams: bool = False,
+        cautious_mask: bool = False,
+        grams_moment: bool = False,
         use_orthograd: bool = False,
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
@@ -96,7 +96,7 @@ class Adopt_adv(torch.optim.Optimizer):
         t_alpha: int | None = None,
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
-        factored: bool = False,
+        nnmf_factor: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -106,17 +106,17 @@ class Adopt_adv(torch.optim.Optimizer):
             raise ValueError(f"Epsilon should be >= 0.0. Got {eps}")
         if not (weight_decay >= 0.0):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
-        if use_cautious and use_grams:
-            print("Warning: use_cautious is incompatible with use_grams, Disabling use_cautious.")
-            use_cautious = False
+        if cautious_mask and grams_moment:
+            print("Warning: cautious is incompatible with grams, Disabling cautious.")
+            cautious_mask = False
         if betas[0] == 0.0 and Simplified_AdEMAMix:
             raise ValueError(f"Beta1 cannot be 0.0 when using Simplified_AdEMAMix. Got {betas[0]}")
         if use_AdEMAMix and Simplified_AdEMAMix:
             print("Warning: use_AdEMAMix is incompatible with Simplified_AdEMAMix, Disabling use_AdEMAMix.")
-        if use_grams and Simplified_AdEMAMix:
-            print("Warning: use_grams is incompatible with Simplified_AdEMAMix, Disabling use_grams.")
-        if use_cautious and Simplified_AdEMAMix:
-            print("Warning: use_cautious is incompatible with Simplified_AdEMAMix, Disabling use_cautious.")
+        if grams_moment and Simplified_AdEMAMix:
+            print("Warning: grams is incompatible with Simplified_AdEMAMix, Disabling grams.")
+        if cautious_mask and Simplified_AdEMAMix:
+            print("Warning: cautious is incompatible with Simplified_AdEMAMix, Disabling cautious.")
         if use_atan2 and Simplified_AdEMAMix:
             print("Warning: use_atan2 is incompatible with Simplified_AdEMAMix. Disabling use_atan2.")
             use_atan2 = False
@@ -129,12 +129,12 @@ class Adopt_adv(torch.optim.Optimizer):
         self.clip_lambda = clip_lambda
         self.stochastic_rounding = stochastic_rounding
         self.use_atan2 = use_atan2 and not Simplified_AdEMAMix
-        self.use_cautious = use_cautious and not Simplified_AdEMAMix
-        self.use_grams = use_grams and not Simplified_AdEMAMix
+        self.cautious_mask = cautious_mask and not Simplified_AdEMAMix
+        self.grams_moment = grams_moment and not Simplified_AdEMAMix
         self.use_orthograd = use_orthograd
         self.use_AdEMAMix = use_AdEMAMix and not Simplified_AdEMAMix
         self.Simplified_AdEMAMix = Simplified_AdEMAMix
-        self.factored = factored
+        self.factored = nnmf_factor
         super().__init__(params, defaults)
 
     @property
@@ -176,7 +176,7 @@ class Adopt_adv(torch.optim.Optimizer):
                 # m_0 = 0
                 state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
                 state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                if not self.use_grams:
+                if not self.grams_moment:
                     packed_d2 = (d2 + 7) // 8
                     state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
                 if self.use_AdEMAMix:
@@ -220,7 +220,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
             # Reconstruct m_{t-1}
             mt = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
-            if not self.use_grams:
+            if not self.grams_moment:
                 if state['sign'].dtype != torch.uint8:
                     state['sign'] = state['sign'].to(torch.uint8)
                 unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
@@ -257,9 +257,9 @@ class Adopt_adv(torch.optim.Optimizer):
                 mt.mul_(beta1).add_(normalized_grad, alpha=1.0)
             else:
                 mt.mul_(beta1).add_(normalized_grad, alpha=1.0 - beta1)
-            if self.use_grams:
+            if self.grams_moment:
                 mt = grad_reshaped.sign() * mt.abs()
-            elif self.use_cautious:
+            elif self.cautious_mask:
                 mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
                 mask.div_(mask.mean().clamp_(min=1e-3))
                 mt.mul_(mask)
@@ -284,7 +284,7 @@ class Adopt_adv(torch.optim.Optimizer):
             del grad_reshaped
 
             # Compress and store new factors
-            if not self.use_grams:
+            if not self.grams_moment:
                 state['sign'] = _pack_bools(mt > 0)
             _nnmf(mt.abs(), out=(state['mu_m_nmf'], state['mv_m_nmf']))
             del mt
@@ -322,9 +322,9 @@ class Adopt_adv(torch.optim.Optimizer):
             else:
                 m.mul_(beta1).add_(normalized_grad, alpha=1.0 - beta1)
 
-            if self.use_grams:
+            if self.grams_moment:
                 m = grad.sign() * m.abs()
-            elif self.use_cautious:
+            elif self.cautious_mask:
                 mask = (m * grad > 0).to(grad.dtype)
                 mask.div_(mask.mean().clamp_(min=1e-3))
                 m.mul_(mask)

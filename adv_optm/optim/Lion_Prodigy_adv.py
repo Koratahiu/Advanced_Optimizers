@@ -26,12 +26,12 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             matrices to apply low-rank compression (default: True).
         stochastic_rounding (bool, optional): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
-        use_cautious (bool): whether to use the cautious masking technique. (default: False).
+        cautious_mask (bool): whether to use the cautious masking technique. (default: False).
         clip_threshold (float, optional): whether to clip the gradients norm
             per-parameter as proposed in the paper `Lions and Muons: Optimization via
             Stochastic Frank-Wolfe` (https://arxiv.org/abs/2506.04192) to make Lion more stable
             (default: 0.0).
-        factored (bool): whether to use the factorization or use the
+        nnmf_factor (bool): whether to use the factorization or use the
             uncompressed optimizer. (default: True)
         d0 (float):
             Initial D estimate for D-adaptation (default 1e-6). Rarely needs changing.
@@ -61,9 +61,9 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         vector_reshape: bool = True,
         stochastic_rounding: bool = True,
         use_orthograd: bool = False,
-        use_cautious: bool = False,
+        cautious_mask: bool = False,
         clip_threshold: float = 0.0,
-        factored: bool = True,
+        nnmf_factor: bool = True,
         # prodigy parameters
         beta3: float = None,
         d0: float = 1e-6,
@@ -92,8 +92,8 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             fsdp_in_use=fsdp_in_use,
         )
         self.stochastic_rounding = stochastic_rounding
-        self.use_cautious = use_cautious
-        self.factored = factored
+        self.cautious_mask = cautious_mask
+        self.factored = nnmf_factor
         self.fsdp_in_use = fsdp_in_use
         super().__init__(params, defaults)
         # Global state for accumulating metrics across parameter updates within a single step.
@@ -197,7 +197,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             # Compute update term c_t = β1*m_{t-1} + (1-β1)*g_t
             signed_update = exp_avg.clone().mul_(self.beta1).add_(grad_reshaped, alpha=(1-self.beta1)).sign_()
 
-            if self.use_cautious:
+            if self.cautious_mask:
                 mask = (signed_update * grad_reshaped > 0).to(grad_reshaped.dtype)
                 mask.div_(mask.mean().clamp_(min=1e-3))
                 signed_update.mul_(mask)
@@ -224,7 +224,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 exp_avg = exp_avg.float()
             signed_update = exp_avg.clone().mul_(self.beta1).add_(grad, alpha=(1-self.beta1)).sign_()
 
-            if self.use_cautious:
+            if self.cautious_mask:
                 mask = (signed_update * grad > 0).to(grad.dtype)
                 mask.div_(mask.mean().clamp_(min=1e-3))
                 signed_update.mul_(mask)

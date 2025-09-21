@@ -47,7 +47,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         stochastic_rounding (bool): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
         use_orthograd (bool): whether to use OrthoGrad. (default: False)
-        factored (bool): whether to use the factorization or disable it to use
+        nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
     """
 
@@ -65,7 +65,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         vector_reshape: bool = True,
         stochastic_rounding: bool = True,
         use_orthograd: bool = False,
-        factored: bool = False,
+        nnmf_factor: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -85,7 +85,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             "use_orthograd": use_orthograd, "use_bias_correction": use_bias_correction,
         }
         self.stochastic_rounding = stochastic_rounding
-        self.factored = factored
+        self.factored = nnmf_factor
         super().__init__(params, defaults)
 
     @property

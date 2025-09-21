@@ -29,8 +29,8 @@ class Prodigy_adv(torch.optim.Optimizer):
         stochastic_rounding (bool): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
         use_atan2 (bool): whether to use the atan2 update rule. (default: False)
-        use_grams (bool): whether to use Grams-style updates. (default: False)
-        use_cautious (bool):  whether to use cautious masking to align the gradient's
+        grams_moment (bool): whether to use Grams-style updates. (default: False)
+        cautious_mask (bool):  whether to use cautious masking to align the gradient's
             direction with the first moment's.  (default: False)
         use_orthograd (bool): whether to use OrthoGrad.  (default: False)
         use_AdEMAMix (bool): whether to enable the AdEMAMix feature. This adds
@@ -56,14 +56,14 @@ class Prodigy_adv(torch.optim.Optimizer):
         Simplified_AdEMAMix (bool): whether to use the Simplified AdEMAMix update rule.
             This changes the EMA to accumulator and the update numerator to `alpha_grad * grad + mt`, which can be
             more responsive, especially for small batch sizes. Enabling this will
-            automatically disable `use_AdEMAMix`, `use_cautious`, `use_grams`,
+            automatically disable `use_AdEMAMix`, `cautious_mask`, `grams_moment`,
             and `use_atan2`. (default: False)
         alpha_grad (float): Mixing coefficient for the Simplified AdEMAMix update rule
             (only used when `Simplified_AdEMAMix` is `True`). Controls the weight of the
             current gradient. For small batch sizes, use high values (e.g., 10-100) to be
             more responsive. For large batch sizes, use low values (e.g., 0-1) for
             stability. (default: 100.0)
-        factored (bool): whether to use the factorization or disable it to use
+        nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
         d0 (float):
             Initial D estimate for D-adaptation (default 1e-6). Rarely needs changing.
@@ -97,8 +97,8 @@ class Prodigy_adv(torch.optim.Optimizer):
         vector_reshape: bool = True,
         stochastic_rounding: bool = True,
         use_atan2: bool = False,
-        use_cautious: bool = False,
-        use_grams: bool = False,
+        cautious_mask: bool = False,
+        grams_moment: bool = False,
         use_orthograd: bool = False,
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
@@ -106,7 +106,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         t_alpha: int | None = None,
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
-        factored: bool = False,
+        nnmf_factor: bool = False,
         # prodigy parameters
         beta3: float = None,
         d0: float = 1e-6,
@@ -127,17 +127,17 @@ class Prodigy_adv(torch.optim.Optimizer):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
         if not (prodigy_steps >= 0):
             raise ValueError(f"prodigy_steps should be >= 0. Got {prodigy_steps}")
-        if use_cautious and use_grams:
-            print("Warning: use_cautious is incompatible with use_grams, Disabling use_cautious.")
-            use_cautious = False
+        if cautious_mask and grams_moment:
+            print("Warning: cautious is incompatible with grams, Disabling cautious.")
+            cautious_mask = False
         if betas[0] == 0.0 and Simplified_AdEMAMix:
             raise ValueError(f"Beta1 cannot be 0.0 when using Simplified_AdEMAMix. Got {betas[0]}")
         if use_AdEMAMix and Simplified_AdEMAMix:
             print("Warning: use_AdEMAMix is incompatible with Simplified_AdEMAMix, Disabling use_AdEMAMix.")
-        if use_grams and Simplified_AdEMAMix:
-            print("Warning: use_grams is incompatible with Simplified_AdEMAMix, Disabling use_grams.")
-        if use_cautious and Simplified_AdEMAMix:
-            print("Warning: use_cautious is incompatible with Simplified_AdEMAMix, Disabling use_cautious.")
+        if grams_moment and Simplified_AdEMAMix:
+            print("Warning: grams is incompatible with Simplified_AdEMAMix, Disabling grams.")
+        if cautious_mask and Simplified_AdEMAMix:
+            print("Warning: cautious is incompatible with Simplified_AdEMAMix, Disabling cautious.")
         if use_atan2 and Simplified_AdEMAMix:
             print("Warning: use_atan2 is incompatible with Simplified_AdEMAMix. Disabling use_atan2.")
             use_atan2 = False
@@ -156,11 +156,11 @@ class Prodigy_adv(torch.optim.Optimizer):
             "alpha_grad": alpha_grad, 
         }
         self.stochastic_rounding = stochastic_rounding
-        self.use_cautious = use_cautious and not Simplified_AdEMAMix
-        self.use_grams = use_grams and not Simplified_AdEMAMix
+        self.cautious_mask = cautious_mask and not Simplified_AdEMAMix
+        self.grams_moment = grams_moment and not Simplified_AdEMAMix
         self.use_AdEMAMix = use_AdEMAMix and not Simplified_AdEMAMix
         self.Simplified_AdEMAMix = Simplified_AdEMAMix
-        self.factored = factored
+        self.factored = nnmf_factor
         self.fsdp_in_use = fsdp_in_use
         super().__init__(params, defaults)
         self.init_step()
@@ -234,7 +234,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 if self.beta1 > 0:
                     state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
                     state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
-                    if not self.use_grams:
+                    if not self.grams_moment:
                         packed_d2 = (d2 + 7) // 8
                         state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
                 if self.use_AdEMAMix:
@@ -277,7 +277,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             # Reconstruct momentum from previous step's factors
             if self.beta1 > 0:
                 mt = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
-                if not self.use_grams:
+                if not self.grams_moment:
                     unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
                     torch.where(unpacked_sign, mt, -mt, out=mt)
                     del unpacked_sign
@@ -286,9 +286,9 @@ class Prodigy_adv(torch.optim.Optimizer):
                     mt.mul_(self.beta1).add_(grad_reshaped, alpha=self.d)
                 else:
                     mt.mul_(self.beta1).add_(grad_reshaped, alpha=self.d * (1.0 - self.beta1))
-                if self.use_grams:
+                if self.grams_moment:
                     mt.copy_(grad_reshaped.sign() * mt.abs())
-                elif self.use_cautious:
+                elif self.cautious_mask:
                     mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
                     mt.mul_(mask)
@@ -328,7 +328,7 @@ class Prodigy_adv(torch.optim.Optimizer):
 
             # Compress updated moments and store new factors
             if self.beta1 > 0:
-                if not self.use_grams:
+                if not self.grams_moment:
                     state['sign'] = _pack_bools(mt > 0)
                 _nnmf(mt.abs(), out=(state['mu_m_nmf'], state['mv_m_nmf']))
                 del mt
@@ -348,9 +348,9 @@ class Prodigy_adv(torch.optim.Optimizer):
                     exp_avg.mul_(self.beta1).add_(grad, alpha=self.d)
                 else:
                     exp_avg.mul_(self.beta1).add_(grad, alpha=self.d * (1.0 - self.beta1))
-                if self.use_grams:
+                if self.grams_moment:
                     exp_avg = grad.sign() * exp_avg.abs()
-                elif self.use_cautious:
+                elif self.cautious_mask:
                     mask = (exp_avg * grad > 0).to(grad.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
                     exp_avg.mul_(mask)
