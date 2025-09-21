@@ -60,7 +60,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         weight_decay: float = 0.0,
         vector_reshape: bool = True,
         stochastic_rounding: bool = True,
-        use_orthograd: bool = False,
+        orthogonal_gradient: bool = False,
         cautious_mask: bool = False,
         clip_threshold: float = 0.0,
         nnmf_factor: bool = True,
@@ -85,7 +85,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             betas=betas,
             weight_decay=weight_decay,
             vector_reshape=vector_reshape,
-            use_orthograd=use_orthograd,
+            orthogonal_gradient=orthogonal_gradient,
             clip_threshold=clip_threshold,
             beta3=beta3, d=d0, d0=d0, d_max=d0, d_numerator=0.0, d_coef=d_coef,
             growth_rate=growth_rate, safeguard_warmup=safeguard_warmup, k=0, slice_p=slice_p,
@@ -146,7 +146,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             if grad_norm > group["clip_threshold"]:
                 clip_coef = group["clip_threshold"] / grad_norm
                 grad.mul_(clip_coef)
-        if group["use_orthograd"]:
+        if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)
         state = self.state[p]
 

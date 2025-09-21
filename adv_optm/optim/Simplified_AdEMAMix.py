@@ -46,7 +46,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             matrices to apply low-rank compression (default: True).
         stochastic_rounding (bool): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
-        use_orthograd (bool): whether to use OrthoGrad. (default: False)
+        orthogonal_gradient (bool): whether to use OrthoGrad. (default: False)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
     """
@@ -64,7 +64,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         use_bias_correction: bool = True,
         vector_reshape: bool = True,
         stochastic_rounding: bool = True,
-        use_orthograd: bool = False,
+        orthogonal_gradient: bool = False,
         nnmf_factor: bool = False,
     ):
         if not (lr >= 0.0):
@@ -82,7 +82,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "alpha_grad": alpha_grad, "beta1_warmup": beta1_warmup, "min_beta1": min_beta1,
             "vector_reshape": vector_reshape,
-            "use_orthograd": use_orthograd, "use_bias_correction": use_bias_correction,
+            "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
         }
         self.stochastic_rounding = stochastic_rounding
         self.factored = nnmf_factor
@@ -108,7 +108,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         grad = p.grad
         if grad.dtype != torch.float32 and self.factored:
             grad = grad.float()
-        if group["use_orthograd"]:
+        if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)
         state = self.state[p]
 

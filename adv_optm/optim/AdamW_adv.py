@@ -33,7 +33,7 @@ class AdamW_adv(torch.optim.Optimizer):
         grams_moment (bool): whether to use Grams-style updates. (default: False)
         cautious_mask (bool):  whether to use cautious masking to align the gradient's
             direction with the first moment's.  (default: False)
-        use_orthograd (bool): whether to use OrthoGrad.  (default: False)
+        orthogonal_gradient (bool): whether to use OrthoGrad.  (default: False)
         use_AdEMAMix (bool): whether to enable the AdEMAMix feature. This adds
             a second, slow-moving average of the momentum (`mt_slow`) which is
             combined with the primary momentum (`mt`) to stabilize updates,
@@ -71,7 +71,7 @@ class AdamW_adv(torch.optim.Optimizer):
         use_atan2: bool = False,
         cautious_mask: bool = False,
         grams_moment: bool = False,
-        use_orthograd: bool = False,
+        orthogonal_gradient: bool = False,
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
@@ -93,7 +93,7 @@ class AdamW_adv(torch.optim.Optimizer):
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "vector_reshape": vector_reshape, "use_atan2": use_atan2,
-            "use_orthograd": use_orthograd, "use_bias_correction": use_bias_correction,
+            "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
             "beta3_ema": beta3_ema, "alpha": alpha, "t_alpha": t_alpha,
         }
         self.stochastic_rounding = stochastic_rounding
@@ -123,7 +123,7 @@ class AdamW_adv(torch.optim.Optimizer):
         grad = p.grad
         if grad.dtype != torch.float32 and self.factored:
             grad = grad.float()
-        if group["use_orthograd"]:
+        if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)
         state = self.state[p]
 

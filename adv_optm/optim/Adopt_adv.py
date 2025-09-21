@@ -40,7 +40,7 @@ class Adopt_adv(torch.optim.Optimizer):
             direction with the first moment's.  (default: False)
         grams_moment (bool): whether to combine the gradient's direction with the
             first moment's magnitude (default: False).
-        use_orthograd (bool): whether to use OrthoGrad. (default: False)
+        orthogonal_gradient (bool): whether to use OrthoGrad. (default: False)
         use_AdEMAMix (bool): whether to enable the AdEMAMix feature. This adds
             a second, slow-moving average of the momentum (`mt_slow`) which is
             combined with the primary momentum (`mt`) to stabilize updates,
@@ -89,7 +89,7 @@ class Adopt_adv(torch.optim.Optimizer):
         use_atan2: bool = False,
         cautious_mask: bool = False,
         grams_moment: bool = False,
-        use_orthograd: bool = False,
+        orthogonal_gradient: bool = False,
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
@@ -131,7 +131,7 @@ class Adopt_adv(torch.optim.Optimizer):
         self.use_atan2 = use_atan2 and not Simplified_AdEMAMix
         self.cautious_mask = cautious_mask and not Simplified_AdEMAMix
         self.grams_moment = grams_moment and not Simplified_AdEMAMix
-        self.use_orthograd = use_orthograd
+        self.orthogonal_gradient = orthogonal_gradient
         self.use_AdEMAMix = use_AdEMAMix and not Simplified_AdEMAMix
         self.Simplified_AdEMAMix = Simplified_AdEMAMix
         self.factored = nnmf_factor
@@ -152,7 +152,7 @@ class Adopt_adv(torch.optim.Optimizer):
         grad = p.grad
         if self.factored and grad.dtype != torch.float32:
             grad = grad.float()
-        if self.use_orthograd:
+        if self.orthogonal_gradient:
             grad = _orthogonalize_gradient(p, grad)
         state = self.state[p]
 
