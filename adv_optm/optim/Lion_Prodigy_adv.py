@@ -195,7 +195,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 exp_avg = exp_avg.float()
 
             # Compute update term c_t = β1*m_{t-1} + (1-β1)*g_t
-            signed_update = exp_avg.clone().mul_(self.beta1).add_(grad_reshaped, alpha=(1-self.beta1)).sign_()
+            signed_update = exp_avg.clone().mul_(self.beta1).add_(grad_reshaped, alpha=self.d * (1-self.beta1)).sign_()
 
             if self.cautious_mask:
                 mask = (signed_update * grad_reshaped > 0).to(grad_reshaped.dtype)
@@ -222,7 +222,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             # Compute update term and sign for the update
             if exp_avg.dtype != torch.float32 and self.factored:
                 exp_avg = exp_avg.float()
-            signed_update = exp_avg.clone().mul_(self.beta1).add_(grad, alpha=(1-self.beta1)).sign_()
+            signed_update = exp_avg.clone().mul_(self.beta1).add_(grad, alpha=self.d * (1-self.beta1)).sign_()
 
             if self.cautious_mask:
                 mask = (signed_update * grad > 0).to(grad.dtype)
