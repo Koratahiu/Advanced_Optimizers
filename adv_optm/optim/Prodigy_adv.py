@@ -85,6 +85,19 @@ class Prodigy_adv(torch.optim.Optimizer):
         prodigy_steps (int): If greater than zero, disable Prodigy's stepsize adjustments
             after the specified optimiser step and release all state memory required by Prodigy
             (default: 0).
+        use_kourkoutas (bool): whether to use Kourkoutas-β dynamic beta2.
+            This adapts the second-moment memory based on gradient "spikiness".
+            (default: False)
+        beta2_min (float): The minimum value for dynamic beta2 (Kourkoutas-β).
+            (default: 0.88)
+        ema_alpha (float): The EMA coefficient for the pooled gradient norm
+            in Kourkoutas-β. (default: 0.93)
+        tiny_spike (float): A small constant to stabilize the sunspike ratio
+            denominator in Kourkoutas-β. (default: 1e-9)
+        k_warmup_steps (int): Number of steps to hold the sunspike ratio at zero
+            during warmup in Kourkoutas-β. (default: 0)
+        logging (bool): whether to log Kourkoutas-β dynamic beta2 (min/max/mean)
+            every 50 steps. (default: True).
     """
 
     def __init__(
@@ -116,6 +129,13 @@ class Prodigy_adv(torch.optim.Optimizer):
         fsdp_in_use: bool = False,
         slice_p: int = 11,
         prodigy_steps: int = 0,
+        # kourkoutas
+        use_kourkoutas: bool = False,
+        beta2_min: float = 0.88,
+        ema_alpha: float = 0.93,
+        tiny_spike: float = 1e-9,
+        k_warmup_steps: int = 0,
+        logging: bool = True,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -127,6 +147,8 @@ class Prodigy_adv(torch.optim.Optimizer):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
         if not (prodigy_steps >= 0):
             raise ValueError(f"prodigy_steps should be >= 0. Got {prodigy_steps}")
+        if use_kourkoutas and not (betas[1] > beta2_min):
+            raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
         if cautious_mask and grams_moment:
             print("Warning: cautious is incompatible with grams, Disabling cautious.")
             cautious_mask = False
@@ -154,12 +176,15 @@ class Prodigy_adv(torch.optim.Optimizer):
             "growth_rate": growth_rate, "safeguard_warmup": safeguard_warmup, "k": 0, "slice_p": slice_p,
             "fsdp_in_use": fsdp_in_use, "prodigy_steps": prodigy_steps,
             "alpha_grad": alpha_grad, 
+            "use_kourkoutas": use_kourkoutas, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
+            "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps,
         }
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask and not Simplified_AdEMAMix
         self.grams_moment = grams_moment and not Simplified_AdEMAMix
         self.use_AdEMAMix = use_AdEMAMix and not Simplified_AdEMAMix
         self.Simplified_AdEMAMix = Simplified_AdEMAMix
+        self.logging = logging and use_kourkoutas
         self.factored = nnmf_factor
         self.fsdp_in_use = fsdp_in_use
         super().__init__(params, defaults)
@@ -226,6 +251,9 @@ class Prodigy_adv(torch.optim.Optimizer):
             dtype = torch.float32 if self.factored else p.dtype
             device = p.device
 
+            if group['use_kourkoutas']:
+                state['r_ema_grad_norm'] = torch.tensor(0.0, device=device, dtype=dtype)
+
             if state['factored']:
                 state['effective_shape'] = _get_effective_shape(p.numel())
                 d1, d2 = state['effective_shape']
@@ -257,6 +285,34 @@ class Prodigy_adv(torch.optim.Optimizer):
                 state['p0'] = p.flatten()[::slice_p].detach().clone()
             else:
                 state['p0'] = torch.tensor(0, device=device, dtype=p.dtype)
+
+        # Kourkoutas-β: Dynamically update beta2 based on gradient spikiness
+        if group['use_kourkoutas']:
+            local_beta2 = group['betas'][1]
+            beta2_max = group['betas'][1]  # beta2 from group['betas'] is treated as beta2_max
+            beta2_min = group['beta2_min']
+            k_warmup_steps = group['k_warmup_steps']
+
+            if state['step'] < k_warmup_steps:
+                # During warmup, hold sunspike at zero (use an average beta2)
+                local_beta2 = 0.5 * (beta2_min + beta2_max)
+            else:
+                ema_alpha = group['ema_alpha']
+                tiny_spike = group['tiny_spike']
+                grad_norm = grad.norm()
+                r_ema = state['r_ema_grad_norm']
+
+                # Update EMA of the gradient norm
+                r_ema.mul_(ema_alpha).add_(grad_norm, alpha=1.0 - ema_alpha)
+
+                # Calculate sunspike ratio and the new dynamic beta2
+                raw = grad_norm / (r_ema + tiny_spike)
+                sun = raw / (1.0 + raw)
+                local_beta2 = beta2_max - (beta2_max - beta2_min) * sun
+                if self.logging and hasattr(self, '_beta2_log'):
+                    self._beta2_log.append(local_beta2)
+        else:
+            local_beta2 = self.beta2
 
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
@@ -295,7 +351,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                     del mask
 
             vt = _unnmf((state['mu_v_nmf'], state['mv_v_nmf']))
-            vt.mul_(self.beta2).addcmul_(grad_reshaped, grad_reshaped, value=self.d * self.d * (1.0 - self.beta2))
+            vt.mul_(local_beta2).addcmul_(grad_reshaped, grad_reshaped, value=self.d * self.d * (1.0 - local_beta2))
 
             if self.use_AdEMAMix:
                 mt_slow = _unnmf((state['mu_m_slow_nmf'], state['mv_m_slow_nmf']))
@@ -368,7 +424,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             else:
                 update = exp_avg.clone() if self.beta1 > 0 else grad.clone()
 
-            exp_avg_sq.mul_(self.beta2).addcmul_(grad, grad.conj(), value=self.d * self.d * (1.0 - self.beta2))
+            exp_avg_sq.mul_(local_beta2).addcmul_(grad, grad.conj(), value=self.d * self.d * (1.0 - local_beta2))
 
             if group['use_atan2']:
                 a = 1.2732395
@@ -427,6 +483,11 @@ class Prodigy_adv(torch.optim.Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
+        if self.logging:
+            first_param_state = self.state[self.param_groups[0]['params'][0]]
+            if 'step' in first_param_state and first_param_state['step'] % 50 == 0:
+                self._beta2_log = []
+
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
@@ -434,6 +495,14 @@ class Prodigy_adv(torch.optim.Optimizer):
 
         self.calculate_d()
         self.init_step()
+
+        # If we logged beta2 values, print the stats and clean up
+        if self.logging and hasattr(self, '_beta2_log'):
+            if self._beta2_log:
+                beta2_tensor = torch.tensor(self._beta2_log)
+                print(f"Step {first_param_state['step']}: Kourkoutas beta2 stats: Min={beta2_tensor.min():.4f}, Max={beta2_tensor.max():.4f}, Mean={beta2_tensor.mean():.4f}")
+            del self._beta2_log
+
         return loss
 
     def calculate_d(self):

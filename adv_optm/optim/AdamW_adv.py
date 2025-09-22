@@ -18,7 +18,8 @@ class AdamW_adv(torch.optim.Optimizer):
             parameter groups
         lr (float): learning rate (default: 1e-3)
         betas (tuple[float, float]): coefficients used for computing running
-            averages of gradient and its square (default: (0.9, 0.999))
+            averages of gradient and its square (default: (0.9, 0.99)).
+            For Kourkoutas-β, betas[1] is treated as beta2_max.
         eps (float): term added to the denominator to improve
             numerical stability (default: 1e-8)
         weight_decay (float): weight decay (L2 penalty) (default: 0).
@@ -54,6 +55,19 @@ class AdamW_adv(torch.optim.Optimizer):
             as it gradually introduces the stabilizing slow momentum term. During
             the warmup, `alpha` ramps from 0 to its target value. If `None`,
             the scheduler is disabled. (default: None)
+        use_kourkoutas (bool): whether to use Kourkoutas-β dynamic beta2.
+            This adapts the second-moment memory based on gradient "spikiness".
+            (default: False)
+        beta2_min (float): The minimum value for dynamic beta2 (Kourkoutas-β).
+            (default: 0.88)
+        ema_alpha (float): The EMA coefficient for the pooled gradient norm
+            in Kourkoutas-β. (default: 0.93)
+        tiny_spike (float): A small constant to stabilize the sunspike ratio
+            denominator in Kourkoutas-β. (default: 1e-9)
+        k_warmup_steps (int): Number of steps to hold the sunspike ratio at zero
+            during warmup in Kourkoutas-β. (default: 0)
+        logging (bool): whether to log Kourkoutas-β dynamic beta2 (min/max/mean)
+            every 50 steps. (default: True).
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
     """
@@ -76,6 +90,12 @@ class AdamW_adv(torch.optim.Optimizer):
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
         t_alpha: int | None = None,
+        use_kourkoutas: bool = True,
+        beta2_min: float = 0.88,
+        ema_alpha: float = 0.93,
+        tiny_spike: float = 1e-9,
+        k_warmup_steps: int = 0,
+        logging: bool = True,
         nnmf_factor: bool = False,
     ):
         if not (lr >= 0.0):
@@ -86,6 +106,9 @@ class AdamW_adv(torch.optim.Optimizer):
             raise ValueError(f"Epsilon should be >= 0.0. Got {eps}")
         if not (weight_decay >= 0.0):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
+        if use_kourkoutas and not (betas[1] > beta2_min):
+            raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
+
         if cautious_mask and grams_moment:
             print("Warning: cautious is incompatible with grams, Disabling cautious.")
             cautious_mask = False
@@ -95,11 +118,14 @@ class AdamW_adv(torch.optim.Optimizer):
             "vector_reshape": vector_reshape, "use_atan2": use_atan2,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
             "beta3_ema": beta3_ema, "alpha": alpha, "t_alpha": t_alpha,
+            "use_kourkoutas": use_kourkoutas, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
+            "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps,
         }
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
         self.grams_moment = grams_moment
         self.use_AdEMAMix = use_AdEMAMix
+        self.logging = logging and use_kourkoutas
         self.factored = nnmf_factor
         super().__init__(params, defaults)
 
@@ -143,24 +169,27 @@ class AdamW_adv(torch.optim.Optimizer):
             dtype = torch.float32 if self.factored else p.dtype
             device = p.device
 
+            if group['use_kourkoutas']:
+                state['r_ema_grad_norm'] = torch.tensor(0.0, device=device, dtype=dtype)
+
             if state['factored']:
                 state['effective_shape'] = _get_effective_shape(p.numel())
                 d1, d2 = state['effective_shape']
 
                 # First moment (m)
                 if beta1 > 0:
-                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
+                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                     state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
                     if not self.grams_moment:
                         packed_d2 = (d2 + 7) // 8
                         state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
                 if self.use_AdEMAMix:
-                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
+                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
                     state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                     packed_d2 = (d2 + 7) // 8
                     state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
                 # Second moment (v)
-                state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
+                state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                 state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
             else:  # Fallback to standard AdamW for non-factored tensors
                 if beta1 > 0:
@@ -169,10 +198,42 @@ class AdamW_adv(torch.optim.Optimizer):
                     state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
+        # Kourkoutas-β: Dynamically update beta2 based on gradient spikiness
+        if group['use_kourkoutas']:
+            current_step_idx = state['step']
+            beta2_max = beta2  # beta2 from group['betas'] is treated as beta2_max
+            beta2_min = group['beta2_min']
+            k_warmup_steps = group['k_warmup_steps']
+
+            if current_step_idx < k_warmup_steps:
+                # During warmup, hold sunspike at zero (use an average beta2)
+                beta2 = 0.5 * (beta2_min + beta2_max)
+            else:
+                ema_alpha = group['ema_alpha']
+                tiny_spike = group['tiny_spike']
+                grad_norm = grad.norm()
+                r_ema = state['r_ema_grad_norm']
+                
+                # Update EMA of the gradient norm
+                r_ema.mul_(ema_alpha).add_(grad_norm, alpha=1.0 - ema_alpha)
+                
+                # Calculate sunspike ratio and the new dynamic beta2
+                raw = grad_norm / (r_ema + tiny_spike)
+                sun = raw / (1.0 + raw)
+                beta2 = beta2_max - (beta2_max - beta2_min) * sun
+                if self.logging and hasattr(self, '_beta2_log'):
+                    self._beta2_log.append(beta2)
+
         step = state['step'] + 1
         if group['use_bias_correction']:
             bias_correction1 = 1.0 - beta1 ** step
-            bias_correction2 = 1.0 - beta2 ** step
+            if group['use_kourkoutas']:
+                # Use "beta2max" mode from the paper for bias correction
+                beta2_max_for_bc = group['betas'][1]
+                bias_correction2 = 1.0 - beta2_max_for_bc ** step
+            else:
+                # Original AdamW bias correction
+                bias_correction2 = 1.0 - beta2 ** step
         else:
             bias_correction1 = 1
             bias_correction2 = 1
@@ -311,8 +372,20 @@ class AdamW_adv(torch.optim.Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
+        if self.logging:
+            first_param_state = self.state[self.param_groups[0]['params'][0]]
+            if 'step' in first_param_state and first_param_state['step'] % 50 == 0:
+                self._beta2_log = []
+
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
+
+        # If we logged beta2 values, print the stats and clean up
+        if self.logging and hasattr(self, '_beta2_log'):
+            if self._beta2_log:
+                beta2_tensor = torch.tensor(self._beta2_log)
+                print(f"Step {first_param_state['step']}: Kourkoutas beta2 stats: Min={beta2_tensor.min():.4f}, Max={beta2_tensor.max():.4f}, Mean={beta2_tensor.mean():.4f}")
+            del self._beta2_log
 
         return loss
