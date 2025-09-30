@@ -268,11 +268,12 @@ class Adopt_adv(torch.optim.Optimizer):
             if self.use_AdEMAMix:
                 mt_slow.mul_(beta3_ema).add_(normalized_grad, alpha=1.0 - beta3_ema)
                 update = torch.add(mt, m_slow, alpha=alpha_t)
-                update = update.view(p.shape)
             elif self.Simplified_AdEMAMix:
                 update = torch.add(mt, grad_reshaped, alpha=alpha_grad)
             else:
-                update = mt.view(p.shape)
+                update = mt.clone()
+
+            update = update.view(p.shape)
 
             if self.use_atan2:
                 update.mul_(group['lr'] * 1.2732395447351628)
