@@ -308,11 +308,11 @@ class Prodigy_adv(torch.optim.Optimizer):
                 if self.beta1 > 0:
                     update = torch.add(mt, mt_slow, alpha=alpha_t)
                 else:
-                    update = torch.add(grad_reshaped, mt_slow, alpha=alpha_t)
+                    update = torch.add(grad_reshaped.mul(self.d), mt_slow, alpha=alpha_t)
             elif self.Simplified_AdEMAMix:
                 update = torch.add(mt, grad_reshaped, alpha=alpha_grad * self.d)
             else:
-                update = mt.clone() if self.beta1 > 0 else grad_reshaped.clone()
+                update = mt.clone() if self.beta1 > 0 else grad_reshaped.mul(self.d)
             del grad_reshaped
 
             if group['use_atan2']:
@@ -362,11 +362,11 @@ class Prodigy_adv(torch.optim.Optimizer):
                 if self.beta1 > 0:
                     update = torch.add(exp_avg, exp_avg_slow, alpha=alpha_t)
                 else:
-                    update = torch.add(grad, exp_avg_slow, alpha=alpha_t)
+                    update = torch.add(grad.mul(self.d), exp_avg_slow, alpha=alpha_t)
             elif self.Simplified_AdEMAMix:
                 update = torch.add(exp_avg, grad, alpha=alpha_grad * self.d)
             else:
-                update = exp_avg.clone() if self.beta1 > 0 else grad.clone()
+                update = exp_avg.clone() if self.beta1 > 0 else grad.mul(self.d)
 
             exp_avg_sq.mul_(self.beta2).addcmul_(grad, grad.conj(), value=self.d * self.d * (1.0 - self.beta2))
 
