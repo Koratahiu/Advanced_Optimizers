@@ -157,7 +157,7 @@ class Adopt_adv(torch.optim.Optimizer):
             "vector_reshape": vector_reshape, "beta3_ema": beta3_ema, "alpha": alpha,
             "t_alpha": t_alpha, "alpha_grad": alpha_grad, 
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
-            "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps,
+            "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
         }
         self.clip_lambda = clip_lambda
         self.stochastic_rounding = stochastic_rounding
@@ -168,11 +168,10 @@ class Adopt_adv(torch.optim.Optimizer):
         self.use_AdEMAMix = use_AdEMAMix and not Simplified_AdEMAMix
         self.Simplified_AdEMAMix = Simplified_AdEMAMix
         self.factored = nnmf_factor
+        self.kourkoutas_beta = kourkoutas_beta
+        self.layer_key_fn = layer_key_fn
         super().__init__(params, defaults)
 
-        self.kourkoutas_beta = kourkoutas_beta
-        self.k_logging= k_logging and kourkoutas_beta
-        self.layer_key_fn = layer_key_fn and kourkoutas_beta
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
 
@@ -238,13 +237,15 @@ class Adopt_adv(torch.optim.Optimizer):
                     state['exp_avg_slow'] = torch.zeros_like(p, dtype=dtype)
                 state['exp_avg_sq'] = grad.square()   # v_0
 
+        beta1, beta2 = group['betas']
+
         current_step = state['step']
         if group['kourkoutas_beta']:
+            # Call prepare_step() once at the beginning of the step for all params
             self.kourkoutas_helper.maybe_prepare_step(current_step)
+            # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
-
-        beta1, beta2 = group['betas']
-        if group['kourkoutas_beta']:
+            # Get the dynamic beta2 calculated in prepare_step()
             beta2 = self.kourkoutas_helper.get_beta2(p, group, current_step)
 
         # The first step is for initialization only (skip when use_atan2 as it's scale invariant).
@@ -257,10 +258,10 @@ class Adopt_adv(torch.optim.Optimizer):
             alpha = group['alpha']
             t_alpha = group['t_alpha']
             # Use step+1 for 1-based step count in scheduler
-            current_step = state['step'] + 1
+            alpha_step = state['step'] + 1
             alpha_t = alpha
-            if t_alpha is not None and t_alpha > 0 and current_step < t_alpha:
-                alpha_t = min(current_step * alpha / t_alpha, alpha)
+            if t_alpha is not None and t_alpha > 0 and alpha_step < t_alpha:
+                alpha_t = min(alpha_step * alpha / t_alpha, alpha)
         if self.Simplified_AdEMAMix:
             alpha_grad = group["alpha_grad"]
 
@@ -435,11 +436,5 @@ class Adopt_adv(torch.optim.Optimizer):
         if self.kourkoutas_beta and self.k_logging > 0 and hasattr(self, '_beta2_log'):
             first_param_state = self.state[self.param_groups[0]['params'][0]]
             step_num = first_param_state['step']
-
-            if step_num > 0 and step_num % self.k_logging == 0:
-                if self._beta2_log:
-                    beta2_tensor = torch.tensor(self._beta2_log, device='cpu')
-                    print(f"Step {step_num}: Kourkoutas beta2 stats: Min={beta2_tensor.min():.4f}, Max={beta2_tensor.max():.4f}, Mean={beta2_tensor.mean():.4f}")
-                delattr(self, '_beta2_log')
 
         return loss

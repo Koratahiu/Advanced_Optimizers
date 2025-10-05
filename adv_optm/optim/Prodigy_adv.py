@@ -189,7 +189,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             "fsdp_in_use": fsdp_in_use, "prodigy_steps": prodigy_steps,
             "alpha_grad": alpha_grad,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
-            "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps,
+            "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
         }
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask and not Simplified_AdEMAMix
@@ -198,14 +198,13 @@ class Prodigy_adv(torch.optim.Optimizer):
         self.Simplified_AdEMAMix = Simplified_AdEMAMix
         self.factored = nnmf_factor
         self.fsdp_in_use = fsdp_in_use
-        super().__init__(params, defaults)
-
+        
         self.kourkoutas_beta = kourkoutas_beta
-        self.k_logging= k_logging and kourkoutas_beta
-        self.layer_key_fn = layer_key_fn and kourkoutas_beta
+        self.layer_key_fn = layer_key_fn
+
+        super().__init__(params, defaults)
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
-
         self.init_step()
 
     @property
@@ -301,21 +300,23 @@ class Prodigy_adv(torch.optim.Optimizer):
 
         current_step = state['step']
         if group['kourkoutas_beta']:
+            # Call prepare_step() once at the beginning of the step for all params
             self.kourkoutas_helper.maybe_prepare_step(current_step)
+            # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
-
-        beta2 = self.beta2_default
-        if group['kourkoutas_beta']:
+            # Get the dynamic beta2 calculated in prepare_step()
             beta2 = self.kourkoutas_helper.get_beta2(p, group, current_step)
+        else:
+            beta2 = self.beta2_default
 
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
             alpha = group['alpha']
             t_alpha = group['t_alpha']
-            current_step = state['step'] + 1
+            alpha_step = state['step'] + 1
             alpha_t = alpha
-            if t_alpha is not None and t_alpha > 0 and current_step < t_alpha:
-                alpha_t = min(current_step * alpha / t_alpha, alpha)
+            if t_alpha is not None and t_alpha > 0 and alpha_step < t_alpha:
+                alpha_t = min(alpha_step * alpha / t_alpha, alpha)
         if self.Simplified_AdEMAMix:
             alpha_grad = group["alpha_grad"]
 
@@ -480,16 +481,6 @@ class Prodigy_adv(torch.optim.Optimizer):
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
-
-        if self.kourkoutas_beta and self.k_logging > 0 and hasattr(self, '_beta2_log'):
-            first_param_state = self.state[self.param_groups[0]['params'][0]]
-            step_num = first_param_state['step']
-
-            if step_num > 0 and step_num % self.k_logging == 0:
-                if self._beta2_log:
-                    beta2_tensor = torch.tensor(self._beta2_log, device='cpu')
-                    print(f"Step {step_num}: Kourkoutas beta2 stats: Min={beta2_tensor.min():.4f}, Max={beta2_tensor.max():.4f}, Mean={beta2_tensor.mean():.4f}")
-                delattr(self, '_beta2_log')
 
         self.calculate_d()
         self.init_step()
