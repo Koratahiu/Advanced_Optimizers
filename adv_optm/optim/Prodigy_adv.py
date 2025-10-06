@@ -228,7 +228,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         self.beta3 = g_group['beta3']
         if self.beta3 is None:
             self.beta3 = math.sqrt(self.beta2_default)
-        
+
         self.d = g_group['d']
         lr = g_group['lr']
 
@@ -306,8 +306,10 @@ class Prodigy_adv(torch.optim.Optimizer):
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
             # Get the dynamic beta2 calculated in prepare_step()
             beta2 = self.kourkoutas_helper.get_beta2(p, group, current_step)
+            beta3 = math.sqrt(beta2)
         else:
             beta2 = self.beta2_default
+            beta3 = self.beta3
 
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
@@ -444,7 +446,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             self.d_numerator += (self.d / d0) * self.dlr * torch.dot(grad_flat[::slice_p], p0.data - p_flat[::slice_p]).item()
 
             alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
-            s.mul_(self.beta3).add_(grad_flat[::slice_p], alpha=alpha)
+            s.mul_(beta3).add_(grad_flat[::slice_p], alpha=alpha)
             self.d_denom += s.abs().sum().item()
 
             del s, p0, grad_flat, p_flat, alpha

@@ -18,6 +18,10 @@ class KourkoutasHelper:
         self._layer_info_built = False
         self._current_step_prepared = -1
 
+        # This ensures the map is complete before the first backward pass,
+        # making it compatible with fused back pass mechanisms.
+        self._build_layer_info_if_needed()
+
     def _build_layer_info_if_needed(self):
         """Builds a map of layers and the parameters they contain."""
         if self._layer_info_built:
@@ -29,7 +33,7 @@ class KourkoutasHelper:
 
         for group in self.optimizer.param_groups:
             for p in group['params']:
-                if p.grad is None: continue
+                # The mapping is static and should not depend on the presence of a gradient.
                 layer_key = self.optimizer.layer_key_fn(p)
                 if layer_key not in self.layer_info:
                     self.layer_info[layer_key] = {'params': [], 'group_ref': group}
@@ -46,7 +50,6 @@ class KourkoutasHelper:
         Calculates dynamic beta2 for all layers using the completed scalar accumulators
         from the PREVIOUS step. Should be called once at the start of an optimizer step.
         """
-        self._build_layer_info_if_needed()
 
         # Check if logging is enabled for this step based on the interval
         k_logging_interval = self.optimizer.param_groups[0].get('k_logging', 0)
@@ -113,7 +116,6 @@ class KourkoutasHelper:
         """
         Accumulates the squared L2 norm of a single gradient for the next step's calculation.
         """
-        self._build_layer_info_if_needed()
         layer_key = self.optimizer.layer_key_fn(p)
 
         if layer_key in self.layer_info:
