@@ -11,12 +11,15 @@ class KourkoutasHelper:
         if not hasattr(optimizer, 'param_groups'):
             raise TypeError("optimizer must be a valid torch.optim.Optimizer instance.")
         self.optimizer = optimizer
-        
+
         # State managed by the helper
         self.layer_state = {}
         self.layer_info = {}
         self._layer_info_built = False
         self._current_step_prepared = -1
+
+        # Store stats for external logging (e.g., TensorBoard)
+        self.last_beta2_stats = {}
 
         # This ensures the map is complete before the first backward pass,
         # making it compatible with fused back pass mechanisms.
@@ -26,7 +29,7 @@ class KourkoutasHelper:
         """Builds a map of layers and the parameters they contain."""
         if self._layer_info_built:
             return
-            
+
         if not hasattr(self.optimizer, 'layer_key_fn') or self.optimizer.layer_key_fn is None:
             print("Warning: KourkoutasHelper requires 'layer_key_fn' on the optimizer. Defaulting to tensor-wise (id).")
             self.optimizer.layer_key_fn = lambda p: id(p)
@@ -50,13 +53,11 @@ class KourkoutasHelper:
         Calculates dynamic beta2 for all layers using the completed scalar accumulators
         from the PREVIOUS step. Should be called once at the start of an optimizer step.
         """
+        
+        beta2_log = []
+        # These are just for the sample log, initialize them
+        sun, pooled_grad_norm, r_ema = (torch.tensor(0.0),)*3
 
-        # Check if logging is enabled for this step based on the interval
-        k_logging_interval = self.optimizer.param_groups[0].get('k_logging', 0)
-        is_logging_step = k_logging_interval > 0 and (current_step + 1) % k_logging_interval == 0
-
-        beta2_log = [] if is_logging_step else None
-        first_layer_key = next(iter(self.layer_info), None)
 
         for layer_key, info in self.layer_info.items():
             params, group = info['params'], info['group_ref']
@@ -68,16 +69,15 @@ class KourkoutasHelper:
                 }
             
             layer_state = self.layer_state[layer_key]
-            
+
             # Use the completed accumulator from the previous step
             pooled_grad_norm = torch.sqrt(layer_state['sum_sq_accumulator'])
-            
+
             r_ema = layer_state['r_ema_grad_norm']
-            prev_r_ema_val = r_ema.item() # for logging
-            
+
             # EMA is always updated, even during warmup
             r_ema.mul_(group['ema_alpha']).add_(pooled_grad_norm, alpha=1.0 - group['ema_alpha'])
-            
+
             sun = torch.tensor(0.0, device=r_ema.device) # Default sun to 0 for warmup
             beta2_max = group['betas'][1]
 
@@ -92,16 +92,22 @@ class KourkoutasHelper:
             layer_state['dynamic_beta2'] = beta2.item() if isinstance(beta2, torch.Tensor) else beta2
             layer_state['sum_sq_accumulator'].zero_()
 
-            if is_logging_step:
-                beta2_log.append(layer_state['dynamic_beta2'])
-                if layer_key == first_layer_key:
-                    print(f"\n[Kourkoutas-β Debug] Step {current_step + 1} - Sample Layer '{layer_key}':")
-                    print(f"  - Grad Norm: {pooled_grad_norm.item():.4e}, Prev EMA: {prev_r_ema_val:.4e}, New EMA: {r_ema.item():.4e}")
-                    print(f"  - Sunspike: {sun.item():.4f}, Dynamic Beta2: {layer_state['dynamic_beta2']:.4f}")
-        
-        if is_logging_step and beta2_log:
+            beta2_log.append(layer_state['dynamic_beta2'])
+
+        # Always compute stats for TensorBoard
+        if beta2_log:
             beta2_tensor = torch.tensor(beta2_log, device='cpu')
-            print(f"[Kourkoutas-β Debug] Step {current_step + 1} Overall Beta2 Stats: Min={beta2_tensor.min():.4f}, Max={beta2_tensor.max():.4f}, Mean={beta2_tensor.mean():.4f}")
+            self.last_beta2_stats = {
+                'min': beta2_tensor.min().item(),
+                'max': beta2_tensor.max().item(),
+                'mean': beta2_tensor.mean().item(),
+            }
+
+        # Handle periodic console logging
+        k_logging_interval = self.optimizer.param_groups[0].get('k_logging', 0)
+        is_logging_step = k_logging_interval > 0 and (current_step + 1) % k_logging_interval == 0
+        if is_logging_step and self.last_beta2_stats:
+            print(f"[Kourkoutas-β Debug] Step {current_step + 1} Overall Beta2 Stats: Min={self.last_beta2_stats['min']:.4f}, Max={self.last_beta2_stats['max']:.4f}, Mean={self.last_beta2_stats['mean']:.4f}")
 
 
     def maybe_prepare_step(self, current_step: int):

@@ -16,7 +16,6 @@ repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.13.2
   hooks:
-    # Run the Ruff linter, but not the formatter.
     - id: ruff
       args: ["--fix"]
       types_or: [ python, pyi, jupyter ]

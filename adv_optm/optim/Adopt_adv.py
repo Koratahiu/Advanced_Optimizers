@@ -433,8 +433,4 @@ class Adopt_adv(torch.optim.Optimizer):
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
 
-        if self.kourkoutas_beta and self.k_logging > 0 and hasattr(self, '_beta2_log'):
-            first_param_state = self.state[self.param_groups[0]['params'][0]]
-            step_num = first_param_state['step']
-
         return loss
