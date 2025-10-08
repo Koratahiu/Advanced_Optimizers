@@ -6,10 +6,11 @@ from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf, _unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
+from ..util.Kourkoutas import KourkoutasHelper
 
 class Adopt_adv(torch.optim.Optimizer):
     """
-    Implements a fusion of SMMF, and the ADOPT algorithm.
+    Implements an advanced ADOPT algorithm.
 
     The ADOPT update rule modifies Adam by:
     1.  **Initialization:** The second moment `v` is initialized as `v₀ = g₀²`.
@@ -72,6 +73,28 @@ class Adopt_adv(torch.optim.Optimizer):
             current gradient. For small batch sizes, use high values (e.g., 10-100) to be
             more responsive. For large batch sizes, use low values (e.g., 0-1) for
             stability. (default: 100.0)
+        kourkoutas_beta (bool): whether to enable the layer-wise dynamic β₂ logic.
+            If `False`, the optimizer behaves as standard Adopt. (default: False)
+        beta2_min (float): The minimum value for dynamic β₂, used during periods of
+            high gradient variance ("sunspikes"). Must be less than `betas[1]`.
+            (default: 0.88)
+        ema_alpha (float): The decay rate for the Exponential Moving Average (EMA) of
+            the pooled gradient norms. Corresponds to `α` in the paper.
+            (default: 0.93)
+        tiny_spike (float): A small constant added to the denominator of the
+            "sunspike" ratio calculation to prevent division by zero. Corresponds
+            to `ε_spike` in the paper. (default: 1e-9)
+        k_warmup_steps (int): The number of initial steps during which β₂ is held
+            at a fixed beta2 value before the
+            dynamic logic activates. (default: 0)
+        k_logging (int): if > 0 and kourkoutas_beta=True, enables periodic console
+            logging of Kourkoutas-β statistics (min, max, mean of `β₂` across layers)
+            every logging steps. Useful for debugging and tuning. Set to 0 to disable
+            logging (default: 0). 
+        layer_key_fn (Optional[Callable]): A function that takes a parameter `p`
+            and returns a unique, hashable key representing its "layer" or "bucket".
+            If `None`, parameters are bucketed by their memory ID (tensor-wise).
+            (default: None)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
     """
@@ -96,6 +119,13 @@ class Adopt_adv(torch.optim.Optimizer):
         t_alpha: int | None = None,
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
+        kourkoutas_beta: bool = False,
+        beta2_min: float = 0.9,
+        ema_alpha: float = 0.95,
+        tiny_spike: float = 1e-9,
+        k_warmup_steps: int = 0,
+        k_logging: int = 0,
+        layer_key_fn: Optional[Callable] = None,
         nnmf_factor: bool = False,
     ):
         if not (lr >= 0.0):
@@ -111,6 +141,7 @@ class Adopt_adv(torch.optim.Optimizer):
             cautious_mask = False
         if betas[0] == 0.0 and Simplified_AdEMAMix:
             raise ValueError(f"Beta1 cannot be 0.0 when using Simplified_AdEMAMix. Got {betas[0]}")
+        if kourkoutas_beta and not (betas[1] > beta2_min): raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
         if use_AdEMAMix and Simplified_AdEMAMix:
             print("Warning: use_AdEMAMix is incompatible with Simplified_AdEMAMix, Disabling use_AdEMAMix.")
         if grams_moment and Simplified_AdEMAMix:
@@ -125,6 +156,8 @@ class Adopt_adv(torch.optim.Optimizer):
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "vector_reshape": vector_reshape, "beta3_ema": beta3_ema, "alpha": alpha,
             "t_alpha": t_alpha, "alpha_grad": alpha_grad, 
+            "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
+            "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
         }
         self.clip_lambda = clip_lambda
         self.stochastic_rounding = stochastic_rounding
@@ -135,7 +168,12 @@ class Adopt_adv(torch.optim.Optimizer):
         self.use_AdEMAMix = use_AdEMAMix and not Simplified_AdEMAMix
         self.Simplified_AdEMAMix = Simplified_AdEMAMix
         self.factored = nnmf_factor
+        self.kourkoutas_beta = kourkoutas_beta
+        self.layer_key_fn = layer_key_fn
         super().__init__(params, defaults)
+
+        if self.kourkoutas_beta:
+            self.kourkoutas_helper = KourkoutasHelper(self)
 
     @property
     def supports_fused_back_pass(self): return True
@@ -156,10 +194,8 @@ class Adopt_adv(torch.optim.Optimizer):
             grad = _orthogonalize_gradient(p, grad)
         state = self.state[p]
 
-        beta1, beta2 = group['betas']
-
         # State Initialization
-        if len(state) == 0:
+        if 'step' not in state:
             state['step'] = 0
 
             should_factor = (
@@ -176,7 +212,7 @@ class Adopt_adv(torch.optim.Optimizer):
                 d1, d2 = state['effective_shape']
 
                 # m_0 = 0
-                if beta1 > 0:
+                if group['betas'][0] > 0:
                     state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
                     state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                     if not self.grams_moment:
@@ -195,11 +231,22 @@ class Adopt_adv(torch.optim.Optimizer):
                 # Initialize v_0 using NMF
                 _nnmf(vt_init, out=(state['mu_v_nmf'], state['mv_v_nmf']))
             else: # Fallback for non-factored tensors
-                if beta1 > 0:
+                if group['betas'][0] > 0:
                     state['exp_avg'] = torch.zeros_like(p, dtype=dtype) # m_0
                 if self.use_AdEMAMix:
                     state['exp_avg_slow'] = torch.zeros_like(p, dtype=dtype)
                 state['exp_avg_sq'] = grad.square()   # v_0
+
+        beta1, beta2 = group['betas']
+
+        current_step = state['step']
+        if group['kourkoutas_beta']:
+            # Call prepare_step() once at the beginning of the step for all params
+            self.kourkoutas_helper.maybe_prepare_step(current_step)
+            # Accumulate current grad's norm for the *next* step
+            self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
+            # Get the dynamic beta2 calculated in prepare_step()
+            beta2 = self.kourkoutas_helper.get_beta2(p, group, current_step)
 
         # The first step is for initialization only (skip when use_atan2 as it's scale invariant).
         if state['step'] == 0 and not self.use_atan2:
@@ -211,10 +258,10 @@ class Adopt_adv(torch.optim.Optimizer):
             alpha = group['alpha']
             t_alpha = group['t_alpha']
             # Use step+1 for 1-based step count in scheduler
-            current_step = state['step'] + 1
+            alpha_step = state['step'] + 1
             alpha_t = alpha
-            if t_alpha is not None and t_alpha > 0 and current_step < t_alpha:
-                alpha_t = min(current_step * alpha / t_alpha, alpha)
+            if t_alpha is not None and t_alpha > 0 and alpha_step < t_alpha:
+                alpha_t = min(alpha_step * alpha / t_alpha, alpha)
         if self.Simplified_AdEMAMix:
             alpha_grad = group["alpha_grad"]
 

@@ -99,7 +99,7 @@ class Lion_adv(torch.optim.Optimizer):
         state = self.state[p]
 
         # State Initialization
-        if len(state) == 0:
+        if 'step' not in state:
             state['step'] = 0
 
             should_factor = (

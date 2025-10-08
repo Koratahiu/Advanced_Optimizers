@@ -1,4 +1,5 @@
 import torch
+from typing import Optional, Callable
 
 import math
 
@@ -7,6 +8,7 @@ from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
+from ..util.Kourkoutas import KourkoutasHelper
 
 # A little helper from the original simplified_AdEMAMix
 def linear_hl_warmup_scheduler(step, beta_end, beta_start=0, warmup=1):
@@ -47,6 +49,28 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         stochastic_rounding (bool): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
         orthogonal_gradient (bool): whether to use OrthoGrad. (default: False)
+        kourkoutas_beta (bool): whether to enable the layer-wise dynamic β₂ logic.
+            If `False`, the optimizer behaves as standard Simplified_AdEMAMix. (default: False)
+        beta2_min (float): The minimum value for dynamic β₂, used during periods of
+            high gradient variance ("sunspikes"). Must be less than `betas[1]`.
+            (default: 0.88)
+        ema_alpha (float): The decay rate for the Exponential Moving Average (EMA) of
+            the pooled gradient norms. Corresponds to `α` in the paper.
+            (default: 0.93)
+        tiny_spike (float): A small constant added to the denominator of the
+            "sunspike" ratio calculation to prevent division by zero. Corresponds
+            to `ε_spike` in the paper. (default: 1e-9)
+        k_warmup_steps (int): The number of initial steps during which β₂ is held
+            at a fixed beta2 value before the
+            dynamic logic activates. (default: 0)
+        k_logging (int): if > 0 and kourkoutas_beta=True, enables periodic console
+            logging of Kourkoutas-β statistics (min, max, mean of `β₂` across layers)
+            every logging steps. Useful for debugging and tuning. Set to 0 to disable
+            logging (default: 0). 
+        layer_key_fn (Optional[Callable]): A function that takes a parameter `p`
+            and returns a unique, hashable key representing its "layer" or "bucket".
+            If `None`, parameters are bucketed by their memory ID (tensor-wise).
+            (default: None)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
     """
@@ -65,6 +89,13 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         vector_reshape: bool = True,
         stochastic_rounding: bool = True,
         orthogonal_gradient: bool = False,
+        kourkoutas_beta: bool = False,
+        beta2_min: float = 0.9,
+        ema_alpha: float = 0.95,
+        tiny_spike: float = 1e-9,
+        k_warmup_steps: int = 0,
+        k_logging: int = 0,
+        layer_key_fn: Optional[Callable] = None,
         nnmf_factor: bool = False,
     ):
         if not (lr >= 0.0):
@@ -77,16 +108,24 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
         if not 0.0 <= alpha_grad:
             raise ValueError("Invalid alpha value: {}".format(alpha_grad))
+        if kourkoutas_beta and not (betas[1] > beta2_min): raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
 
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "alpha_grad": alpha_grad, "beta1_warmup": beta1_warmup, "min_beta1": min_beta1,
             "vector_reshape": vector_reshape,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
+            "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
+            "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
         }
         self.stochastic_rounding = stochastic_rounding
         self.factored = nnmf_factor
+        self.kourkoutas_beta = kourkoutas_beta
+        self.layer_key_fn = layer_key_fn
         super().__init__(params, defaults)
+
+        if self.kourkoutas_beta:
+            self.kourkoutas_helper = KourkoutasHelper(self)
 
     @property
     def supports_fused_back_pass(self):
@@ -113,7 +152,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         state = self.state[p]
 
         # State Initialization
-        if len(state) == 0:
+        if 'step' not in state:
             state['step'] = 0
 
             should_factor = (
@@ -150,6 +189,16 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
                 state['den_sum'] = 1.0
 
         beta1_final, beta2 = group["betas"]
+
+        current_step = state['step']
+        if group['kourkoutas_beta']:
+            # Call prepare_step() once at the beginning of the step for all params
+            self.kourkoutas_helper.maybe_prepare_step(current_step)
+            # Accumulate current grad's norm for the *next* step
+            self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
+            # Get the dynamic beta2 calculated in prepare_step()
+            beta2 = self.kourkoutas_helper.get_beta2(p, group, current_step)
+
         beta1_warmup = group["beta1_warmup"]
         alpha_grad = group["alpha_grad"]
 
@@ -161,7 +210,10 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
         if group['use_bias_correction']:
             state['num_sum'] = beta1 * state['num_sum'] + 1.0
-            state['den_sum'] = beta2 * state['den_sum'] + (1.0 - beta2)
+            if group['kourkoutas_beta']:
+                state['den_sum'] = group['betas'][1] * state['den_sum'] + (1.0 - group['betas'][1])
+            else:
+                state['den_sum'] = beta2 * state['den_sum'] + (1.0 - beta2)
 
         if state['factored']:
             d1, d2 = state['effective_shape']

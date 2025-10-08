@@ -1,15 +1,16 @@
 import torch
-from typing import Optional
+from typing import Optional, Callable
 
 from ..util.BF16_Stochastic_Rounding import add_stochastic_
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
+from ..util.Kourkoutas import KourkoutasHelper
 
 class AdamW_adv(torch.optim.Optimizer):
     """
-    Implements a factored AdamW algorithm.
+    Implements an advanced AdamW algorithm.
     This is an advanced version of AdamW with optional features like
     low-rank factorization of optimizer states (SMMF), OrthoGrad, etc.
 
@@ -54,6 +55,28 @@ class AdamW_adv(torch.optim.Optimizer):
             as it gradually introduces the stabilizing slow momentum term. During
             the warmup, `alpha` ramps from 0 to its target value. If `None`,
             the scheduler is disabled. (default: None)
+        kourkoutas_beta (bool): whether to enable the layer-wise dynamic β₂ logic.
+            If `False`, the optimizer behaves as standard AdamW. (default: False)
+        beta2_min (float): The minimum value for dynamic β₂, used during periods of
+            high gradient variance ("sunspikes"). Must be less than `betas[1]`.
+            (default: 0.88)
+        ema_alpha (float): The decay rate for the Exponential Moving Average (EMA) of
+            the pooled gradient norms. Corresponds to `α` in the paper.
+            (default: 0.93)
+        tiny_spike (float): A small constant added to the denominator of the
+            "sunspike" ratio calculation to prevent division by zero. Corresponds
+            to `ε_spike` in the paper. (default: 1e-9)
+        k_warmup_steps (int): The number of initial steps during which β₂ is held
+            at a fixed beta2 value before the
+            dynamic logic activates. (default: 0)
+        k_logging (int): if > 0 and kourkoutas_beta=True, enables periodic console
+            logging of Kourkoutas-β statistics (min, max, mean of `β₂` across layers)
+            every logging steps. Useful for debugging and tuning. Set to 0 to disable
+            logging (default: 0). 
+        layer_key_fn (Optional[Callable]): A function that takes a parameter `p`
+            and returns a unique, hashable key representing its "layer" or "bucket".
+            If `None`, parameters are bucketed by their memory ID (tensor-wise).
+            (default: None)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
     """
@@ -76,6 +99,13 @@ class AdamW_adv(torch.optim.Optimizer):
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
         t_alpha: int | None = None,
+        kourkoutas_beta: bool = False,
+        beta2_min: float = 0.9,
+        ema_alpha: float = 0.95,
+        tiny_spike: float = 1e-9,
+        k_warmup_steps: int = 0,
+        k_logging: int = 0,
+        layer_key_fn: Optional[Callable] = None,
         nnmf_factor: bool = False,
     ):
         if not (lr >= 0.0):
@@ -86,6 +116,8 @@ class AdamW_adv(torch.optim.Optimizer):
             raise ValueError(f"Epsilon should be >= 0.0. Got {eps}")
         if not (weight_decay >= 0.0):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
+        if kourkoutas_beta and not (betas[1] > beta2_min): raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
+
         if cautious_mask and grams_moment:
             print("Warning: cautious is incompatible with grams, Disabling cautious.")
             cautious_mask = False
@@ -95,13 +127,20 @@ class AdamW_adv(torch.optim.Optimizer):
             "vector_reshape": vector_reshape, "use_atan2": use_atan2,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
             "beta3_ema": beta3_ema, "alpha": alpha, "t_alpha": t_alpha,
+            "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
+            "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
         }
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
         self.grams_moment = grams_moment
         self.use_AdEMAMix = use_AdEMAMix
         self.factored = nnmf_factor
+        self.kourkoutas_beta = kourkoutas_beta
+        self.layer_key_fn = layer_key_fn
         super().__init__(params, defaults)
+
+        if self.kourkoutas_beta:
+            self.kourkoutas_helper = KourkoutasHelper(self)
 
     @property
     def supports_fused_back_pass(self):
@@ -127,10 +166,8 @@ class AdamW_adv(torch.optim.Optimizer):
             grad = _orthogonalize_gradient(p, grad)
         state = self.state[p]
 
-        beta1, beta2 = group['betas']
-
         # State Initialization
-        if len(state) == 0:
+        if 'step' not in state:
             state['step'] = 0
 
             should_factor = (
@@ -148,7 +185,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 d1, d2 = state['effective_shape']
 
                 # First moment (m)
-                if beta1 > 0:
+                if group['betas'][0] > 0:
                     state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
                     state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
                     if not self.grams_moment:
@@ -163,16 +200,31 @@ class AdamW_adv(torch.optim.Optimizer):
                 state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
                 state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
             else:  # Fallback to standard AdamW for non-factored tensors
-                if beta1 > 0:
+                if group['betas'][0] > 0:
                     state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
                 if self.use_AdEMAMix:
                     state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
+        beta1, beta2 = group['betas']
+
+        current_step = state['step']
+        if group['kourkoutas_beta']:
+            # Call prepare_step() once at the beginning of the step for all params
+            self.kourkoutas_helper.maybe_prepare_step(current_step)
+            # Accumulate current grad's norm for the *next* step
+            self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
+            # Get the dynamic beta2 calculated in prepare_step()
+            beta2 = self.kourkoutas_helper.get_beta2(p, group, current_step)
+
         step = state['step'] + 1
         if group['use_bias_correction']:
             bias_correction1 = 1.0 - beta1 ** step
-            bias_correction2 = 1.0 - beta2 ** step
+            if group['kourkoutas_beta']:
+                bias_correction2 = 1.0 - group['betas'][1] ** step
+                # Use beta2_max for bias correction
+            else:
+                bias_correction2 = 1.0 - beta2 ** step
         else:
             bias_correction1 = 1
             bias_correction2 = 1
