@@ -88,6 +88,9 @@ class Prodigy_adv(torch.optim.Optimizer):
         prodigy_steps (int): If greater than zero, disable Prodigy's stepsize adjustments
             after the specified optimiser step and release all state memory required by Prodigy
             (default: 0).
+        d_limiter (bool): whether to clamp the new step size estimate (`d_hat`)
+            to prevent sudden, volatile increases in the adaptive step size (`d`).
+            (default: False)
         kourkoutas_beta (bool): whether to enable the layer-wise dynamic β₂ logic.
             If `False`, the optimizer behaves as standard AdamW/Prodigy. (default: False)
         beta2_min (float): The minimum value for dynamic β₂, used during periods of
@@ -141,6 +144,8 @@ class Prodigy_adv(torch.optim.Optimizer):
         fsdp_in_use: bool = False,
         slice_p: int = 11,
         prodigy_steps: int = 0,
+        d_limiter: bool = False,
+        # K-b parameters
         kourkoutas_beta: bool = False,
         beta2_min: float = 0.9,
         ema_alpha: float = 0.95,
@@ -175,8 +180,8 @@ class Prodigy_adv(torch.optim.Optimizer):
             use_atan2 = False
         if kourkoutas_beta and not (betas[1] > beta2_min):
             raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
-        if Simplified_AdEMAMix and alpha_grad > 0:
-            # scales d_coef by alpha_grad, this force prodigy to behave well with Simplified_AdEMAMix
+        if Simplified_AdEMAMix and alpha_grad > 0 and not d_limiter:
+            # scales d_coef by alpha_grad, this force prodigy to behave well with Simplified_AdEMAMix.
             d_coef = d_coef/alpha_grad
 
         defaults = {
@@ -186,7 +191,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             "beta3_ema": beta3_ema, "alpha": alpha, "t_alpha": t_alpha,
             "beta3": beta3, "d": d0, "d0": d0, "d_max": d0, "d_numerator": 0.0, "d_coef": d_coef,
             "growth_rate": growth_rate, "safeguard_warmup": safeguard_warmup, "k": 0, "slice_p": slice_p,
-            "fsdp_in_use": fsdp_in_use, "prodigy_steps": prodigy_steps,
+            "fsdp_in_use": fsdp_in_use, "prodigy_steps": prodigy_steps, "d_limiter": d_limiter,
             "alpha_grad": alpha_grad,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
@@ -512,6 +517,8 @@ class Prodigy_adv(torch.optim.Optimizer):
             d_hat = self.d
             if global_d_denom > 0:
                 d_hat = d_coef * global_d_numerator / global_d_denom
+                if g_group['d_limiter']:
+                    d_hat = min(self.d * (2 ** 0.25), d_hat)
                 if self.d == g_group['d0']:
                     self.d = max(self.d, d_hat)
                 d_max = max(d_max, d_hat)
