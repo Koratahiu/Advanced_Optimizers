@@ -120,8 +120,8 @@ class Adopt_adv(torch.optim.Optimizer):
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
         kourkoutas_beta: bool = False,
-        beta2_min: float = 0.88,
-        ema_alpha: float = 0.93,
+        beta2_min: float = 0.9,
+        ema_alpha: float = 0.95,
         tiny_spike: float = 1e-9,
         k_warmup_steps: int = 0,
         k_logging: int = 0,
@@ -195,7 +195,7 @@ class Adopt_adv(torch.optim.Optimizer):
         state = self.state[p]
 
         # State Initialization
-        if len(state) == 0:
+        if 'step' not in state:
             state['step'] = 0
 
             should_factor = (

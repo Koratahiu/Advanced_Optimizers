@@ -11,9 +11,8 @@ class KourkoutasHelper:
         if not hasattr(optimizer, 'param_groups'):
             raise TypeError("optimizer must be a valid torch.optim.Optimizer instance.")
         self.optimizer = optimizer
-
-        # State managed by the helper
         self.layer_state = {}
+
         self.layer_info = {}
         self._layer_info_built = False
         self._current_step_prepared = -1
@@ -24,6 +23,9 @@ class KourkoutasHelper:
         # This ensures the map is complete before the first backward pass,
         # making it compatible with fused back pass mechanisms.
         self._build_layer_info_if_needed()
+
+        if self.optimizer.param_groups[0].get('k_logging', 0) > 0:
+            self.print_layer_info()
 
     def _build_layer_info_if_needed(self):
         """Builds a map of layers and the parameters they contain."""
@@ -48,6 +50,24 @@ class KourkoutasHelper:
 
         self._layer_info_built = True
 
+    def print_layer_info(self):
+        """Prints the contents of self.layer_info for debugging."""
+        print("\n--- BEGIN self.layer_info DUMP ---")
+        if not self.layer_info:
+            print("Layer info is empty. Make sure the optimizer has parameters.")
+            return
+
+        for layer_key, info in self.layer_info.items():
+            param_count = len(info['params'])
+            first_param_details = ""
+            if param_count > 0:
+                p = info['params'][0]
+                first_param_details = f" (Example param shape: {list(p.shape)}, dtype: {p.dtype})"
+            
+            print(f"Key: {layer_key}, Params: {param_count}{first_param_details}")
+
+        print("--- END self.layer_info DUMP ---\n")
+
     def prepare_step(self, current_step: int):
         """
         Calculates dynamic beta2 for all layers using the completed scalar accumulators
@@ -55,44 +75,50 @@ class KourkoutasHelper:
         """
         
         beta2_log = []
+        first_layer_key = next(iter(self.layer_info), None)
         # These are just for the sample log, initialize them
-        sun, pooled_grad_norm, r_ema = (torch.tensor(0.0),)*3
-
+        sun, pooled_grad_norm, prev_r_ema_val, r_ema_tensor = (torch.tensor(0.0),)*4
 
         for layer_key, info in self.layer_info.items():
             params, group = info['params'], info['group_ref']
-            
+
+            first_param_in_layer = info['params'][0]
+            param_state = self.optimizer.state[first_param_in_layer]
+
             if layer_key not in self.layer_state:
                 self.layer_state[layer_key] = {
-                    'r_ema_grad_norm': torch.tensor(0.0, device=params[0].device, dtype=torch.float32),
-                    'sum_sq_accumulator': torch.tensor(0.0, device=params[0].device, dtype=torch.float32)
+                    'sum_sq_accumulator': torch.tensor(0.0, device=first_param_in_layer.device, dtype=torch.float32)
                 }
             
-            layer_state = self.layer_state[layer_key]
+            if 'kourkoutas_r_ema' not in param_state:
+                param_state['kourkoutas_r_ema'] = torch.tensor(0.0, device=first_param_in_layer.device, dtype=torch.float32)
 
-            # Use the completed accumulator from the previous step
-            pooled_grad_norm = torch.sqrt(layer_state['sum_sq_accumulator'])
-
-            r_ema = layer_state['r_ema_grad_norm']
-
-            # EMA is always updated, even during warmup
-            r_ema.mul_(group['ema_alpha']).add_(pooled_grad_norm, alpha=1.0 - group['ema_alpha'])
-
-            sun = torch.tensor(0.0, device=r_ema.device) # Default sun to 0 for warmup
+            r_ema_tensor = param_state['kourkoutas_r_ema']
+            accumulator = self.layer_state[layer_key]['sum_sq_accumulator']
+            
+            pooled_grad_norm = torch.sqrt(accumulator)
+            prev_r_ema_val = r_ema_tensor.item() # for logging
+            
+            # Update the persistent EMA tensor in-place.
+            r_ema_tensor.mul_(group['ema_alpha']).add_(pooled_grad_norm, alpha=1.0 - group['ema_alpha'])
+            
             beta2_max = group['betas'][1]
-
-            # --- CONSOLIDATED WARMUP LOGIC ---
+            sun = torch.tensor(0.0, device=r_ema_tensor.device) # Default sun to 0 for warmup
+            
             if current_step < group['k_warmup_steps']:
                 beta2 = beta2_max
             else:
-                raw = pooled_grad_norm / (r_ema + group['tiny_spike'])
+                raw = pooled_grad_norm / (r_ema_tensor + group['tiny_spike'])
                 sun = raw / (1.0 + raw)
                 beta2 = beta2_max - (beta2_max - group['beta2_min']) * sun
 
-            layer_state['dynamic_beta2'] = beta2.item() if isinstance(beta2, torch.Tensor) else beta2
-            layer_state['sum_sq_accumulator'].zero_()
+            # Store the final calculated beta2 in the helper's transient state for this step.
+            self.layer_state[layer_key]['dynamic_beta2'] = beta2.item() if isinstance(beta2, torch.Tensor) else beta2
+            
+            # Reset the accumulator for the next optimizer step.
+            accumulator.zero_()
 
-            beta2_log.append(layer_state['dynamic_beta2'])
+            beta2_log.append(self.layer_state[layer_key]['dynamic_beta2'])
 
         # Always compute stats for TensorBoard
         if beta2_log:
@@ -107,8 +133,11 @@ class KourkoutasHelper:
         k_logging_interval = self.optimizer.param_groups[0].get('k_logging', 0)
         is_logging_step = k_logging_interval > 0 and (current_step + 1) % k_logging_interval == 0
         if is_logging_step and self.last_beta2_stats:
+            if first_layer_key:
+                print(f"\n[Kourkoutas-β Debug] Step {current_step + 1} - Sample Layer '{first_layer_key}':")
+                print(f"  - Grad Norm: {pooled_grad_norm.item():.4e}, Prev EMA: {prev_r_ema_val:.4e}, New EMA: {r_ema_tensor.item():.4e}")
+                print(f"  - Sunspike: {sun.item():.4f}, Dynamic Beta2: {self.layer_state[first_layer_key]['dynamic_beta2']:.4f}")
             print(f"[Kourkoutas-β Debug] Step {current_step + 1} Overall Beta2 Stats: Min={self.last_beta2_stats['min']:.4f}, Max={self.last_beta2_stats['max']:.4f}, Mean={self.last_beta2_stats['mean']:.4f}")
-
 
     def maybe_prepare_step(self, current_step: int):
         """
@@ -125,9 +154,9 @@ class KourkoutasHelper:
         layer_key = self.optimizer.layer_key_fn(p)
 
         if layer_key in self.layer_info:
+            # Initialize the transient state for this layer if it's the first time in the step.
             if layer_key not in self.layer_state:
                     self.layer_state[layer_key] = {
-                    'r_ema_grad_norm': torch.tensor(0.0, device=p.device, dtype=torch.float32),
                     'sum_sq_accumulator': torch.tensor(0.0, device=p.device, dtype=torch.float32)
                 }
             # Accumulate for the *next* step's prepare_step call
