@@ -10,7 +10,7 @@ from ..util.Kourkoutas import KourkoutasHelper
 
 class Adopt_adv(torch.optim.Optimizer):
     """
-    Implements a fusion of SMMF, and the ADOPT algorithm.
+    Implements an advanced ADOPT algorithm.
 
     The ADOPT update rule modifies Adam by:
     1.  **Initialization:** The second moment `v` is initialized as `v₀ = g₀²`.
@@ -85,7 +85,7 @@ class Adopt_adv(torch.optim.Optimizer):
             "sunspike" ratio calculation to prevent division by zero. Corresponds
             to `ε_spike` in the paper. (default: 1e-9)
         k_warmup_steps (int): The number of initial steps during which β₂ is held
-            at a fixed average value (`(beta2_min + beta2_max) / 2`) before the
+            at a fixed beta2 value before the
             dynamic logic activates. (default: 0)
         k_logging (int): if > 0 and kourkoutas_beta=True, enables periodic console
             logging of Kourkoutas-β statistics (min, max, mean of `β₂` across layers)
