@@ -32,9 +32,16 @@ class KourkoutasHelper:
         if self._layer_info_built:
             return
 
-        if not hasattr(self.optimizer, 'layer_key_fn') or self.optimizer.layer_key_fn is None:
-            print("Warning: KourkoutasHelper requires 'layer_key_fn' on the optimizer. Defaulting to tensor-wise (id).")
-            self.optimizer.layer_key_fn = lambda p: id(p)
+        if hasattr(self.optimizer, 'layer_key_fn') and self.optimizer.layer_key_fn is not None:
+            # A custom key function was provided by the user. We will use it.
+            pass
+        else:
+            # No key function was provided. Default to coarse, shape-based bucketing.
+            self.optimizer.layer_key_fn = lambda p: \
+                (id(p),) if p.dim() == 2 and 1 <= p.shape[0] <= 10 and p.shape[1] in {768, 1280, 4096} \
+                else tuple(p.shape)
+            # This ensures that we won't mix embeddings with tokens (1 to 10)
+            # TODO find a better way to safeguard the embeddings
 
         for group in self.optimizer.param_groups:
             for p in group['params']:
