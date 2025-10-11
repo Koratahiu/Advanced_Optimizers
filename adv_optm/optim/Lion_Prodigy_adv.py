@@ -49,7 +49,13 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             than PyTorch's builtin version, the auto-detection won't work.
         slice_p (int): Reduce memory usage by calculating LR adaptation statistics on only every 
             pth entry of each tensor. For values greater than 1 this an an approximation to standard 
-            Prodigy. Values ~11 are reasonable (default 11).
+            Prodigy. Values ~11 are reasonable (default 11).#
+        prodigy_steps (int): If greater than zero, disable Prodigy's stepsize adjustments
+            after the specified optimiser step and release all state memory required by Prodigy
+            (default: 0).
+        d_limiter (bool): whether to clamp the new step size estimate (`d_hat`)
+            to prevent sudden, volatile increases in the adaptive step size (`d`).
+            (default: True)
     """
 
     def __init__(
@@ -63,7 +69,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         orthogonal_gradient: bool = False,
         cautious_mask: bool = False,
         clip_threshold: float = 0.0,
-        nnmf_factor: bool = True,
+        nnmf_factor: bool = False,
         # prodigy parameters
         beta3: float = None,
         d0: float = 1e-6,
@@ -72,6 +78,8 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         safeguard_warmup: bool = False,
         fsdp_in_use: bool = False,
         slice_p: int = 11,
+        prodigy_steps: int = 0,
+        d_limiter: bool = True,
     ):
         if not lr > 0.0:
             raise ValueError(f"Learning rate must be > 0.0, but got {lr}")
@@ -90,6 +98,8 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             beta3=beta3, d=d0, d0=d0, d_max=d0, d_numerator=0.0, d_coef=d_coef,
             growth_rate=growth_rate, safeguard_warmup=safeguard_warmup, k=0, slice_p=slice_p,
             fsdp_in_use=fsdp_in_use,
+            prodigy_steps=prodigy_steps,
+            d_limiter=d_limiter,
         )
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
@@ -235,20 +245,28 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             # Update momentum 
             exp_avg.mul_(self.beta2).add_(grad, alpha=self.d * (1 - self.beta2))
 
-        # --- Accumulate Prodigy stats ---
-        d0, safeguard_warmup, slice_p = group['d0'], group['safeguard_warmup'], group['slice_p']
-        s, p0 = state['s'], state['p0']
-        grad_flat = grad.flatten().float()
-        p_flat = p.data.flatten().float()
-        p0 = p0.float()
+        prodigy_steps = group['prodigy_steps']
+        if prodigy_steps <= 0 or group['k'] < prodigy_steps:
+            # --- Accumulate Prodigy stats ---
+            d0, safeguard_warmup, slice_p = group['d0'], group['safeguard_warmup'], group['slice_p']
+            s, p0 = state['s'], state['p0']
+            grad_flat = grad.flatten().float()
+            p_flat = p.data.flatten().float()
+            p0 = p0.float()
 
-        self.d_numerator += (self.d / d0) * self.dlr * torch.dot(grad_flat[::slice_p], p0.data - p_flat[::slice_p]).item()
+            self.d_numerator += (self.d / d0) * self.dlr * torch.dot(grad_flat[::slice_p], p0.data - p_flat[::slice_p]).item()
 
-        alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
-        s.mul_(self.beta3).add_(grad_flat[::slice_p], alpha=alpha)
-        self.d_denom += s.abs().sum().item()
+            alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
+            s.mul_(self.beta3).add_(grad_flat[::slice_p], alpha=alpha)
+            self.d_denom += s.abs().sum().item()
 
-        del s, p0, grad_flat, p_flat, alpha
+            del s, p0, grad_flat, p_flat, alpha
+        else:
+            # Free memory if prodigy_steps is reached
+            if 's' in state:
+                del state['s']
+            if 'p0' in state:
+                del state['p0']
 
         if group["weight_decay"] != 0:
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
@@ -287,29 +305,37 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
     def calculate_d(self):
         """Calculates the new `d` based on the accumulated stats."""
         g_group = self.param_groups[0]
-        d_max, d_coef, growth_rate = g_group['d_max'], g_group['d_coef'], g_group['growth_rate']
-        
-        if self.fsdp_in_use and dist.is_available() and dist.is_initialized():
-            # Use the device of the first parameter to avoid hardcoding '.cuda()'
-            device = self.param_groups[0]['params'][0].device
-            dist_tensor = torch.tensor([self.d_numerator, self.d_denom], device=device)
-            dist.all_reduce(dist_tensor, op=dist.ReduceOp.SUM)
-            global_d_numerator = dist_tensor[0].item()
-            global_d_denom = dist_tensor[1].item()
-        else:
-            global_d_numerator = self.d_numerator
-            global_d_denom = self.d_denom
+        # Only perform d-adaptation if prodigy_steps has not been reached
+        prodigy_active = not (g_group.get('prodigy_steps', 0) > 0 and g_group['k'] >= g_group['prodigy_steps'])
 
-        d_hat = self.d
-        if global_d_denom > 0:
-            d_hat = d_coef * global_d_numerator / global_d_denom
-            if self.d == g_group['d0']:
-                self.d = max(self.d, d_hat)
-            d_max = max(d_max, d_hat)
-            self.d = min(d_max, self.d * growth_rate)
+        if prodigy_active:
+            d_max, d_coef, growth_rate = g_group['d_max'], g_group['d_coef'], g_group['growth_rate']
+            
+            if self.fsdp_in_use and dist.is_available() and dist.is_initialized():
+                # Use the device of the first parameter to avoid hardcoding '.cuda()'
+                device = self.param_groups[0]['params'][0].device
+                dist_tensor = torch.tensor([self.d_numerator, self.d_denom], device=device)
+                dist.all_reduce(dist_tensor, op=dist.ReduceOp.SUM)
+                global_d_numerator = dist_tensor[0].item()
+                global_d_denom = dist_tensor[1].item()
+            else:
+                global_d_numerator = self.d_numerator
+                global_d_denom = self.d_denom
 
+            d_hat = self.d
+            if global_d_denom > 0:
+                d_hat = d_coef * global_d_numerator / global_d_denom
+                if g_group['d_limiter']:
+                    d_hat = min(self.d * (2 ** 0.25), d_hat)
+                if self.d == g_group['d0']:
+                    self.d = max(self.d, d_hat)
+                d_max = max(d_max, d_hat)
+                self.d = min(d_max, self.d * growth_rate)
+
+            for group in self.param_groups:
+                group['d_numerator'] = global_d_numerator
+                group['d'] = self.d
+                group['d_max'] = d_max
+        # Increment step counter for all groups, regardless of whether d was updated
         for group in self.param_groups:
-            group['d_numerator'] = global_d_numerator
-            group['d'] = self.d
-            group['d_max'] = d_max
             group['k'] += 1
