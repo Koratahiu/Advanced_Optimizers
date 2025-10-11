@@ -49,7 +49,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             than PyTorch's builtin version, the auto-detection won't work.
         slice_p (int): Reduce memory usage by calculating LR adaptation statistics on only every 
             pth entry of each tensor. For values greater than 1 this an an approximation to standard 
-            Prodigy. Values ~11 are reasonable (default 11).#
+            Prodigy. Values ~11 are reasonable (default 11).
         prodigy_steps (int): If greater than zero, disable Prodigy's stepsize adjustments
             after the specified optimiser step and release all state memory required by Prodigy
             (default: 0).
