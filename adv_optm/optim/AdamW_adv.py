@@ -1,7 +1,7 @@
 import torch
 from typing import Optional, Callable
 
-from ..util.BF16_Stochastic_Rounding import add_stochastic_
+from ..util.BF16_Stochastic_Rounding import add_stochastic_, copy_stochastic_
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -77,6 +77,7 @@ class AdamW_adv(torch.optim.Optimizer):
             and returns a unique, hashable key representing its "layer" or "bucket".
             If `None`, parameters are bucketed by their memory ID (tensor-wise).
             (default: None)
+        sr_states (bool): whether to apply stochastic rounding for BF16 states. (default: False)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
     """
@@ -106,6 +107,7 @@ class AdamW_adv(torch.optim.Optimizer):
         k_warmup_steps: int = 0,
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
+        sr_states: bool = False,
         nnmf_factor: bool = False,
     ):
         if not (lr >= 0.0):
@@ -137,6 +139,7 @@ class AdamW_adv(torch.optim.Optimizer):
         self.factored = nnmf_factor
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
+        self.sr_states = sr_states and not nnmf_factor
         super().__init__(params, defaults)
 
         if self.kourkoutas_beta:
@@ -165,6 +168,8 @@ class AdamW_adv(torch.optim.Optimizer):
         if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)
         state = self.state[p]
+
+        apply_sr_states = self.sr_states and p.dtype == torch.bfloat16
 
         # State Initialization
         if 'step' not in state:
@@ -304,10 +309,16 @@ class AdamW_adv(torch.optim.Optimizer):
             del vt
 
         else:  # Standard AdamW logic for non-factored tensors
-            exp_avg_sq = state['exp_avg_sq']
+            if apply_sr_states:
+                exp_avg_sq = state['exp_avg_sq'].float()
+            else:
+                exp_avg_sq = state['exp_avg_sq']
 
             if beta1 > 0:
-                exp_avg = state['exp_avg']
+                if apply_sr_states:
+                    exp_avg = state['exp_avg'].float()
+                else:
+                    exp_avg = state['exp_avg']
                 exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
                 if self.grams_moment:
                     exp_avg = grad.sign() * exp_avg.abs()
@@ -318,7 +329,10 @@ class AdamW_adv(torch.optim.Optimizer):
                     del mask
 
             if self.use_AdEMAMix:
-                exp_avg_slow = state['exp_avg_slow']
+                if apply_sr_states:
+                    exp_avg_slow = state['exp_avg_slow'].float()
+                else:
+                    exp_avg_slow = state['exp_avg_slow']
                 exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=1 - beta3_ema)
                 if beta1 > 0:
                     update = torch.add(exp_avg, exp_avg_slow, alpha=alpha_t)
@@ -337,6 +351,13 @@ class AdamW_adv(torch.optim.Optimizer):
                 denom = (exp_avg_sq.sqrt() / (bias_correction2**0.5)).add_(group['eps'])
                 update.div_(denom)
             del denom
+
+            if apply_sr_states:
+                copy_stochastic_(state['exp_avg_sq'], exp_avg_sq)
+                if beta1 > 0:
+                    copy_stochastic_(state['exp_avg'], exp_avg)
+                if self.use_AdEMAMix:
+                    copy_stochastic_(state['exp_avg_slow'], exp_avg_slow)
 
             update.mul_(step_size)
 
