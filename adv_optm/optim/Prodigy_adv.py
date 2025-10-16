@@ -304,7 +304,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 state['p0'] = torch.tensor(0, device=device, dtype=p.dtype)
 
         current_step = state['step']
-        if group['kourkoutas_beta']:
+        if group.get('kourkoutas_beta', False):
             # Call prepare_step() once at the beginning of the step for all params
             self.kourkoutas_helper.maybe_prepare_step(current_step)
             # Accumulate current grad's norm for the *next* step
@@ -515,7 +515,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             d_hat = self.d
             if global_d_denom > 0:
                 d_hat = d_coef * global_d_numerator / global_d_denom
-                if g_group['d_limiter']:
+                if g_group.get('d_limiter', False):
                     d_hat = min(self.d * (2 ** 0.25), d_hat)
                 if self.d == g_group['d0']:
                     self.d = max(self.d, d_hat)

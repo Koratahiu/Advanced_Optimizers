@@ -325,7 +325,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             d_hat = self.d
             if global_d_denom > 0:
                 d_hat = d_coef * global_d_numerator / global_d_denom
-                if g_group['d_limiter']:
+                if g_group.get('d_limiter', False):
                     d_hat = min(self.d * (2 ** 0.25), d_hat)
                 if self.d == g_group['d0']:
                     self.d = max(self.d, d_hat)

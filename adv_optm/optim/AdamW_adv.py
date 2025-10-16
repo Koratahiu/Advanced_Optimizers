@@ -209,7 +209,7 @@ class AdamW_adv(torch.optim.Optimizer):
         beta1, beta2 = group['betas']
 
         current_step = state['step']
-        if group['kourkoutas_beta']:
+        if group.get('kourkoutas_beta', False):
             # Call prepare_step() once at the beginning of the step for all params
             self.kourkoutas_helper.maybe_prepare_step(current_step)
             # Accumulate current grad's norm for the *next* step
@@ -220,7 +220,7 @@ class AdamW_adv(torch.optim.Optimizer):
         step = state['step'] + 1
         if group['use_bias_correction']:
             bias_correction1 = 1.0 - beta1 ** step
-            if group['kourkoutas_beta']:
+            if group.get('kourkoutas_beta', False):
                 bias_correction2 = 1.0 - group['betas'][1] ** step
                 # Use beta2_max for bias correction
             else:

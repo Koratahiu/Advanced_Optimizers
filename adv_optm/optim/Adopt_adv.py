@@ -240,7 +240,7 @@ class Adopt_adv(torch.optim.Optimizer):
         beta1, beta2 = group['betas']
 
         current_step = state['step']
-        if group['kourkoutas_beta']:
+        if group.get('kourkoutas_beta', False):
             # Call prepare_step() once at the beginning of the step for all params
             self.kourkoutas_helper.maybe_prepare_step(current_step)
             # Accumulate current grad's norm for the *next* step

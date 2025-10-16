@@ -191,7 +191,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         beta1_final, beta2 = group["betas"]
 
         current_step = state['step']
-        if group['kourkoutas_beta']:
+        if group.get('kourkoutas_beta', False):
             # Call prepare_step() once at the beginning of the step for all params
             self.kourkoutas_helper.maybe_prepare_step(current_step)
             # Accumulate current grad's norm for the *next* step
@@ -210,7 +210,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
         if group['use_bias_correction']:
             state['num_sum'] = beta1 * state['num_sum'] + 1.0
-            if group['kourkoutas_beta']:
+            if group.get('kourkoutas_beta', False):
                 state['den_sum'] = group['betas'][1] * state['den_sum'] + (1.0 - group['betas'][1])
             else:
                 state['den_sum'] = beta2 * state['den_sum'] + (1.0 - beta2)
