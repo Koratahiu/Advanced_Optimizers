@@ -107,6 +107,7 @@ class AdamW_adv(torch.optim.Optimizer):
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
         nnmf_factor: bool = False,
+        _is_delegate: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -137,10 +138,11 @@ class AdamW_adv(torch.optim.Optimizer):
         self.factored = nnmf_factor
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
-        super().__init__(params, defaults)
-
-        if self.kourkoutas_beta:
-            self.kourkoutas_helper = KourkoutasHelper(self)
+        if not _is_delegate:
+            super().__init__(params, defaults)
+        else:
+            self.defaults = defaults
+        self.kourkoutas_helper = None
 
     @property
     def supports_fused_back_pass(self):
@@ -158,6 +160,8 @@ class AdamW_adv(torch.optim.Optimizer):
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
         if p.grad is None:
             return
+        if group.get('kourkoutas_beta', False) and self.kourkoutas_helper is None:
+            self.kourkoutas_helper = KourkoutasHelper(self)
 
         grad = p.grad
         if grad.dtype != torch.float32 and self.factored:

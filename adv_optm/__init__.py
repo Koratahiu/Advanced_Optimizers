@@ -18,4 +18,4 @@ __all__ = [
     "Muon_adv",
 ]
 
-__version__ = "1.2.dev1"
+__version__ = "1.2.dev2"

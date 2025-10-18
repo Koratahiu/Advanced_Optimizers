@@ -1,5 +1,8 @@
 import torch
-from typing import Optional
+from typing import Optional, Callable
+
+from .AdamW_adv import AdamW_adv
+from ..util.MuonAdam_helper import MuonAdamHelper
 
 from ..util.BF16_Stochastic_Rounding import add_stochastic_
 from ..util.Newton_Schulz import _newton_schulz_iteration
@@ -18,6 +21,10 @@ class Muon_adv(torch.optim.Optimizer):
     This implementation is designed for 2D parameters (e.g., linear layers) and
     can handle other-dimensional parameters (e.g., 1D bias, 4D convolutional layers) by
     flattening/reshaping them.
+    
+    Can also operate in a hybrid mode, using an auxiliary AdamW
+    optimizer for specific parameters (e.g., biases, norms, embeddings) as
+    defined by a `layer_key_fn`.
 
     Args:
         params (iterable): iterable of parameters to optimize or dicts defining
@@ -39,6 +46,16 @@ class Muon_adv(torch.optim.Optimizer):
             matrices to apply low-rank compression (default: True).
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
+        MuonWithAuxAdam (bool): If True, enables the hybrid optimizer mode.
+            Parameters designated by `layer_key_fn` will be optimized with
+            AdamW_adv instead of Muon. (default: False)
+        layer_key_fn (Optional[Callable]): A function that takes a parameter `p`
+            and returns a key. If the key is 'adam', the parameter is handled by
+            the auxiliary AdamW optimizer. All other keys are handled by Muon.
+            Only used when `MuonWithAuxAdam` is True. (default: None)
+        adam_kwargs (Optional[dict]): A dictionary of keyword arguments to pass
+            to the auxiliary AdamW_adv optimizer. Only used when
+            `MuonWithAuxAdam` is True. (default: None)
     """
 
     def __init__(
@@ -55,6 +72,11 @@ class Muon_adv(torch.optim.Optimizer):
         vector_reshape_muon: bool = False,
         vector_reshape: bool = True,
         nnmf_factor: bool = False,
+        # hybrid optimizer mode
+        MuonWithAuxAdam: bool = False,
+        layer_key_fn: Optional[Callable] = None,
+        muon_adam_lr: float = 1e-4,
+        adam_kwargs: Optional[dict] = None,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -73,7 +95,28 @@ class Muon_adv(torch.optim.Optimizer):
             "vector_reshape_muon": vector_reshape_muon,
         }
         self.stochastic_rounding = stochastic_rounding
+        
+        self.MuonWithAuxAdam = MuonWithAuxAdam
+        self.helper = None
+        self.aux_adam = None
+ 
+        if self.MuonWithAuxAdam:
+            adam_kwargs = adam_kwargs or {}
+            # Create a delegate AdamW optimizer to get its default hyperparameters.
+            self.aux_adam = AdamW_adv(
+                [],
+                lr=muon_adam_lr,
+                **adam_kwargs,
+                _is_delegate=True
+            )
+            # Update the defaults dictionary
+            defaults.update(self.aux_adam.defaults)
+        
         super().__init__(params, defaults)
+
+        if self.MuonWithAuxAdam:
+            self.helper = MuonAdamHelper(self, layer_key_fn)
+        
 
     @property
     def supports_fused_back_pass(self):
@@ -89,6 +132,18 @@ class Muon_adv(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        if self.MuonWithAuxAdam:
+            optim_type = self.helper.get_optimizer_type(p)
+            if optim_type == 'adam':
+                # Delegate to the AdamW_adv optimizer's logic.
+                # We need to temporarily "lend" our state and param_groups
+                # to the delegate so it has the full context to work with,
+                # especially for features like Kourkoutas-beta.
+                self.aux_adam.state = self.state
+                self.aux_adam.param_groups = self.param_groups
+                self.aux_adam.step_parameter(p, group, i)
+                return
+
         if p.grad is None:
             return
 
