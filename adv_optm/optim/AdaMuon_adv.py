@@ -135,7 +135,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             print("Warning: nesterov is incompatible with Simplified_AdEMAMix, Disabling cautious.")
             nesterov = False
 
-        defaults = {
+        muon_defaults = {
             "lr": lr, "betas": betas, "weight_decay": weight_decay,
             "eps": eps, "rms_target": rms_target, "ns_steps": ns_steps,
             "ns_eps": ns_eps, "ns_coeffs": ns_coeffs, "nnmf_factor": nnmf_factor,
@@ -154,22 +154,41 @@ class AdaMuon_adv(torch.optim.Optimizer):
         self.helper = None
         self.aux_adam = None
  
-        if self.MuonWithAuxAdam:
-            adam_kwargs = adam_kwargs or {}
-            # Create a delegate AdamW optimizer to get its default hyperparameters.
-            self.aux_adam = AdamW_adv(
-                [],
-                lr=muon_adam_lr,
-                **adam_kwargs,
-                _is_delegate=True
-            )
-            # Update the defaults dictionary
-            defaults.update(self.aux_adam.defaults)
-        
-        super().__init__(params, defaults)
+        if not self.MuonWithAuxAdam:
+            super().__init__(params, muon_defaults)
+            return
 
-        if self.MuonWithAuxAdam:
-            self.helper = MuonAdamHelper(self, layer_key_fn)
+        # HYBRID OPTIMIZER LOGIC
+        adam_kwargs = adam_kwargs or {}
+        self.aux_adam = AdamW_adv(
+            [],
+            lr=muon_adam_lr,
+            **adam_kwargs,
+            _is_delegate=True
+        )
+        adam_defaults = self.aux_adam.defaults
+
+        final_param_groups = []
+        _layer_key_fn = layer_key_fn if layer_key_fn is not None else lambda p: 'muon'
+
+        for group in params:
+            # All params in a group are of the same type
+            first_param = group['params'][0]
+            key = _layer_key_fn(first_param)
+            optim_type = 'adam' if key == 'adam' else 'muon'
+
+            new_group = group.copy()
+            defaults_to_use = adam_defaults if optim_type == 'adam' else muon_defaults
+
+            for key, value in defaults_to_use.items():
+                new_group.setdefault(key, value)
+
+            final_param_groups.append(new_group)
+
+        super().__init__(final_param_groups, {})
+        
+        # Now that self is initialized, create the helper
+        self.helper = MuonAdamHelper(self, layer_key_fn)
         
 
     @property
@@ -196,20 +215,23 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        if group['_kourkoutas_beta'] and self._kourkoutas_helper is None:
+            self._kourkoutas_helper = KourkoutasHelper(self)
+
         if self.MuonWithAuxAdam:
             optim_type = self.helper.get_optimizer_type(p)
             if optim_type == 'adam':
                 # Delegate to the AdamW_adv optimizer's logic.
                 # We need to temporarily "lend" our state and param_groups
-                # to the delegate so it has the full context to work with,
-                # especially for features like Kourkoutas-beta.
                 self.aux_adam.state = self.state
                 self.aux_adam.param_groups = self.param_groups
+                
+                # Ensure the aux optimizer uses the same Kourkoutas helper instance.
+                if self._kourkoutas_helper is not None:
+                    self.aux_adam.kourkoutas_helper = self._kourkoutas_helper
+
                 self.aux_adam.step_parameter(p, group, i)
                 return
-
-        if group['_kourkoutas_beta'] and self._kourkoutas_helper is None:
-            self._kourkoutas_helper = KourkoutasHelper(self)
 
         if p.grad is None:
             return
