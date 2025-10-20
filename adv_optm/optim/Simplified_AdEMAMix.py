@@ -67,7 +67,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             logging of Kourkoutas-β statistics (min, max, mean of `β₂` across layers)
             every logging steps. Useful for debugging and tuning. Set to 0 to disable
             logging (default: 0). 
-        layer_key_fn (Optional[Callable]): A function that takes a parameter `p`
+        layer_key_kb_fn (Optional[Callable]): A function that takes a parameter `p`
             and returns a unique, hashable key representing its "layer" or "bucket".
             If `None`, parameters are bucketed by their memory ID (tensor-wise).
             (default: None)
@@ -95,7 +95,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         tiny_spike: float = 1e-9,
         k_warmup_steps: int = 0,
         k_logging: int = 0,
-        layer_key_fn: Optional[Callable] = None,
+        layer_key_kb_fn: Optional[Callable] = None,
         nnmf_factor: bool = False,
     ):
         if not (lr >= 0.0):
@@ -121,7 +121,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         self.stochastic_rounding = stochastic_rounding
         self.factored = nnmf_factor
         self.kourkoutas_beta = kourkoutas_beta
-        self.layer_key_fn = layer_key_fn
+        self.layer_key_kb_fn = layer_key_kb_fn
         super().__init__(params, defaults)
 
         if self.kourkoutas_beta:

@@ -32,12 +32,12 @@ class KourkoutasHelper:
         if self._layer_info_built:
             return
 
-        if hasattr(self.optimizer, 'layer_key_fn') and self.optimizer.layer_key_fn is not None:
+        if hasattr(self.optimizer, 'layer_key_kb_fn') and self.optimizer.layer_key_kb_fn is not None:
             # A custom key function was provided by the user. We will use it.
             pass
         else:
             # No key function was provided. Default to coarse, shape-based bucketing.
-            self.optimizer.layer_key_fn = lambda p: \
+            self.optimizer.layer_key_kb_fn = lambda p: \
                 (id(p),) if p.dim() == 2 and 1 <= p.shape[0] <= 10 and p.shape[1] in {768, 1280, 4096} \
                 else tuple(p.shape)
             # This ensures that we won't mix embeddings with tokens (1 to 10)
@@ -46,7 +46,7 @@ class KourkoutasHelper:
         for group in self.optimizer.param_groups:
             for p in group['params']:
                 # The mapping is static and should not depend on the presence of a gradient.
-                layer_key = self.optimizer.layer_key_fn(p)
+                layer_key = self.optimizer.layer_key_kb_fn(p)
                 if layer_key not in self.layer_info:
                     self.layer_info[layer_key] = {'params': [], 'group_ref': group}
                 self.layer_info[layer_key]['params'].append(p)
@@ -158,7 +158,7 @@ class KourkoutasHelper:
         """
         Accumulates the squared L2 norm of a single gradient for the next step's calculation.
         """
-        layer_key = self.optimizer.layer_key_fn(p)
+        layer_key = self.optimizer.layer_key_kb_fn(p)
 
         if layer_key in self.layer_info:
             # Initialize the transient state for this layer if it's the first time in the step.
@@ -173,6 +173,6 @@ class KourkoutasHelper:
         """
         Gets the appropriate beta2 for the current parameter, handling warmup and dynamic value fetching.
         """
-        layer_key = self.optimizer.layer_key_fn(p)
+        layer_key = self.optimizer.layer_key_kb_fn(p)
         # The default is the max value, which is correct for unmapped params or edge cases
         return self.layer_state.get(layer_key, {}).get('dynamic_beta2', group['betas'][1])
