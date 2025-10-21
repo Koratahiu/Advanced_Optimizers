@@ -182,7 +182,11 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             for key, value in defaults_to_use.items():
                 new_group.setdefault(key, value)
-
+            if '_kourkoutas_beta' not in new_group:
+                 if optim_type == 'adam':
+                     new_group['_kourkoutas_beta'] = False
+                 else:
+                     new_group['_kourkoutas_beta'] = muon_defaults['_kourkoutas_beta']
             final_param_groups.append(new_group)
 
         super().__init__(final_param_groups, {})
@@ -225,10 +229,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 # We need to temporarily "lend" our state and param_groups
                 self.aux_adam.state = self.state
                 self.aux_adam.param_groups = self.param_groups
-                
-                # Ensure the aux optimizer uses the same Kourkoutas helper instance.
-                if self._kourkoutas_helper is not None:
-                    self.aux_adam.kourkoutas_helper = self._kourkoutas_helper
 
                 self.aux_adam.step_parameter(p, group, i)
                 return
