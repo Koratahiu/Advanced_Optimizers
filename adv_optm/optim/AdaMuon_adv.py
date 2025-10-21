@@ -3,7 +3,6 @@ from typing import Optional, Callable
 
 from .AdamW_adv import AdamW_adv
 from ..util.MuonAdam_helper import MuonAdamHelper
-from ..util.Kourkoutas import KourkoutasHelper
 
 from ..util.BF16_Stochastic_Rounding import add_stochastic_
 from ..util.Newton_Schulz import _newton_schulz_iteration
@@ -64,22 +63,13 @@ class AdaMuon_adv(torch.optim.Optimizer):
             matrices for muon NewtonSchulz (default: False).
         vector_reshape (bool): whether to reshape 1D vectors into 2D
             matrices to apply low-rank compression (default: True).
+        low_rank_ortho (bool): If True, enables low-rank orthogonalization, which
+            projects the update to a lower rank before orthogonalization.
+            (default: False)
+        ortho_rank (int): The rank for low-rank orthogonalization.
+            (default: 128)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
-        kourkoutas_beta (bool): whether to enable the layer-wise dynamic β₂ logic.
-            If `False`, the optimizer behaves as standard AdamW. (default: False)
-        beta2_min (float): The minimum value for dynamic β₂, used during periods of
-            high gradient variance ("sunspikes"). Must be less than `betas[1]`.
-            (default: 0.88)
-        ema_alpha (float): The decay rate for the Exponential Moving Average (EMA) of
-            the pooled gradient norms. Corresponds to `α` in the paper.
-            (default: 0.93)
-        tiny_spike (float): A small constant added to the denominator of the
-            "sunspike" ratio calculation to prevent division by zero. Corresponds
-            to `ε_spike` in the paper. (default: 1e-9)
-        k_warmup_steps (int): The number of initial steps during which β₂ is held
-            at a fixed beta2 value before the
-            dynamic logic activates. (default: 0)
         MuonWithAuxAdam (bool): If True, enables the hybrid optimizer mode.
             Parameters designated by `layer_key_fn` will be optimized with
             AdamW_adv instead of Muon. (default: False)
@@ -110,15 +100,10 @@ class AdaMuon_adv(torch.optim.Optimizer):
         alpha_grad: float = 100.0,
         vector_reshape_muon: bool = False,
         vector_reshape: bool = False,
+        # Low-rank Muon
+        low_rank_ortho: bool = False,
+        ortho_rank: int = 128,
         nnmf_factor: bool = False,
-        # K-b parameters
-        kourkoutas_beta: bool = False,
-        beta2_min: float = 0.9,
-        ema_alpha: float = 0.95,
-        tiny_spike: float = 1e-9,
-        k_warmup_steps: int = 0,
-        k_logging: int = 0,
-        layer_key_kb_fn: Optional[Callable] = None,
         # hybrid optimizer mode
         MuonWithAuxAdam: bool = False,
         layer_key_fn: Optional[Callable] = None,
@@ -142,14 +127,11 @@ class AdaMuon_adv(torch.optim.Optimizer):
             "vector_reshape": vector_reshape,
             "vector_reshape_muon": vector_reshape_muon,
             "nesterov":nesterov, "use_atan2":use_atan2,
-            "Simplified_AdEMAMix": Simplified_AdEMAMix, "alpha_grad": alpha_grad, 
-            "_kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
-            "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
+            "Simplified_AdEMAMix": Simplified_AdEMAMix, "alpha_grad": alpha_grad,
+            # Low-rank Ortho
+            "low_rank_ortho": low_rank_ortho, "ortho_rank": ortho_rank,
         }
         self.stochastic_rounding = stochastic_rounding
-        self._kourkoutas_beta = kourkoutas_beta
-        self._kourkoutas_helper = None
-        self.layer_key_kb_fn = layer_key_kb_fn
         self.MuonWithAuxAdam = MuonWithAuxAdam
         self.helper = None
         self.aux_adam = None
@@ -182,14 +164,9 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             for key, value in defaults_to_use.items():
                 new_group.setdefault(key, value)
-            if '_kourkoutas_beta' not in new_group:
-                 if optim_type == 'adam':
-                     new_group['_kourkoutas_beta'] = False
-                 else:
-                     new_group['_kourkoutas_beta'] = muon_defaults['_kourkoutas_beta']
             final_param_groups.append(new_group)
 
-        super().__init__(final_param_groups, {})
+        super().__init__(final_param_groups, muon_defaults)
         
         # Now that self is initialized, create the helper
         self.helper = MuonAdamHelper(self, layer_key_fn)
@@ -219,9 +196,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-        if group['_kourkoutas_beta'] and self._kourkoutas_helper is None:
-            self._kourkoutas_helper = KourkoutasHelper(self)
-
         if self.MuonWithAuxAdam:
             optim_type = self.helper.get_optimizer_type(p)
             if optim_type == 'adam':
@@ -277,7 +251,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
         # Retrieve hyperparameters
         beta1, beta2 = group['betas']
-        current_step = state['step']
         nesterov = group['nesterov']
         Simplified_AdEMAMix = group['Simplified_AdEMAMix']
         alpha_grad = group['alpha_grad']
@@ -303,20 +276,37 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 signed_m_buf = torch.sign(mt_buf)
             del grad_reshaped
 
-            update = _newton_schulz_iteration(
-                signed_m_buf,
-                steps=group['ns_steps'],
-                eps=group['ns_eps'],
-                coeffs=group['ns_coeffs'],
-            )
-
-            if group['_kourkoutas_beta']:
-                # Call prepare_step() once at the beginning of the step for all params
-                self._kourkoutas_helper.maybe_prepare_step(current_step)
-                # Accumulate current sign-stabilized orthogonal update's norm for the *next* step
-                self._kourkoutas_helper.accumulate_gradient_sq_norm(p, update.view(p.shape))
-                # Get the dynamic beta2 calculated in prepare_step()
-                beta2 = self._kourkoutas_helper.get_beta2(p, group, current_step)
+            # Orthogonalization step
+            if group['low_rank_ortho']:
+                # Low-Rank Orthogonalization on the reconstructed matrix
+                M = signed_m_buf
+                r = min(group['ortho_rank'], M.shape[0], M.shape[1])
+                if r > 0:
+                    G_sketch = torch.randn(M.shape[1], r, device=M.device, dtype=M.dtype)
+                    MG = M @ G_sketch
+                    if MG.dtype != torch.float32:
+                        MG_dtype = M.dtype
+                        Q, _ = torch.linalg.qr(MG.float())
+                        Q = Q.to(MG_dtype)
+                    else:
+                        Q, _ = torch.linalg.qr(MG)
+                    projected_M = Q.T @ M
+                    ortho_projected_M = _newton_schulz_iteration(
+                        projected_M, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs']
+                    )
+                    update = Q @ ortho_projected_M
+                else: # Fallback for invalid rank
+                    update = _newton_schulz_iteration(
+                        signed_m_buf, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs']
+                    )
+            else:
+                # Original full Newton-Schulz
+                update = _newton_schulz_iteration(
+                    signed_m_buf,
+                    steps=group['ns_steps'],
+                    eps=group['ns_eps'],
+                    coeffs=group['ns_coeffs'],
+                )
 
             # Reconstruct second momentum from previous step's factors
             vt_buf = _unnmf((state['mu_v_nmf'], state['mv_v_nmf']))
@@ -381,24 +371,40 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 if len(p.shape) > 2:
                     signed_m_buf = signed_m_buf.view(p.shape[0], -1)
 
-                # NewtonSchulz
-                update = _newton_schulz_iteration(
-                    signed_m_buf,
-                    steps=group['ns_steps'],
-                    eps=group['ns_eps'],
-                    coeffs=group['ns_coeffs'],
-                )
+                # Orthogonalization step
+                if group['low_rank_ortho']:
+                    # Low-Rank Orthogonalization on the reconstructed matrix
+                    M = signed_m_buf
+                    r = min(group['ortho_rank'], M.shape[0], M.shape[1])
+                    if r > 0:
+                        G_sketch = torch.randn(M.shape[1], r, device=M.device, dtype=M.dtype)
+                        MG = M @ G_sketch
+                        if MG.dtype != torch.float32:
+                            MG_dtype = M.dtype
+                            Q, _ = torch.linalg.qr(MG.float())
+                            Q = Q.to(MG_dtype)
+                        else:
+                            Q, _ = torch.linalg.qr(MG)
+                        projected_M = Q.T @ M
+                        ortho_projected_M = _newton_schulz_iteration(
+                            projected_M, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs']
+                        )
+                        update = Q @ ortho_projected_M
+                    else: # Fallback for invalid rank
+                        update = _newton_schulz_iteration(
+                            signed_m_buf, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs']
+                        )
+                else:
+                    # Original full Newton-Schulz
+                    update = _newton_schulz_iteration(
+                        signed_m_buf,
+                        steps=group['ns_steps'],
+                        eps=group['ns_eps'],
+                        coeffs=group['ns_coeffs'],
+                    )
 
                 if len(p.shape) > 2 or state['reshaped_1d_muon']:
                     update = update.view(p.shape)
-
-            if group['_kourkoutas_beta']:
-                # Call prepare_step() once at the beginning of the step for all params
-                self._kourkoutas_helper.maybe_prepare_step(current_step)
-                # Accumulate current sign-stabilized orthogonal update's norm for the *next* step
-                self._kourkoutas_helper.accumulate_gradient_sq_norm(p, update)
-                # Get the dynamic beta2 calculated in prepare_step()
-                beta2 = self._kourkoutas_helper.get_beta2(p, group, current_step)
 
                 vt_buf = state['second_momentum_buffer']
                 vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)

@@ -178,7 +178,7 @@ class Muon_adv(torch.optim.Optimizer):
 
             final_param_groups.append(new_group)
 
-        super().__init__(final_param_groups, {})
+        super().__init__(final_param_groups, muon_defaults)
         
         # Now that self is initialized, create the helper
         self.helper = MuonAdamHelper(self, layer_key_fn)
@@ -292,10 +292,10 @@ class Muon_adv(torch.optim.Optimizer):
             del grad_reshaped
 
             # Orthogonalization step
-            if group['low_rank_muon']:
+            if group['low_rank_ortho']:
                 # Low-Rank Orthogonalization on the reconstructed matrix
                 M = update
-                r = min(group['low_rank_rank'], M.shape[0], M.shape[1])
+                r = min(group['ortho_rank'], M.shape[0], M.shape[1])
                 if r > 0:
                     G_sketch = torch.randn(M.shape[1], r, device=M.device, dtype=M.dtype)
                     MG = M @ G_sketch
