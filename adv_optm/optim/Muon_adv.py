@@ -18,6 +18,10 @@ class Muon_adv(torch.optim.Optimizer):
     the hidden layers of neural networks. It applies SGD with momentum and then
     orthogonalizes the resulting update matrix using a Newton-Schulz iteration.
 
+    NorMuon (Neuron-wise Normalized Muon) extends this by adding neuron-level
+    adaptive learning rates, combining the benefits of orthogonalization with
+    second-order momentum statistics.
+
     This implementation is designed for 2D parameters (e.g., linear layers) and
     can handle other-dimensional parameters (e.g., 1D bias, 4D convolutional layers) by
     flattening/reshaping them.
@@ -54,6 +58,19 @@ class Muon_adv(torch.optim.Optimizer):
             matrices to apply low-rank compression (default: True).
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
+        low_rank_ortho (bool): If True, enables low-rank orthogonalization, which
+            projects the update to a lower rank before orthogonalization.
+            (default: False)
+        ortho_rank (int): The rank for low-rank orthogonalization.
+            (default: 128)
+        normuon_variant (bool): If True, enables the NorMuon update rule, which adds
+            neuron-wise normalization. (default: False)
+        beta2_normuon (float): The exponential decay rate for the second moment estimates
+            used in NorMuon. (default: 0.95)
+        normuon_eps (float): Epsilon for NorMuon normalization stability. (default: 1e-8)
+        normuon_lr_scale (float): Scaling factor for the NorMuon learning rate.
+            (default: 0.2)
+        normuon_atan2 (bool): whether to use the atan2 for NorMuon. (default: False)
         MuonWithAuxAdam (bool): If True, enables the hybrid optimizer mode.
             Parameters designated by `layer_key_fn` will be optimized with
             AdamW_adv instead of Muon. (default: False)
@@ -82,6 +99,15 @@ class Muon_adv(torch.optim.Optimizer):
         vector_reshape_muon: bool = False,
         vector_reshape: bool = False,
         nnmf_factor: bool = False,
+        # Low-rank Muon
+        low_rank_ortho: bool = False,
+        ortho_rank: int = 128,
+        # NorMuon additions
+        normuon_variant: bool = False,
+        beta2_normuon: float = 0.95,
+        normuon_eps: float = 1e-8,
+        normuon_lr_scale: float = 0.2,
+        normuon_atan2: bool = False,
         # hybrid optimizer mode
         MuonWithAuxAdam: bool = False,
         layer_key_fn: Optional[Callable] = None,
@@ -92,6 +118,8 @@ class Muon_adv(torch.optim.Optimizer):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
         if not (0.0 <= beta1 < 1.0):
             raise ValueError(f"beta1 should be in [0.0, 1.0). Got {beta1}")
+        if normuon_variant and not (0.0 <= beta2_normuon < 1.0):
+            raise ValueError(f"beta2_normuon should be in [0.0, 1.0) for NorMuon. Got {beta2_normuon}")
         if not (weight_decay >= 0.0):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
         if not (ns_steps > 0):
@@ -106,10 +134,16 @@ class Muon_adv(torch.optim.Optimizer):
             "ns_coeffs": ns_coeffs, "nnmf_factor": nnmf_factor,
             "vector_reshape": vector_reshape,
             "vector_reshape_muon": vector_reshape_muon,
-            "Simplified_AdEMAMix": Simplified_AdEMAMix, "alpha_grad": alpha_grad, 
+            "Simplified_AdEMAMix": Simplified_AdEMAMix, "alpha_grad": alpha_grad,
+            # Low-rank Ortho
+            "low_rank_ortho": low_rank_ortho, "ortho_rank": ortho_rank,
+            # NorMuon
+            "normuon_variant": normuon_variant, "beta2_normuon": beta2_normuon,
+            "normuon_eps": normuon_eps, "normuon_lr_scale": normuon_lr_scale,
+            "normuon_atan2": normuon_atan2,
         }
         self.stochastic_rounding = stochastic_rounding
-        
+
         self.MuonWithAuxAdam = MuonWithAuxAdam
         self.helper = None
         self.aux_adam = None
@@ -223,6 +257,12 @@ class Muon_adv(torch.optim.Optimizer):
                 elif len(p.shape) == 1:
                     state['momentum_buffer'] = torch.zeros_like(p)
 
+            # NorMuon state initialization
+            if group['normuon_variant']:
+                if len(p.shape) >= 2 or state['reshaped_1d_muon']:
+                    num_rows = p.shape[0] if len(p.shape) >= 2 else state['effective_shape'][0]
+                    state['normuon_v'] = torch.zeros(num_rows, device=p.device, dtype=torch.float32)
+
         beta1 = group['beta1']
         nesterov = group['nesterov']
         Simplified_AdEMAMix = group['Simplified_AdEMAMix']
@@ -251,14 +291,60 @@ class Muon_adv(torch.optim.Optimizer):
                 update = mt_buf.clone()
             del grad_reshaped
 
-            update = _newton_schulz_iteration(
-                update,
-                steps=group['ns_steps'],
-                eps=group['ns_eps'],
-                coeffs=group['ns_coeffs'],
-            )
+            # Orthogonalization step
+            if group['low_rank_muon']:
+                # Low-Rank Orthogonalization on the reconstructed matrix
+                M = update
+                r = min(group['low_rank_rank'], M.shape[0], M.shape[1])
+                if r > 0:
+                    G_sketch = torch.randn(M.shape[1], r, device=M.device, dtype=M.dtype)
+                    MG = M @ G_sketch
+                    if MG.dtype != torch.float32:
+                        MG_dtype = M.dtype
+                        Q, _ = torch.linalg.qr(MG.float())
+                        Q = Q.to(MG_dtype)
+                    else:
+                        Q, _ = torch.linalg.qr(MG)
+                    projected_M = Q.T @ M
+                    ortho_projected_M = _newton_schulz_iteration(
+                        projected_M, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs']
+                    )
+                    update = Q @ ortho_projected_M
+                else: # Fallback for invalid rank
+                    update = _newton_schulz_iteration(
+                        update, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs']
+                    )
+            else:
+                # Original full Newton-Schulz
+                update = _newton_schulz_iteration(
+                    update,
+                    steps=group['ns_steps'],
+                    eps=group['ns_eps'],
+                    coeffs=group['ns_coeffs'],
+                )
 
-            update = update.view(p.shape).mul_(group['lr'])
+
+            if group['normuon_variant'] and 'normuon_v' in state:
+                v_t = state['normuon_v']
+                beta2_normuon = group['beta2_normuon']
+                # Update 2nd moment estimate
+                mean_squared_update = torch.mean(update.square(), dim=1)
+                v_t.mul_(beta2_normuon).add_(mean_squared_update, alpha=1 - beta2_normuon)
+                # Normalize update
+                if group['normuon_atan2']:
+                    a = 1.2732395
+                    update.atan2_(v_t.sqrt().unsqueeze(1)).mul_(a)
+                else:
+                    update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
+                # Scale learning rate
+                update_norm = torch.linalg.vector_norm(update)
+                if update_norm > 1e-12:
+                    scaled_lr = group['normuon_lr_scale'] * group['lr'] * (p.numel()**0.5) / update_norm
+                else:
+                    scaled_lr = 0.0
+                update = update.view(p.shape).mul_(scaled_lr)
+            else: # Original Muon learning rate application
+                update = update.view(p.shape).mul_(group['lr'])
 
             state['sign'] = _pack_bools(mt_buf > 0)
             _nnmf(mt_buf.abs(), out=(state['mu_m_nmf'], state['mv_m_nmf']))
@@ -298,19 +384,80 @@ class Muon_adv(torch.optim.Optimizer):
                 if len(p.shape) > 2:
                     update = update.view(p.shape[0], -1)
 
-                # NewtonSchulz
-                update = _newton_schulz_iteration(
-                    update,
-                    steps=group['ns_steps'],
-                    eps=group['ns_eps'],
-                    coeffs=group['ns_coeffs'],
-                )
+                # Orthogonalization step
+                if group['low_rank_ortho']:
+                    # Low-Rank Orthogonalization based on Gaussian Sketching
+                    M = update
+                    r = min(group['ortho_rank'], M.shape[0], M.shape[1])
+
+                    if r > 0:
+                        # 1. Sketch the matrix
+                        G_sketch = torch.randn(M.shape[1], r, device=M.device, dtype=M.dtype)
+                        MG = M @ G_sketch
+                        
+                        # 2. QR decomposition to get orthogonal basis Q
+                        if MG.dtype != torch.float32:
+                            MG_dtype = M.dtype
+                            Q, _ = torch.linalg.qr(MG.float())
+                            Q = Q.to(MG_dtype)
+                        else:
+                            Q, _ = torch.linalg.qr(MG)
+                        
+                        # 3. Project M onto the basis
+                        projected_M = Q.T @ M
+                        
+                        # 4. Orthogonalize the smaller projected matrix
+                        ortho_projected_M = _newton_schulz_iteration(
+                            projected_M,
+                            steps=group['ns_steps'],
+                            eps=group['ns_eps'],
+                            coeffs=group['ns_coeffs'],
+                        )
+                        
+                        # 5. Project back to the original space
+                        update = Q @ ortho_projected_M
+                    else: # Fallback for invalid rank
+                        update = _newton_schulz_iteration(
+                            update,
+                            steps=group['ns_steps'],
+                            eps=group['ns_eps'],
+                            coeffs=group['ns_coeffs'],
+                        )
+                else:
+                    # Original NewtonSchulz
+                    update = _newton_schulz_iteration(
+                        update,
+                        steps=group['ns_steps'],
+                        eps=group['ns_eps'],
+                        coeffs=group['ns_coeffs'],
+                    )
+
+                # NorMuon Logic
+                if group['normuon_variant'] and 'normuon_v' in state:
+                    v_t = state['normuon_v']
+                    beta2_normuon = group['beta2_normuon']
+                    # Update 2nd moment estimate
+                    mean_squared_update = torch.mean(update.square(), dim=1)
+                    v_t.mul_(beta2_normuon).add_(mean_squared_update, alpha=1 - beta2_normuon)
+                    # Normalize update
+                    if group['normuon_atan2']:
+                        a = 1.2732395
+                        update.atan2_(v_t.sqrt().unsqueeze(1)).mul_(a)
+                    else:
+                        update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
+                    # Scale learning rate
+                    update_norm = torch.linalg.vector_norm(update)
+                    if update_norm > 1e-12:
+                        scaled_lr = group['normuon_lr_scale'] * group['lr'] * (p.numel()**0.5) / update_norm
+                    else:
+                        scaled_lr = 0.0
+                    update.mul_(scaled_lr)
+                else: # Original Muon learning rate application
+                    update.mul_(group['lr'])
 
                 # Reshape back to original if we flattened or reshaped
                 if len(p.shape) > 2 or state['reshaped_1d_muon']:
                     update = update.view(p.shape)
-
-                update.mul_(group['lr'])
             
             else: # Fallback to standard SGD with momentum for 1D params (biases, etc.) when not reshaped
                 # Momentum update
