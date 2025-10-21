@@ -327,7 +327,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
             # RMS-aligned rescaling
             rms_target = group['rms_target']
             num_elements = update.numel()
-            scaling_factor = rms_target * (num_elements ** 0.5) / (update.norm())
+            # Add eps to prevent division by zero
+            scaling_factor = rms_target * (num_elements ** 0.5) / (update.norm() + group['eps'])
 
             update.mul_(scaling_factor)
             update = update.view(p.shape).mul_(group['lr'])
@@ -422,7 +423,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 # RMS-aligned rescaling
                 rms_target = group['rms_target']
                 num_elements = update.numel()
-                scaling_factor = rms_target * (num_elements ** 0.5) / (update.norm())
+                # Add eps to prevent division by zero
+                scaling_factor = rms_target * (num_elements ** 0.5) / (update.norm() + group['eps'])
 
                 update.mul_(scaling_factor)
                 del num_elements, scaling_factor
