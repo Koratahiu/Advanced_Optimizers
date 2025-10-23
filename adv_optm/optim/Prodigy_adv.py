@@ -229,7 +229,7 @@ class Prodigy_adv(torch.optim.Optimizer):
 
     def init_step(self):
         """Resets accumulators and calculates dlr for the upcoming step."""
-        self.d_denom = torch.zeros(1, device=self.device)
+        self.d_denom = torch.tensor(0.0, device=self.device)
 
         g_group = self.param_groups[0]
         self.beta1, self.beta2_default = g_group['betas']
@@ -505,7 +505,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             d_max, d_coef, growth_rate = g_group['d_max'], g_group['d_coef'], g_group['growth_rate']
             
             if self.fsdp_in_use and dist.is_available() and dist.is_initialized():
-                dist_tensor = torch.cat([self.d_numerator, self.d_denom])
+                dist_tensor = torch.stack([self.d_numerator, self.d_denom])
                 dist.all_reduce(dist_tensor, op=dist.ReduceOp.SUM)
                 global_d_numerator = dist_tensor[0].item()
                 global_d_denom = dist_tensor[1].item()
