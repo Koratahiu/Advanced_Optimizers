@@ -248,9 +248,10 @@ class Prodigy_adv(torch.optim.Optimizer):
 
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
-                self.init_state(p, group)
+                self.__init_state(p, group)
 
-    def init_state(self, p, group):
+    @torch.no_grad()
+    def __init_state(self, p, group):
         state = self.state[p]
         if 'step' in state:
             return
