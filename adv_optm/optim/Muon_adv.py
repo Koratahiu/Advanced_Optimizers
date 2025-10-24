@@ -74,10 +74,6 @@ class Muon_adv(torch.optim.Optimizer):
         MuonWithAuxAdam (bool): If True, enables the hybrid optimizer mode.
             Parameters designated by `layer_key_fn` will be optimized with
             AdamW_adv instead of Muon. (default: False)
-        layer_key_fn (Optional[Callable]): A function that takes a parameter `p`
-            and returns a key. If the key is 'adam', the parameter is handled by
-            the auxiliary AdamW optimizer. All other keys are handled by Muon.
-            Only used when `MuonWithAuxAdam` is True. (default: None)
         adam_kwargs (Optional[dict]): A dictionary of keyword arguments to pass
             to the auxiliary AdamW_adv optimizer. Only used when
             `MuonWithAuxAdam` is True. (default: None)
@@ -110,7 +106,6 @@ class Muon_adv(torch.optim.Optimizer):
         normuon_atan2: bool = False,
         # hybrid optimizer mode
         MuonWithAuxAdam: bool = False,
-        layer_key_fn: Optional[Callable] = None,
         muon_adam_lr: float = 1e-4,
         adam_kwargs: Optional[dict] = None,
     ):
@@ -145,9 +140,8 @@ class Muon_adv(torch.optim.Optimizer):
         self.stochastic_rounding = stochastic_rounding
 
         self.MuonWithAuxAdam = MuonWithAuxAdam
-        self.helper = None
         self.aux_adam = None
- 
+
         if not self.MuonWithAuxAdam:
             super().__init__(params, muon_defaults)
             return
@@ -163,25 +157,16 @@ class Muon_adv(torch.optim.Optimizer):
         adam_defaults = self.aux_adam.defaults
 
         final_param_groups = []
-        _layer_key_fn = layer_key_fn if layer_key_fn is not None else lambda p: 'muon'
-
         for group in params:
-            first_param = group['params'][0]
-            key = _layer_key_fn(first_param)
-            optim_type = 'adam' if key == 'adam' else 'muon'
-
-            new_group = group.copy()
+            optim_type = group.get('optim_type', 'muon')
             defaults_to_use = adam_defaults if optim_type == 'adam' else muon_defaults
 
+            new_group = group.copy()
             for key, value in defaults_to_use.items():
                 new_group.setdefault(key, value)
-
             final_param_groups.append(new_group)
 
         super().__init__(final_param_groups, muon_defaults)
-        
-        # Now that self is initialized, create the helper
-        self.helper = MuonAdamHelper(self, layer_key_fn)
 
 
     @property
@@ -209,7 +194,7 @@ class Muon_adv(torch.optim.Optimizer):
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
         if self.MuonWithAuxAdam:
-            optim_type = self.helper.get_optimizer_type(p)
+            optim_type = group.get('optim_type')
             if optim_type == 'adam':
                 # Delegate to the AdamW_adv optimizer's logic.
                 # We need to temporarily "lend" our state and param_groups

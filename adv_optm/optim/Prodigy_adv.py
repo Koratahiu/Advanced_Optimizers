@@ -109,7 +109,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             logging of Kourkoutas-β statistics (min, max, mean of `β₂` across layers)
             every logging steps. Useful for debugging and tuning. Set to 0 to disable
             logging (default: 0). 
-        layer_key_kb_fn (Optional[Callable]): A function that takes a parameter `p`
+        layer_key_fn (Optional[Callable]): A function that takes a parameter `p`
             and returns a unique, hashable key representing its "layer" or "bucket".
             If `None`, parameters are bucketed by their memory ID (tensor-wise).
             (default: None)
@@ -152,7 +152,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         tiny_spike: float = 1e-9,
         k_warmup_steps: int = 0,
         k_logging: int = 0,
-        layer_key_kb_fn: Optional[Callable] = None,
+        layer_key_fn: Optional[Callable] = None,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -205,7 +205,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         self.fsdp_in_use = fsdp_in_use
         
         self.kourkoutas_beta = kourkoutas_beta
-        self.layer_key_kb_fn = layer_key_kb_fn
+        self.layer_key_fn = layer_key_fn
 
         super().__init__(params, defaults)
         if self.kourkoutas_beta:
@@ -516,7 +516,10 @@ class Prodigy_adv(torch.optim.Optimizer):
             if global_d_denom > 0:
                 d_hat = d_coef * global_d_numerator / global_d_denom
                 if g_group.get('d_limiter', False):
-                    d_hat = min(self.d * (2 ** 0.25), d_hat)
+                    if g_group.get('Simplified_AdEMAMix', False):
+                        d_hat = min(self.d * (2 ** 0.1), d_hat)
+                    else:
+                        d_hat = min(self.d * (2 ** 0.25), d_hat)
                 if self.d == g_group['d0']:
                     self.d = max(self.d, d_hat)
                 d_max = max(d_max, d_hat)
