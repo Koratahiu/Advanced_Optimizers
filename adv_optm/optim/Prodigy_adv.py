@@ -50,12 +50,6 @@ class Prodigy_adv(torch.optim.Optimizer):
             before it is added to the fast momentum term (`update = mt + alpha * mt_slow`).
             A higher value increases the stabilizing influence of the slow
             momentum. (default: 5.0)
-        t_alpha (Optional[int]): The number of steps for a linear warmup of the
-            `alpha` parameter (only used when `use_AdEMAMix` is `True`). This is
-            highly recommended to prevent instability at the beginning of training,
-            as it gradually introduces the stabilizing slow momentum term. During
-            the warmup, `alpha` ramps from 0 to its target value. If `None`,
-            the scheduler is disabled.
         Simplified_AdEMAMix (bool): whether to use the Simplified AdEMAMix update rule.
             This changes the EMA to accumulator and the update numerator to `alpha_grad * grad + mt`, which can be
             more responsive, especially for small batch sizes. Enabling this will
@@ -131,7 +125,6 @@ class Prodigy_adv(torch.optim.Optimizer):
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
-        t_alpha: int | None = None,
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
         nnmf_factor: bool = False,
@@ -188,7 +181,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "vector_reshape": vector_reshape, "use_atan2": use_atan2,
             "orthogonal_gradient": orthogonal_gradient,
-            "beta3_ema": beta3_ema, "alpha": alpha, "t_alpha": t_alpha,
+            "beta3_ema": beta3_ema, "alpha": alpha,
             "beta3": beta3, "d": d0, "d0": d0, "d_max": d0, "d_numerator": 0.0, "d_coef": d_coef,
             "growth_rate": growth_rate, "safeguard_warmup": safeguard_warmup, "k": 0, "slice_p": slice_p,
             "fsdp_in_use": fsdp_in_use, "prodigy_steps": prodigy_steps, "d_limiter": d_limiter,
@@ -319,9 +312,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         state = self.state[p]
 
         if group.get('kourkoutas_beta', False):
-            current_step = state['step']
-            # Call prepare_step() once at the beginning of the step for all params
-            self.kourkoutas_helper.maybe_prepare_step(current_step) #TODO cannot be traced by torch.compile
+            current_step = group['k']
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
             # Get the dynamic beta2 calculated in prepare_step()
@@ -332,11 +323,6 @@ class Prodigy_adv(torch.optim.Optimizer):
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
             alpha = group['alpha']
-            t_alpha = group['t_alpha']
-            alpha_step = state['step'] + 1
-            alpha_t = alpha
-            if t_alpha is not None and t_alpha > 0 and alpha_step < t_alpha:
-                alpha_t = min(alpha_step * alpha / t_alpha, alpha)
         if self.Simplified_AdEMAMix:
             alpha_grad = group["alpha_grad"]
 
@@ -377,9 +363,9 @@ class Prodigy_adv(torch.optim.Optimizer):
                 del unpacked_sign_slow
                 mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=self.d * (1.0 - beta3_ema))
                 if self.beta1 > 0:
-                    update = torch.add(mt, mt_slow, alpha=alpha_t)
+                    update = torch.add(mt, mt_slow, alpha=alpha)
                 else:
-                    update = torch.add(grad_reshaped.mul(self.d), mt_slow, alpha=alpha_t)
+                    update = torch.add(grad_reshaped.mul(self.d), mt_slow, alpha=alpha)
             elif self.Simplified_AdEMAMix:
                 update = torch.add(mt, grad_reshaped, alpha=alpha_grad * self.d)
             else:
@@ -431,9 +417,9 @@ class Prodigy_adv(torch.optim.Optimizer):
                 exp_avg_slow = state['exp_avg_slow']
                 exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=self.d * (1.0 - beta3_ema))
                 if self.beta1 > 0:
-                    update = torch.add(exp_avg, exp_avg_slow, alpha=alpha_t)
+                    update = torch.add(exp_avg, exp_avg_slow, alpha=alpha)
                 else:
-                    update = torch.add(grad.mul(self.d), exp_avg_slow, alpha=alpha_t)
+                    update = torch.add(grad.mul(self.d), exp_avg_slow, alpha=alpha)
             elif self.Simplified_AdEMAMix:
                 update = torch.add(exp_avg, grad, alpha=alpha_grad * self.d)
             else:
@@ -490,6 +476,10 @@ class Prodigy_adv(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        if self.kourkoutas_beta:
+            # Prepare Kourkoutas-β once per step using the global step counter.
+            global_step = self.param_groups[0]['k']
+            self.kourkoutas_helper.maybe_prepare_step(global_step)
         if self._compiled_step_parameter is None:
             self.__step_parameter(p, group)
         else:
