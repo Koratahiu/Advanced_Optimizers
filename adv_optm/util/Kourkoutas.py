@@ -32,9 +32,6 @@ class KourkoutasHelper:
         if self._layer_info_built:
             return
 
-        if not group.get('kourkoutas_beta', False):
-            return
-
         if hasattr(self.optimizer, 'layer_key_fn') and self.optimizer.layer_key_fn is not None:
             # A custom key function was provided by the user. We will use it.
             pass
@@ -47,6 +44,9 @@ class KourkoutasHelper:
             # TODO find a better way to safeguard the embeddings
 
         for group in self.optimizer.param_groups:
+            if not group.get('kourkoutas_beta', False):
+                continue
+
             for p in group['params']:
                 # The mapping is static and should not depend on the presence of a gradient.
                 layer_key = self.optimizer.layer_key_fn(p)

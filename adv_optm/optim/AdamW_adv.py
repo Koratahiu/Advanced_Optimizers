@@ -244,6 +244,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
         if state['factored']:
             d1, d2 = state['effective_shape']
+            grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct momentum from previous step's factors
             if beta1 > 0:
@@ -253,7 +254,6 @@ class AdamW_adv(torch.optim.Optimizer):
                     torch.where(unpacked_sign, mt, -mt, out=mt)
                     del unpacked_sign
                 # Update momentum in full-size
-                grad_reshaped = grad.view(d1, d2)
                 mt.mul_(beta1).add_(grad_reshaped, alpha=1.0 - beta1)
                 if self.grams_moment:
                     mt.copy_(grad_reshaped.sign() * mt.abs())
