@@ -1,8 +1,6 @@
 import torch
-from typing import Optional, Callable
-
+from typing import Optional
 from .AdamW_adv import AdamW_adv
-from ..util.MuonAdam_helper import MuonAdamHelper
 
 from ..util.BF16_Stochastic_Rounding import add_stochastic_
 from ..util.Newton_Schulz import _newton_schulz_iteration
