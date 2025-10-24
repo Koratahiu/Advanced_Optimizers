@@ -148,9 +148,6 @@ class Adopt_adv(torch.optim.Optimizer):
             print("Warning: grams is incompatible with Simplified_AdEMAMix, Disabling grams.")
         if cautious_mask and Simplified_AdEMAMix:
             print("Warning: cautious is incompatible with Simplified_AdEMAMix, Disabling cautious.")
-        if use_atan2 and Simplified_AdEMAMix:
-            print("Warning: use_atan2 is incompatible with Simplified_AdEMAMix. Disabling use_atan2.")
-            use_atan2 = False
 
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
