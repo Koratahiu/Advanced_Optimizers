@@ -182,7 +182,9 @@ class Muon_adv(torch.optim.Optimizer):
 
             # NorMuon state initialization
             if group['normuon_variant']:
-                if len(p.shape) >= 2 or state['reshaped_1d_muon']:
+                if state['factored']:
+                    state['normuon_v'] = torch.zeros(d1, device=p.device, dtype=torch.float32)
+                elif len(p.shape) >= 2 or state['reshaped_1d_muon']:
                     num_rows = p.shape[0] if len(p.shape) >= 2 else state['effective_shape'][0]
                     state['normuon_v'] = torch.zeros(num_rows, device=p.device, dtype=torch.float32)
 

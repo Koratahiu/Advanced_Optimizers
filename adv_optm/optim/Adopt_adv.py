@@ -100,7 +100,7 @@ class Adopt_adv(torch.optim.Optimizer):
         eps: float = 1e-6,
         weight_decay: float = 0.0,
         clip_lambda: Optional[Callable[[int], float]] = lambda step: step**0.25,
-        vector_reshape: bool = True,
+        vector_reshape: bool = False,
         stochastic_rounding: bool = True,
         use_atan2: bool = False,
         cautious_mask: bool = False,

@@ -83,7 +83,7 @@ class AdamW_adv(torch.optim.Optimizer):
         eps: float = 1e-8,
         weight_decay: float = 0.0,
         use_bias_correction: bool = True,
-        vector_reshape: bool = True,
+        vector_reshape: bool = False,
         stochastic_rounding: bool = True,
         use_atan2: bool = False,
         cautious_mask: bool = False,
@@ -101,7 +101,7 @@ class AdamW_adv(torch.optim.Optimizer):
         layer_key_fn: Optional[Callable] = None,
         nnmf_factor: bool = False,
         # Compiled
-        compiled_optimizer: bool = False,
+        compiled_optimizer: bool = True,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -124,6 +124,7 @@ class AdamW_adv(torch.optim.Optimizer):
             "beta3_ema": beta3_ema, "alpha": alpha,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
+            "compiled_optimizer": compiled_optimizer,
         }
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
@@ -132,7 +133,6 @@ class AdamW_adv(torch.optim.Optimizer):
         self.factored = nnmf_factor
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
-        self.compiled_optimizer = compiled_optimizer
 
         super().__init__(params, defaults)
 
@@ -145,8 +145,7 @@ class AdamW_adv(torch.optim.Optimizer):
         self.global_step = 0
 
         if compiled_optimizer:
-            # The FIXME is resolved by the eager initialization in init_step()
-            self.compile(fullgraph=True)
+            self.compile(fullgraph=True) # FIXME
 
     @property
     def supports_fused_back_pass(self):
@@ -161,11 +160,6 @@ class AdamW_adv(torch.optim.Optimizer):
         return False
 
     def init_step(self):
-        """
-        Initializes the state for all parameters.
-        This is called eagerly in __init__ to prevent torch.compile recompilations
-        caused by lazy state initialization.
-        """
         for group in self.param_groups:
             for p in group['params']:
                 self.__init_state(p, group)
@@ -174,9 +168,7 @@ class AdamW_adv(torch.optim.Optimizer):
     def __init_state(self, p, group):
         state = self.state[p]
 
-        if 'step' not in state:
-
-            state['step'] = 0
+        if len(state) == 0:
 
             state['factored'] = (
                 self.factored and
@@ -213,8 +205,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
     @torch.no_grad()
-    def __step_parameter(self, p: torch.Tensor, group: dict, step: int, 
-                         bias_correction1: float, bias_correction2: float):
+    def __step_parameter(self, p: torch.Tensor, group: dict, bias_correction1: float, bias_correction2: float):
         if p.grad is None:
             return
 
@@ -357,25 +348,24 @@ class AdamW_adv(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-        step = self.state[p]['step'] + 1 # Get current step
+        current_step = self.global_step + 1
+
         if group['use_bias_correction']:
             beta1, beta2 = group['betas']
-            bias_correction1 = 1.0 - beta1 ** step
-            bias_correction2 = 1.0 - beta2 ** step 
+            bias_correction1 = 1.0 - beta1 ** current_step
+            bias_correction2 = 1.0 - beta2 ** current_step
         else:
             bias_correction1 = 1.0
             bias_correction2 = 1.0
-        if self.kourkoutas_beta:
+
+        if group.get('kourkoutas_beta', False):
             # Prepare Kourkoutas-β once per step using the global step counter.
             self.kourkoutas_helper.maybe_prepare_step(self.global_step)
 
-        #torch.compile bug: if this line is in __step_parameter, compile guards fail for each step
-        self.state[p]['step'] += 1
-
-        if not self.compiled_optimizer:
-            self.__step_parameter(p, group, step, bias_correction1, bias_correction2)
+        if not group.get('compiled_optimizer', False):
+            self.__step_parameter(p, group, bias_correction1, bias_correction2)
         else:
-            self._compiled_step_parameter(p, group, step, bias_correction1, bias_correction2)
+            self._compiled_step_parameter(p, group, bias_correction1, bias_correction2)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)

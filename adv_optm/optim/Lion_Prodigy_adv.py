@@ -64,7 +64,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         lr: float = 1,
         betas: Tuple[float, float] = (0.9, 0.99),
         weight_decay: float = 0.0,
-        vector_reshape: bool = True,
+        vector_reshape: bool = False,
         stochastic_rounding: bool = True,
         orthogonal_gradient: bool = False,
         cautious_mask: bool = False,
