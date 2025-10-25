@@ -56,13 +56,6 @@ class Adopt_adv(torch.optim.Optimizer):
             before it is added to the fast momentum term (`update = mt + alpha * mt_slow`).
             A higher value increases the stabilizing influence of the slow
             momentum. (default: 5.0)
-        t_alpha (Optional[int]): The number of steps for a linear warmup of the
-            `alpha` parameter (only used when `use_AdEMAMix` is `True`). This is
-            highly recommended to prevent instability at the beginning of training,
-            as it gradually introduces the stabilizing slow momentum term. During
-            the warmup, `alpha` ramps from 0 to its target value. If `None`,
-            the scheduler is disabled and the full `alpha` value is used from
-            the start. (default: None)
         Simplified_AdEMAMix (bool): whether to use the Simplified AdEMAMix update rule.
             This changes the EMA to accumulator and the update numerator to `alpha_grad * grad + mt`, which can be
             more responsive, especially for small batch sizes. Enabling this will
@@ -116,7 +109,6 @@ class Adopt_adv(torch.optim.Optimizer):
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
-        t_alpha: int | None = None,
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
         kourkoutas_beta: bool = False,
@@ -152,7 +144,7 @@ class Adopt_adv(torch.optim.Optimizer):
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "vector_reshape": vector_reshape, "beta3_ema": beta3_ema, "alpha": alpha,
-            "t_alpha": t_alpha, "alpha_grad": alpha_grad, 
+            "alpha_grad": alpha_grad, 
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
         }
@@ -243,7 +235,7 @@ class Adopt_adv(torch.optim.Optimizer):
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
             # Get the dynamic beta2 calculated in prepare_step()
-            beta2 = self.kourkoutas_helper.get_beta2(p, group, current_step)
+            beta2 = self.kourkoutas_helper.get_beta2(p, group)
 
         # The first step is for initialization only (skip when use_atan2 as it's scale invariant).
         if state['step'] == 0 and not self.use_atan2:
@@ -253,12 +245,7 @@ class Adopt_adv(torch.optim.Optimizer):
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
             alpha = group['alpha']
-            t_alpha = group['t_alpha']
-            # Use step+1 for 1-based step count in scheduler
-            alpha_step = state['step'] + 1
-            alpha_t = alpha
-            if t_alpha is not None and t_alpha > 0 and alpha_step < t_alpha:
-                alpha_t = min(alpha_step * alpha / t_alpha, alpha)
+
         if self.Simplified_AdEMAMix:
             alpha_grad = group["alpha_grad"]
 
@@ -317,9 +304,9 @@ class Adopt_adv(torch.optim.Optimizer):
             if self.use_AdEMAMix:
                 mt_slow.mul_(beta3_ema).add_(normalized_grad, alpha=1.0 - beta3_ema)
                 if beta1 > 0:
-                    update = torch.add(mt, mt_slow, alpha=alpha_t)
+                    update = torch.add(mt, mt_slow, alpha=alpha)
                 else:
-                    update = torch.add(normalized_grad, mt_slow, alpha=alpha_t)
+                    update = torch.add(normalized_grad, mt_slow, alpha=alpha)
             elif self.Simplified_AdEMAMix:
                 update = torch.add(mt, normalized_grad, alpha=alpha_grad)
             else:
@@ -387,9 +374,9 @@ class Adopt_adv(torch.optim.Optimizer):
                 m_slow = state['exp_avg_slow']
                 m_slow.mul_(beta3_ema).add_(normalized_grad, alpha=1.0 - beta3_ema)
                 if beta1 > 0:
-                    update = torch.add(m, m_slow, alpha=alpha_t)
+                    update = torch.add(m, m_slow, alpha=alpha)
                 else:
-                    update = torch.add(normalized_grad, m_slow, alpha=alpha_t)
+                    update = torch.add(normalized_grad, m_slow, alpha=alpha)
             elif self.Simplified_AdEMAMix:
                 update = torch.add(m, normalized_grad, alpha=alpha_grad)
             else:

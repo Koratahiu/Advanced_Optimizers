@@ -1,6 +1,5 @@
 import torch
-from typing import Optional
-from .AdamW_adv import AdamW_adv
+
 
 from ..util.BF16_Stochastic_Rounding import add_stochastic_
 from ..util.Newton_Schulz import _newton_schulz_iteration
@@ -92,6 +91,8 @@ class Muon_adv(torch.optim.Optimizer):
         normuon_eps: float = 1e-8,
         normuon_lr_scale: float = 0.2,
         normuon_atan2: bool = False,
+        # Compiled
+        compiled_optimizer: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -104,7 +105,7 @@ class Muon_adv(torch.optim.Optimizer):
         if not (ns_steps > 0):
             raise ValueError(f"Newton-Schulz steps should be > 0. Got {ns_steps}")
         if Simplified_AdEMAMix and nesterov:
-            print("Warning: nesterov is incompatible with Simplified_AdEMAMix, Disabling cautious.")
+            print("Warning: nesterov is incompatible with Simplified_AdEMAMix, Disabling nesterov.")
             nesterov = False
 
         defaults = {
@@ -122,9 +123,14 @@ class Muon_adv(torch.optim.Optimizer):
             "normuon_atan2": normuon_atan2,
         }
         self.stochastic_rounding = stochastic_rounding
+        self.compiled_optimizer = compiled_optimizer
 
         super().__init__(params, defaults)
 
+        self.init_step()
+
+        if compiled_optimizer:
+            self.compile(fullgraph=True) #FIXME
 
     @property
     def supports_fused_back_pass(self):
@@ -138,24 +144,21 @@ class Muon_adv(torch.optim.Optimizer):
     def supports_flat_params(self):
         return False
 
-    @torch.no_grad()
-    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-        if p.grad is None:
-            return
+    def init_step(self):
+        for group in self.param_groups:
+            for i, p in enumerate(group['params']):
+                self.__init_state(p, group)
 
-        grad = p.grad
+    @torch.no_grad()
+    def __init_state(self, p, group):
         state = self.state[p]
 
-        # State Initialization
-        if 'step' not in state:
-            state['step'] = 0
+        if len(state) == 0:
 
-            should_factor = (
+            state['factored'] = (
                 group['nnmf_factor'] and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
             )
-
-            state['factored'] = should_factor
 
             state['reshaped_1d_muon'] = len(p.shape) == 1 and group['vector_reshape_muon']
 
@@ -182,6 +185,15 @@ class Muon_adv(torch.optim.Optimizer):
                 if len(p.shape) >= 2 or state['reshaped_1d_muon']:
                     num_rows = p.shape[0] if len(p.shape) >= 2 else state['effective_shape'][0]
                     state['normuon_v'] = torch.zeros(num_rows, device=p.device, dtype=torch.float32)
+
+    @torch.no_grad()
+    def __step_parameter(self, p: torch.Tensor, group: dict):
+        if p.grad is None:
+            return
+
+        grad = p.grad
+        state = self.state[p]
+
 
         beta1 = group['beta1']
         nesterov = group['nesterov']
@@ -258,11 +270,11 @@ class Muon_adv(torch.optim.Optimizer):
                     update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
                 # Scale learning rate
                 update_norm = torch.linalg.vector_norm(update)
-                if update_norm > 1e-12:
-                    scaled_lr = group['normuon_lr_scale'] * group['lr'] * (p.numel()**0.5) / update_norm
-                else:
-                    scaled_lr = 0.0
+
+                scaled_lr = group['normuon_lr_scale'] * group['lr'] * (p.numel()**0.5) / update_norm.add_(group['normuon_eps'])
+
                 update = update.view(p.shape).mul_(scaled_lr)
+                del update_norm, scaled_lr
             else: # Original Muon learning rate application
                 update = update.view(p.shape).mul_(group['lr'])
 
@@ -273,6 +285,8 @@ class Muon_adv(torch.optim.Optimizer):
         else: # Standard Muon logic for non-factored tensors
 
             if len(p.shape) >= 2 or state['reshaped_1d_muon']:
+
+                original_shape = p.shape
 
                 # Momentum update
                 mt_buf = state['momentum_buffer']
@@ -300,9 +314,10 @@ class Muon_adv(torch.optim.Optimizer):
                     # Standard momentum
                     update = mt_buf.clone()
 
-                # For Conv layers (4D) or other high-dim tensors, flatten to 2D
-                if len(p.shape) > 2:
-                    update = update.view(p.shape[0], -1)
+                # flatten to 2D for orthogonalization.
+                # This is a no-op for 2D tensors and correctly flattens 4D+ tensors.
+                # This removes the dynamic control flow that breaks torch.compile.
+                update = update.view(original_shape[0], -1)
 
                 # Orthogonalization step
                 if group['low_rank_ortho']:
@@ -314,7 +329,7 @@ class Muon_adv(torch.optim.Optimizer):
                         # 1. Sketch the matrix
                         G_sketch = torch.randn(M.shape[1], r, device=M.device, dtype=M.dtype)
                         MG = M @ G_sketch
-                        
+
                         # 2. QR decomposition to get orthogonal basis Q
                         if MG.dtype != torch.float32:
                             MG_dtype = M.dtype
@@ -322,10 +337,10 @@ class Muon_adv(torch.optim.Optimizer):
                             Q = Q.to(MG_dtype)
                         else:
                             Q, _ = torch.linalg.qr(MG)
-                        
+
                         # 3. Project M onto the basis
                         projected_M = Q.T @ M
-                        
+
                         # 4. Orthogonalize the smaller projected matrix
                         ortho_projected_M = _newton_schulz_iteration(
                             projected_M,
@@ -333,7 +348,7 @@ class Muon_adv(torch.optim.Optimizer):
                             eps=group['ns_eps'],
                             coeffs=group['ns_coeffs'],
                         )
-                        
+
                         # 5. Project back to the original space
                         update = Q @ ortho_projected_M
                     else: # Fallback for invalid rank
@@ -367,18 +382,15 @@ class Muon_adv(torch.optim.Optimizer):
                         update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
                     # Scale learning rate
                     update_norm = torch.linalg.vector_norm(update)
-                    if update_norm > 1e-12:
-                        scaled_lr = group['normuon_lr_scale'] * group['lr'] * (p.numel()**0.5) / update_norm
-                    else:
-                        scaled_lr = 0.0
+                    scaled_lr = group['normuon_lr_scale'] * group['lr'] * (p.numel()**0.5) / update_norm.add_(group['normuon_eps'])
                     update.mul_(scaled_lr)
                 else: # Original Muon learning rate application
                     update.mul_(group['lr'])
 
-                # Reshape back to original if we flattened or reshaped
-                if len(p.shape) > 2 or state['reshaped_1d_muon']:
-                    update = update.view(p.shape)
-            
+                # reshape back to the original shape.
+                update = update.view(original_shape)
+
+
             else: # Fallback to standard SGD with momentum for 1D params (biases, etc.) when not reshaped
                 # Momentum update
                 mt_buf = state['momentum_buffer']
@@ -406,7 +418,15 @@ class Muon_adv(torch.optim.Optimizer):
             p.data.add_(-update)
         del update
 
-        state['step'] += 1
+    @torch.no_grad()
+    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        if not self.compiled_optimizer:
+            self.__step_parameter(p, group)
+        else:
+            self._compiled_step_parameter(p, group)
+
+    def compile(self, *args, **kwargs):
+        self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def step(self, closure=None):

@@ -197,7 +197,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
             # Get the dynamic beta2 calculated in prepare_step()
-            beta2 = self.kourkoutas_helper.get_beta2(p, group, current_step)
+            beta2 = self.kourkoutas_helper.get_beta2(p, group)
 
         beta1_warmup = group["beta1_warmup"]
         alpha_grad = group["alpha_grad"]

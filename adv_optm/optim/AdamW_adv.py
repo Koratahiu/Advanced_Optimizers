@@ -49,12 +49,6 @@ class AdamW_adv(torch.optim.Optimizer):
             before it is added to the fast momentum term (`update = mt + alpha * mt_slow`).
             A higher value increases the stabilizing influence of the slow
             momentum. (default: 5.0)
-        t_alpha (Optional[int]): The number of steps for a linear warmup of the
-            `alpha` parameter (only used when `use_AdEMAMix` is `True`). This is
-            highly recommended to prevent instability at the beginning of training,
-            as it gradually introduces the stabilizing slow momentum term. During
-            the warmup, `alpha` ramps from 0 to its target value. If `None`,
-            the scheduler is disabled. (default: None)
         kourkoutas_beta (bool): whether to enable the layer-wise dynamic β₂ logic.
             If `False`, the optimizer behaves as standard AdamW. (default: False)
         beta2_min (float): The minimum value for dynamic β₂, used during periods of
@@ -98,7 +92,6 @@ class AdamW_adv(torch.optim.Optimizer):
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
-        t_alpha: int | None = None,
         kourkoutas_beta: bool = False,
         beta2_min: float = 0.9,
         ema_alpha: float = 0.95,
@@ -107,6 +100,8 @@ class AdamW_adv(torch.optim.Optimizer):
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
         nnmf_factor: bool = False,
+        # Compiled
+        compiled_optimizer: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -126,7 +121,7 @@ class AdamW_adv(torch.optim.Optimizer):
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "vector_reshape": vector_reshape, "use_atan2": use_atan2,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
-            "beta3_ema": beta3_ema, "alpha": alpha, "t_alpha": t_alpha,
+            "beta3_ema": beta3_ema, "alpha": alpha,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
         }
@@ -137,10 +132,21 @@ class AdamW_adv(torch.optim.Optimizer):
         self.factored = nnmf_factor
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
+        self.compiled_optimizer = compiled_optimizer
+
         super().__init__(params, defaults)
+
+        self.init_step()
 
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
+
+
+        self.global_step = 0
+
+        if compiled_optimizer:
+            # The FIXME is resolved by the eager initialization in init_step()
+            self.compile(fullgraph=True)
 
     @property
     def supports_fused_back_pass(self):
@@ -154,28 +160,28 @@ class AdamW_adv(torch.optim.Optimizer):
     def supports_flat_params(self):
         return False
 
-    @torch.no_grad()
-    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-        if p.grad is None:
-            return
+    def init_step(self):
+        """
+        Initializes the state for all parameters.
+        This is called eagerly in __init__ to prevent torch.compile recompilations
+        caused by lazy state initialization.
+        """
+        for group in self.param_groups:
+            for p in group['params']:
+                self.__init_state(p, group)
 
-        grad = p.grad
-        if grad.dtype != torch.float32 and self.factored:
-            grad = grad.float()
-        if group["orthogonal_gradient"]:
-            grad = _orthogonalize_gradient(p, grad)
+    @torch.no_grad()
+    def __init_state(self, p, group):
         state = self.state[p]
 
-        # State Initialization
         if 'step' not in state:
+
             state['step'] = 0
 
-            should_factor = (
+            state['factored'] = (
                 self.factored and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
             )
-
-            state['factored'] = should_factor
 
             dtype = torch.float32 if self.factored else p.dtype
             device = p.device
@@ -206,37 +212,33 @@ class AdamW_adv(torch.optim.Optimizer):
                     state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
+    @torch.no_grad()
+    def __step_parameter(self, p: torch.Tensor, group: dict, step: int, 
+                         bias_correction1: float, bias_correction2: float):
+        if p.grad is None:
+            return
+
+        grad = p.grad
+        if grad.dtype != torch.float32 and self.factored:
+            grad = grad.float()
+        if group["orthogonal_gradient"]:
+            grad = _orthogonalize_gradient(p, grad)
+        state = self.state[p]
+
+
         beta1, beta2 = group['betas']
 
-        current_step = state['step']
         if group.get('kourkoutas_beta', False):
-            # Call prepare_step() once at the beginning of the step for all params
-            self.kourkoutas_helper.maybe_prepare_step(current_step)
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
             # Get the dynamic beta2 calculated in prepare_step()
-            beta2 = self.kourkoutas_helper.get_beta2(p, group, current_step)
+            beta2 = self.kourkoutas_helper.get_beta2(p, group)
 
-        step = state['step'] + 1
-        if group['use_bias_correction']:
-            bias_correction1 = 1.0 - beta1 ** step
-            if group.get('kourkoutas_beta', False):
-                bias_correction2 = 1.0 - group['betas'][1] ** step
-                # Use beta2_max for bias correction
-            else:
-                bias_correction2 = 1.0 - beta2 ** step
-        else:
-            bias_correction1 = 1
-            bias_correction2 = 1
         step_size = group['lr'] / bias_correction1
 
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
             alpha = group['alpha']
-            t_alpha = group['t_alpha']
-            alpha_t = alpha
-            if t_alpha is not None and t_alpha > 0 and step < t_alpha:
-                alpha_t = min(step * alpha / t_alpha, alpha)
 
         if state['factored']:
             d1, d2 = state['effective_shape']
@@ -272,9 +274,9 @@ class AdamW_adv(torch.optim.Optimizer):
 
                 mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=1.0 - beta3_ema)
                 if beta1 > 0:
-                    update = torch.add(mt, mt_slow, alpha=alpha_t)
+                    update = torch.add(mt, mt_slow, alpha=alpha)
                 else:
-                    update = torch.add(grad_reshaped, mt_slow, alpha=alpha_t)
+                    update = torch.add(grad_reshaped, mt_slow, alpha=alpha)
             else:
                 update = mt.clone() if beta1 > 0 else grad_reshaped.clone()
             del grad_reshaped
@@ -321,9 +323,9 @@ class AdamW_adv(torch.optim.Optimizer):
                 exp_avg_slow = state['exp_avg_slow']
                 exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=1 - beta3_ema)
                 if beta1 > 0:
-                    update = torch.add(exp_avg, exp_avg_slow, alpha=alpha_t)
+                    update = torch.add(exp_avg, exp_avg_slow, alpha=alpha)
                 else:
-                    update = torch.add(grad, exp_avg_slow, alpha=alpha_t)
+                    update = torch.add(grad, exp_avg_slow, alpha=alpha)
             else:
                 update = exp_avg.clone() if beta1 > 0 else grad.clone()
 
@@ -353,7 +355,30 @@ class AdamW_adv(torch.optim.Optimizer):
             p.data.add_(-update)
         del update
 
-        state['step'] += 1
+    @torch.no_grad()
+    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        step = self.state[p]['step'] + 1 # Get current step
+        if group['use_bias_correction']:
+            beta1, beta2 = group['betas']
+            bias_correction1 = 1.0 - beta1 ** step
+            bias_correction2 = 1.0 - beta2 ** step 
+        else:
+            bias_correction1 = 1.0
+            bias_correction2 = 1.0
+        if self.kourkoutas_beta:
+            # Prepare Kourkoutas-β once per step using the global step counter.
+            self.kourkoutas_helper.maybe_prepare_step(self.global_step)
+
+        #torch.compile bug: if this line is in __step_parameter, compile guards fail for each step
+        self.state[p]['step'] += 1
+
+        if not self.compiled_optimizer:
+            self.__step_parameter(p, group, step, bias_correction1, bias_correction2)
+        else:
+            self._compiled_step_parameter(p, group, step, bias_correction1, bias_correction2)
+
+    def compile(self, *args, **kwargs):
+        self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -366,5 +391,7 @@ class AdamW_adv(torch.optim.Optimizer):
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
+
+        self.global_step += 1
 
         return loss

@@ -1,7 +1,5 @@
 import torch
-from typing import Optional
-
-from .AdamW_adv import AdamW_adv
+torch._dynamo.config.force_parameter_static_shapes = False
 
 from ..util.BF16_Stochastic_Rounding import add_stochastic_
 from ..util.Newton_Schulz import _newton_schulz_iteration

@@ -21,7 +21,6 @@ def _newton_schulz_iteration(
     Returns:
         torch.Tensor: The orthogonalized matrix.
     """
-    assert G.ndim == 2, "Newton-Schulz iteration only supports 2D matrices."
 
     a, b, c = coeffs
 
