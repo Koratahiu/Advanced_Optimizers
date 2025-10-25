@@ -50,12 +50,6 @@ class Prodigy_adv(torch.optim.Optimizer):
             before it is added to the fast momentum term (`update = mt + alpha * mt_slow`).
             A higher value increases the stabilizing influence of the slow
             momentum. (default: 5.0)
-        t_alpha (Optional[int]): The number of steps for a linear warmup of the
-            `alpha` parameter (only used when `use_AdEMAMix` is `True`). This is
-            highly recommended to prevent instability at the beginning of training,
-            as it gradually introduces the stabilizing slow momentum term. During
-            the warmup, `alpha` ramps from 0 to its target value. If `None`,
-            the scheduler is disabled.
         Simplified_AdEMAMix (bool): whether to use the Simplified AdEMAMix update rule.
             This changes the EMA to accumulator and the update numerator to `alpha_grad * grad + mt`, which can be
             more responsive, especially for small batch sizes. Enabling this will
@@ -131,7 +125,6 @@ class Prodigy_adv(torch.optim.Optimizer):
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
-        t_alpha: int | None = None,
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
         nnmf_factor: bool = False,
@@ -188,7 +181,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "vector_reshape": vector_reshape, "use_atan2": use_atan2,
             "orthogonal_gradient": orthogonal_gradient,
-            "beta3_ema": beta3_ema, "alpha": alpha, "t_alpha": t_alpha,
+            "beta3_ema": beta3_ema, "alpha": alpha,
             "beta3": beta3, "d": d0, "d0": d0, "d_max": d0, "d_numerator": 0.0, "d_coef": d_coef,
             "growth_rate": growth_rate, "safeguard_warmup": safeguard_warmup, "k": 0, "slice_p": slice_p,
             "fsdp_in_use": fsdp_in_use, "prodigy_steps": prodigy_steps, "d_limiter": d_limiter,
@@ -208,9 +201,15 @@ class Prodigy_adv(torch.optim.Optimizer):
         self.layer_key_fn = layer_key_fn
 
         super().__init__(params, defaults)
+        # Use the device of the first parameter to avoid hardcoding '.cuda()'
+        self.device = self.param_groups[0]['params'][0].device
+
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
         self.init_step()
+
+        self._compiled_step_parameter = None
+        self.compile(fullgraph=True) #FIXME
 
     @property
     def supports_fused_back_pass(self):
@@ -226,7 +225,7 @@ class Prodigy_adv(torch.optim.Optimizer):
 
     def init_step(self):
         """Resets accumulators and calculates dlr for the upcoming step."""
-        self.d_denom = 0.0
+        self.d_denom = torch.tensor(0.0, device=self.device)
 
         g_group = self.param_groups[0]
         self.beta1, self.beta2_default = g_group['betas']
@@ -238,10 +237,66 @@ class Prodigy_adv(torch.optim.Optimizer):
         lr = g_group['lr']
 
         self.dlr = self.d * lr
-        self.d_numerator = g_group.get('d_numerator', 0.0) * self.beta3
+        self.d_numerator = torch.tensor(g_group.get('d_numerator', 0.0) * self.beta3, device=self.device)
+
+        for group in self.param_groups:
+            for i, p in enumerate(group['params']):
+                self.__init_state(p, group)
 
     @torch.no_grad()
-    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+    def __init_state(self, p, group):
+        state = self.state[p]
+        if 'step' in state:
+            return
+
+        state['step'] = 0
+
+        should_factor = (
+            self.factored and
+            not (len(p.shape) == 1 and not group['vector_reshape'])
+        )
+
+        state['factored'] = should_factor
+
+        slice_p = group['slice_p']
+
+        dtype = torch.float32 if self.factored else p.dtype
+        device = p.device
+
+        if state['factored']:
+            state['effective_shape'] = _get_effective_shape(p.numel())
+            d1, d2 = state['effective_shape']
+
+            # First moment (m)
+            if self.beta1 > 0:
+                state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
+                state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+                if not self.grams_moment:
+                    packed_d2 = (d2 + 7) // 8
+                    state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+            if self.use_AdEMAMix:
+                state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
+                state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
+                packed_d2 = (d2 + 7) // 8
+                state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+            # Second moment (v)
+            state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
+            state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+        else:  # Fallback to standard AdamW for non-factored tensors
+            if self.beta1 > 0:
+                state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
+            if self.use_AdEMAMix:
+                state['exp_avg_slow'] = torch.zeros_like(p, dtype=dtype)
+            state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
+
+        state['s'] = torch.zeros_like(p.flatten()[::slice_p]).detach()
+        if p.any():
+            state['p0'] = p.flatten()[::slice_p].detach().clone()
+        else:
+            state['p0'] = torch.tensor(0, device=device, dtype=p.dtype)
+
+
+    def __step_parameter(self, p: torch.Tensor, group: dict):
         if p.grad is None:
             return
 
@@ -253,60 +308,11 @@ class Prodigy_adv(torch.optim.Optimizer):
             grad = grad.float()
         if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)
+
         state = self.state[p]
 
-        # State Initialization
-        if 'step' not in state:
-            state['step'] = 0
-
-            should_factor = (
-                self.factored and
-                not (len(p.shape) == 1 and not group['vector_reshape'])
-            )
-
-            state['factored'] = should_factor
-
-            slice_p = group['slice_p']
-
-            dtype = torch.float32 if self.factored else p.dtype
-            device = p.device
-
-            if state['factored']:
-                state['effective_shape'] = _get_effective_shape(p.numel())
-                d1, d2 = state['effective_shape']
-
-                # First moment (m)
-                if self.beta1 > 0:
-                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
-                    state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
-                    if not self.grams_moment:
-                        packed_d2 = (d2 + 7) // 8
-                        state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
-                if self.use_AdEMAMix:
-                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
-                    state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                    packed_d2 = (d2 + 7) // 8
-                    state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
-                # Second moment (v)
-                state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
-                state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
-            else:  # Fallback to standard AdamW for non-factored tensors
-                if self.beta1 > 0:
-                    state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
-                if self.use_AdEMAMix:
-                    state['exp_avg_slow'] = torch.zeros_like(p, dtype=dtype)
-                state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
-
-            state['s'] = torch.zeros_like(p.flatten()[::slice_p]).detach()
-            if p.any():
-                state['p0'] = p.flatten()[::slice_p].detach().clone()
-            else:
-                state['p0'] = torch.tensor(0, device=device, dtype=p.dtype)
-
-        current_step = state['step']
         if group.get('kourkoutas_beta', False):
-            # Call prepare_step() once at the beginning of the step for all params
-            self.kourkoutas_helper.maybe_prepare_step(current_step)
+            current_step = group['k']
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
             # Get the dynamic beta2 calculated in prepare_step()
@@ -317,11 +323,6 @@ class Prodigy_adv(torch.optim.Optimizer):
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
             alpha = group['alpha']
-            t_alpha = group['t_alpha']
-            alpha_step = state['step'] + 1
-            alpha_t = alpha
-            if t_alpha is not None and t_alpha > 0 and alpha_step < t_alpha:
-                alpha_t = min(alpha_step * alpha / t_alpha, alpha)
         if self.Simplified_AdEMAMix:
             alpha_grad = group["alpha_grad"]
 
@@ -362,9 +363,9 @@ class Prodigy_adv(torch.optim.Optimizer):
                 del unpacked_sign_slow
                 mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=self.d * (1.0 - beta3_ema))
                 if self.beta1 > 0:
-                    update = torch.add(mt, mt_slow, alpha=alpha_t)
+                    update = torch.add(mt, mt_slow, alpha=alpha)
                 else:
-                    update = torch.add(grad_reshaped.mul(self.d), mt_slow, alpha=alpha_t)
+                    update = torch.add(grad_reshaped.mul(self.d), mt_slow, alpha=alpha)
             elif self.Simplified_AdEMAMix:
                 update = torch.add(mt, grad_reshaped, alpha=alpha_grad * self.d)
             else:
@@ -416,9 +417,9 @@ class Prodigy_adv(torch.optim.Optimizer):
                 exp_avg_slow = state['exp_avg_slow']
                 exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=self.d * (1.0 - beta3_ema))
                 if self.beta1 > 0:
-                    update = torch.add(exp_avg, exp_avg_slow, alpha=alpha_t)
+                    update = torch.add(exp_avg, exp_avg_slow, alpha=alpha)
                 else:
-                    update = torch.add(grad.mul(self.d), exp_avg_slow, alpha=alpha_t)
+                    update = torch.add(grad.mul(self.d), exp_avg_slow, alpha=alpha)
             elif self.Simplified_AdEMAMix:
                 update = torch.add(exp_avg, grad, alpha=alpha_grad * self.d)
             else:
@@ -446,11 +447,11 @@ class Prodigy_adv(torch.optim.Optimizer):
             p_flat = p.data.flatten().float()
             p0 = p0.float()
 
-            self.d_numerator += (self.d / d0) * self.dlr * torch.dot(grad_flat[::slice_p], p0.data - p_flat[::slice_p]).item()
+            self.d_numerator.add_((self.d / d0) * self.dlr * torch.dot(grad_flat[::slice_p], p0.data - p_flat[::slice_p]))
 
             alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
             s.mul_(self.beta3).add_(grad_flat[::slice_p], alpha=alpha)
-            self.d_denom += s.abs().sum().item()
+            self.d_denom.add_(s.abs().sum())
 
             del s, p0, grad_flat, p_flat, alpha
         else:
@@ -473,7 +474,22 @@ class Prodigy_adv(torch.optim.Optimizer):
             p.data.add_(-update)
         del update
 
-        state['step'] += 1
+    @torch.no_grad()
+    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        if self.kourkoutas_beta:
+            # Prepare Kourkoutas-β once per step using the global step counter.
+            global_step = self.param_groups[0]['k']
+            self.kourkoutas_helper.maybe_prepare_step(global_step)
+        if self._compiled_step_parameter is None:
+            self.__step_parameter(p, group)
+        else:
+            self._compiled_step_parameter(p, group)
+
+        #torch.compile bug: if this line is in __step_parameter, compile guards fail for each step
+        self.state[p]['step'] += 1
+
+    def compile(self, *args, **kwargs):
+        self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -502,15 +518,13 @@ class Prodigy_adv(torch.optim.Optimizer):
             d_max, d_coef, growth_rate = g_group['d_max'], g_group['d_coef'], g_group['growth_rate']
             
             if self.fsdp_in_use and dist.is_available() and dist.is_initialized():
-                # Use the device of the first parameter to avoid hardcoding '.cuda()'
-                device = self.param_groups[0]['params'][0].device
-                dist_tensor = torch.tensor([self.d_numerator, self.d_denom], device=device)
+                dist_tensor = torch.stack([self.d_numerator, self.d_denom])
                 dist.all_reduce(dist_tensor, op=dist.ReduceOp.SUM)
                 global_d_numerator = dist_tensor[0].item()
                 global_d_denom = dist_tensor[1].item()
             else:
-                global_d_numerator = self.d_numerator
-                global_d_denom = self.d_denom
+                global_d_numerator = self.d_numerator.item()
+                global_d_denom = self.d_denom.item()
 
             d_hat = self.d
             if global_d_denom > 0:
