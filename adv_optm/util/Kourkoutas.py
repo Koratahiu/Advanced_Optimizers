@@ -24,9 +24,6 @@ class KourkoutasHelper:
         # making it compatible with fused back pass mechanisms.
         self._build_layer_info_if_needed()
 
-        if self.optimizer.param_groups[0].get('k_logging', 0) > 0:
-            self.print_layer_info()
-
     def _build_layer_info_if_needed(self):
         """Builds a map of layers and the parameters they contain."""
         if self._layer_info_built:
@@ -53,30 +50,8 @@ class KourkoutasHelper:
                 if layer_key not in self.layer_info:
                     self.layer_info[layer_key] = {'params': [], 'group_ref': group}
                 self.layer_info[layer_key]['params'].append(p)
-        
-        k_logging_interval = self.optimizer.param_groups[0].get('k_logging', 0)
-        if k_logging_interval > 0:
-            print(f"[Kourkoutas-β Debug] Layer info built. Found {len(self.layer_info)} unique layers/buckets.")
 
         self._layer_info_built = True
-
-    def print_layer_info(self):
-        """Prints the contents of self.layer_info for debugging."""
-        print("\n--- BEGIN self.layer_info DUMP ---")
-        if not self.layer_info:
-            print("Layer info is empty. Make sure the optimizer has parameters.")
-            return
-
-        for layer_key, info in self.layer_info.items():
-            param_count = len(info['params'])
-            first_param_details = ""
-            if param_count > 0:
-                p = info['params'][0]
-                first_param_details = f" (Example param shape: {list(p.shape)}, dtype: {p.dtype})"
-            
-            print(f"Key: {layer_key}, Params: {param_count}{first_param_details}")
-
-        print("--- END self.layer_info DUMP ---\n")
 
     def prepare_step(self, current_step: int):
         """
@@ -85,9 +60,8 @@ class KourkoutasHelper:
         """
         
         beta2_log = []
-        first_layer_key = next(iter(self.layer_info), None)
         # These are just for the sample log, initialize them
-        sun, pooled_grad_norm, prev_r_ema_val, r_ema_tensor = (torch.tensor(0.0),)*4
+        sun, pooled_grad_norm, r_ema_tensor = (torch.tensor(0.0),)*3
 
         # The optimizer that owns this helper holds the master defaults for K-b.
         # This is crucial in hybrid optimizers where some param_groups might not
@@ -124,7 +98,6 @@ class KourkoutasHelper:
             accumulator = self.layer_state[layer_key]['sum_sq_accumulator']
             
             pooled_grad_norm = torch.sqrt(accumulator)
-            prev_r_ema_val = r_ema_tensor.item() # for logging
             
             # Update the persistent EMA tensor in-place.
             r_ema_tensor.mul_(ema_alpha).add_(pooled_grad_norm, alpha=1.0 - ema_alpha)
@@ -150,20 +123,8 @@ class KourkoutasHelper:
         if beta2_log:
             beta2_tensor = torch.tensor(beta2_log, device='cpu')
             self.last_beta2_stats = {
-                'min': beta2_tensor.min().item(),
-                'max': beta2_tensor.max().item(),
                 'mean': beta2_tensor.mean().item(),
             }
-
-        # Handle periodic console logging
-        k_logging_interval = self.optimizer.param_groups[0].get('k_logging', 0)
-        is_logging_step = k_logging_interval > 0 and (current_step + 1) % k_logging_interval == 0
-        if is_logging_step and self.last_beta2_stats:
-            if first_layer_key:
-                print(f"\n[Kourkoutas-β Debug] Step {current_step + 1} - Sample Layer '{first_layer_key}':")
-                print(f"  - Grad Norm: {pooled_grad_norm.item():.4e}, Prev EMA: {prev_r_ema_val:.4e}, New EMA: {r_ema_tensor.item():.4e}")
-                print(f"  - Sunspike: {sun.item():.4f}, Dynamic Beta2: {self.layer_state[first_layer_key]['dynamic_beta2']:.4f}")
-            print(f"[Kourkoutas-β Debug] Step {current_step + 1} Overall Beta2 Stats: Min={self.last_beta2_stats['min']:.4f}, Max={self.last_beta2_stats['max']:.4f}, Mean={self.last_beta2_stats['mean']:.4f}")
 
     def maybe_prepare_step(self, current_step: int):
         """

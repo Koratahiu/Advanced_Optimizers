@@ -11,7 +11,7 @@ from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
 
 class AdaMuon_adv(torch.optim.Optimizer):
     """
-    Implements the AdaMuon optimizer algorithm.
+    IImplements an advanced AdaMuon optimizer algorithm.
 
     AdaMuon combines the geometry-aware updates of Muon with the element-wise
     adaptivity of Adam. It is designed for 2D parameters (e.g., linear layers)
@@ -25,9 +25,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
     3.  An RMS-aligned rescaling strategy to match the update magnitude of Adam,
         allowing for reuse of learning rate schedules.
 
-    Can also operate in a hybrid mode, using an auxiliary AdamW
-    optimizer for specific parameters (e.g., biases, norms, embeddings) as
-    defined by a `layer_key_fn`.
 
     Args:
         params (iterable): iterable of parameters to optimize or dicts defining
@@ -69,12 +66,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
             (default: 128)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
-        MuonWithAuxAdam (bool): If True, enables the hybrid optimizer mode.
-            Parameters designated by `layer_key_fn` will be optimized with
-            AdamW_adv instead of Muon. (default: False)
-        adam_kwargs (Optional[dict]): A dictionary of keyword arguments to pass
-            to the auxiliary AdamW_adv optimizer. Only used when
-            `MuonWithAuxAdam` is True. (default: None)
     """
 
     def __init__(
@@ -99,10 +90,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
         low_rank_ortho: bool = False,
         ortho_rank: int = 128,
         nnmf_factor: bool = False,
-        # hybrid optimizer mode
-        MuonWithAuxAdam: bool = False,
-        muon_adam_lr: float = 1e-4,
-        adam_kwargs: Optional[dict] = None,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -114,7 +101,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             print("Warning: nesterov is incompatible with Simplified_AdEMAMix, Disabling cautious.")
             nesterov = False
 
-        muon_defaults = {
+        defaults = {
             "lr": lr, "betas": betas, "weight_decay": weight_decay,
             "eps": eps, "rms_target": rms_target, "ns_steps": ns_steps,
             "ns_eps": ns_eps, "ns_coeffs": ns_coeffs, "nnmf_factor": nnmf_factor,
@@ -127,34 +114,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         }
         self.stochastic_rounding = stochastic_rounding
 
-        self.MuonWithAuxAdam = MuonWithAuxAdam
-        self.aux_adam = None
-
-        if not self.MuonWithAuxAdam:
-            super().__init__(params, muon_defaults)
-            return
-
-        # HYBRID OPTIMIZER LOGIC
-        adam_kwargs = adam_kwargs or {}
-        self.aux_adam = AdamW_adv(
-            [],
-            lr=muon_adam_lr,
-            **adam_kwargs,
-            _is_delegate=True
-        )
-        adam_defaults = self.aux_adam.defaults
-
-        final_param_groups = []
-        for group in params:
-            optim_type = group.get('optim_type', 'muon')
-            defaults_to_use = adam_defaults if optim_type == 'adam' else muon_defaults
-
-            new_group = group.copy()
-            for key, value in defaults_to_use.items():
-                new_group.setdefault(key, value)
-            final_param_groups.append(new_group)
-
-        super().__init__(final_param_groups, muon_defaults)
+        super().__init__(params, defaults)
         
 
     @property
@@ -169,30 +129,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
     def supports_flat_params(self):
         return False
 
-    @property
-    def kourkoutas_helper(self):
-        """
-        Exposes the kourkoutas_helper from the auxiliary AdamW optimizer,
-        if it exists. This allows external access for logging K-b.
-        """
-        if self.aux_adam and hasattr(self.aux_adam, 'kourkoutas_helper'):
-            return self.aux_adam.kourkoutas_helper
-        return None
-
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-        if self.MuonWithAuxAdam:
-            optim_type = group.get('optim_type')
-            if optim_type == 'adam':
-                # Delegate to the AdamW_adv optimizer's logic.
-                # We need to temporarily "lend" our state and param_groups
-                # to the delegate so it has the full context to work with,
-                # especially for features like Kourkoutas-beta.
-                self.aux_adam.state = self.state
-                self.aux_adam.param_groups = self.param_groups
-                self.aux_adam.step_parameter(p, group, i)
-                return
-
         if p.grad is None:
             return
 

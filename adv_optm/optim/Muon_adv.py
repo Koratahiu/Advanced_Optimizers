@@ -23,10 +23,6 @@ class Muon_adv(torch.optim.Optimizer):
     This implementation is designed for 2D parameters (e.g., linear layers) and
     can handle other-dimensional parameters (e.g., 1D bias, 4D convolutional layers) by
     flattening/reshaping them.
-    
-    Can also operate in a hybrid mode, using an auxiliary AdamW
-    optimizer for specific parameters (e.g., biases, norms, embeddings) as
-    defined by a `layer_key_fn`.
 
     Args:
         params (iterable): iterable of parameters to optimize or dicts defining
@@ -69,12 +65,6 @@ class Muon_adv(torch.optim.Optimizer):
         normuon_lr_scale (float): Scaling factor for the NorMuon learning rate.
             (default: 0.2)
         normuon_atan2 (bool): whether to use the atan2 for NorMuon. (default: False)
-        MuonWithAuxAdam (bool): If True, enables the hybrid optimizer mode.
-            Parameters designated by `layer_key_fn` will be optimized with
-            AdamW_adv instead of Muon. (default: False)
-        adam_kwargs (Optional[dict]): A dictionary of keyword arguments to pass
-            to the auxiliary AdamW_adv optimizer. Only used when
-            `MuonWithAuxAdam` is True. (default: None)
     """
 
     def __init__(
@@ -102,10 +92,6 @@ class Muon_adv(torch.optim.Optimizer):
         normuon_eps: float = 1e-8,
         normuon_lr_scale: float = 0.2,
         normuon_atan2: bool = False,
-        # hybrid optimizer mode
-        MuonWithAuxAdam: bool = False,
-        muon_adam_lr: float = 1e-4,
-        adam_kwargs: Optional[dict] = None,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -121,7 +107,7 @@ class Muon_adv(torch.optim.Optimizer):
             print("Warning: nesterov is incompatible with Simplified_AdEMAMix, Disabling cautious.")
             nesterov = False
 
-        muon_defaults = {
+        defaults = {
             "lr": lr, "beta1": beta1, "weight_decay": weight_decay,
             "nesterov": nesterov, "ns_steps": ns_steps, "ns_eps": ns_eps,
             "ns_coeffs": ns_coeffs, "nnmf_factor": nnmf_factor,
@@ -137,34 +123,7 @@ class Muon_adv(torch.optim.Optimizer):
         }
         self.stochastic_rounding = stochastic_rounding
 
-        self.MuonWithAuxAdam = MuonWithAuxAdam
-        self.aux_adam = None
-
-        if not self.MuonWithAuxAdam:
-            super().__init__(params, muon_defaults)
-            return
-
-        # HYBRID OPTIMIZER LOGIC
-        adam_kwargs = adam_kwargs or {}
-        self.aux_adam = AdamW_adv(
-            [],
-            lr=muon_adam_lr,
-            **adam_kwargs,
-            _is_delegate=True
-        )
-        adam_defaults = self.aux_adam.defaults
-
-        final_param_groups = []
-        for group in params:
-            optim_type = group.get('optim_type', 'muon')
-            defaults_to_use = adam_defaults if optim_type == 'adam' else muon_defaults
-
-            new_group = group.copy()
-            for key, value in defaults_to_use.items():
-                new_group.setdefault(key, value)
-            final_param_groups.append(new_group)
-
-        super().__init__(final_param_groups, muon_defaults)
+        super().__init__(params, defaults)
 
 
     @property
@@ -179,30 +138,8 @@ class Muon_adv(torch.optim.Optimizer):
     def supports_flat_params(self):
         return False
 
-    @property
-    def kourkoutas_helper(self):
-        """
-        Exposes the kourkoutas_helper from the auxiliary AdamW optimizer,
-        if it exists. This allows external access for logging K-b.
-        """
-        if self.aux_adam and hasattr(self.aux_adam, 'kourkoutas_helper'):
-            return self.aux_adam.kourkoutas_helper
-        return None
-
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-        if self.MuonWithAuxAdam:
-            optim_type = group.get('optim_type')
-            if optim_type == 'adam':
-                # Delegate to the AdamW_adv optimizer's logic.
-                # We need to temporarily "lend" our state and param_groups
-                # to the delegate so it has the full context to work with,
-                # especially for features like Kourkoutas-beta.
-                self.aux_adam.state = self.state
-                self.aux_adam.param_groups = self.param_groups
-                self.aux_adam.step_parameter(p, group, i)
-                return
-
         if p.grad is None:
             return
 
