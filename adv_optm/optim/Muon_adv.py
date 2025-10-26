@@ -130,7 +130,7 @@ class Muon_adv(torch.optim.Optimizer):
         self.init_step()
 
         if compiled_optimizer:
-            self.compile(fullgraph=True) #FIXME
+            self.compile(fullgraph=True)
 
     @property
     def supports_fused_back_pass(self):

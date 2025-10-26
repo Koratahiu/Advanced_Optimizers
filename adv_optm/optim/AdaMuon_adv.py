@@ -53,8 +53,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
             current gradient. For small batch sizes, use high values (e.g., 10-100) to be
             more responsive. For large batch sizes, use low values (e.g., 0-1) for
             stability. (default: 100.0)
-        vector_reshape_muon (bool): whether to reshape 1D vectors into 2D
-            matrices for muon NewtonSchulz (default: False).
         vector_reshape (bool): whether to reshape 1D vectors into 2D
             matrices to apply low-rank compression (default: True).
         low_rank_ortho (bool): If True, enables low-rank orthogonalization, which
@@ -82,12 +80,13 @@ class AdaMuon_adv(torch.optim.Optimizer):
         nesterov: bool = False,
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
-        vector_reshape_muon: bool = False,
         vector_reshape: bool = False,
         # Low-rank Muon
         low_rank_ortho: bool = False,
         ortho_rank: int = 128,
         nnmf_factor: bool = False,
+        # Compiled
+        compiled_optimizer: bool = True,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -104,16 +103,20 @@ class AdaMuon_adv(torch.optim.Optimizer):
             "eps": eps, "rms_target": rms_target, "ns_steps": ns_steps,
             "ns_eps": ns_eps, "ns_coeffs": ns_coeffs, "nnmf_factor": nnmf_factor,
             "vector_reshape": vector_reshape,
-            "vector_reshape_muon": vector_reshape_muon,
             "nesterov":nesterov, "use_atan2":use_atan2,
             "Simplified_AdEMAMix": Simplified_AdEMAMix, "alpha_grad": alpha_grad,
             # Low-rank Ortho
             "low_rank_ortho": low_rank_ortho, "ortho_rank": ortho_rank,
+            "compiled_optimizer":compiled_optimizer
         }
         self.stochastic_rounding = stochastic_rounding
 
         super().__init__(params, defaults)
         
+        self.init_step()
+
+        if compiled_optimizer:
+            self.compile(fullgraph=False, dynamic=True)
 
     @property
     def supports_fused_back_pass(self):
@@ -127,18 +130,16 @@ class AdaMuon_adv(torch.optim.Optimizer):
     def supports_flat_params(self):
         return False
 
-    @torch.no_grad()
-    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-        if p.grad is None:
-            return
+    def init_step(self):
+        for group in self.param_groups:
+            for i, p in enumerate(group['params']):
+                self.__init_state(p, group)
 
-        grad = p.grad
+    @torch.no_grad()
+    def __init_state(self, p, group):
         state = self.state[p]
 
-
-        # State Initialization
-        if 'step' not in state:
-            state['step'] = 0
+        if len(state) == 0:
 
             should_factor = (
                 group['nnmf_factor'] and
@@ -147,14 +148,12 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             state['factored'] = should_factor
 
-            state['reshaped_1d_muon'] = len(p.shape) == 1 and group['vector_reshape_muon']
-
             dtype = torch.float32 if group['nnmf_factor'] else p.dtype
             device = p.device
-            if state['factored'] or state['reshaped_1d_muon']:
+
+            if state['factored']:
                     state['effective_shape'] = _get_effective_shape(p.numel())
                     d1, d2 = state['effective_shape']
-            if state['factored']:
                     state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
                     state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
                     packed_d2 = (d2 + 7) // 8
@@ -163,13 +162,17 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
             else:
                 if len(p.shape) >= 2:
-                    state['momentum_buffer'] = torch.zeros_like(p)
                     state['second_momentum_buffer'] = torch.zeros_like(p)
-                if state['reshaped_1d_muon']:
-                    state['momentum_buffer'] = torch.zeros((d1, d2), device=device, dtype=dtype)
-                    state['second_momentum_buffer'] = torch.zeros((d1, d2), device=device, dtype=dtype)
-                elif len(p.shape) == 1:
-                    state['momentum_buffer'] = torch.zeros_like(p)
+                state['momentum_buffer'] = torch.zeros_like(p)
+
+    @torch.no_grad()
+    def __step_parameter(self, p: torch.Tensor, group: dict):
+        if p.grad is None:
+            return
+
+        grad = p.grad
+        state = self.state[p]
+
 
         # Retrieve hyperparameters
         beta1, beta2 = group['betas']
@@ -266,33 +269,21 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
         else: # Standard AdaMuon logic for non-factored tensors
 
-            if len(p.shape) >= 2 or state['reshaped_1d_muon']:
+            if len(p.shape) >= 2:
+                original_shape = p.shape
 
                 # Momentum update
                 mt_buf = state['momentum_buffer']
-                if state['reshaped_1d_muon']:
-                    d1, d2 = state['effective_shape']
-                    grad_reshaped = grad.view(d1, d2)
-                    mt_buf.mul_(beta1).add_(grad_reshaped)
-                    if nesterov:
-                        signed_m_buf = torch.sign(grad_reshaped.add(mt_buf, alpha=beta1))
-                    elif Simplified_AdEMAMix:
-                        signed_m_buf = torch.sign(mt_buf.add(grad_reshaped, alpha=alpha_grad))
-                    else:
-                        signed_m_buf = torch.sign(mt_buf)
-                    del grad_reshaped
+                mt_buf.mul_(beta1).add_(grad)
+                if nesterov:
+                    signed_m_buf = torch.sign(grad.add(mt_buf, alpha=beta1))
+                elif Simplified_AdEMAMix:
+                    signed_m_buf = torch.sign(mt_buf.add(grad, alpha=alpha_grad))
                 else:
-                    mt_buf.mul_(beta1).add_(grad)
-                    if nesterov:
-                        signed_m_buf = torch.sign(grad.add(mt_buf, alpha=beta1))
-                    elif Simplified_AdEMAMix:
-                        signed_m_buf = torch.sign(mt_buf.add(grad, alpha=alpha_grad))
-                    else:
-                        signed_m_buf = torch.sign(mt_buf)
+                    signed_m_buf = torch.sign(mt_buf)
 
                 # Flatten if necessary (e.g., for Conv layers)
-                if len(p.shape) > 2:
-                    signed_m_buf = signed_m_buf.view(p.shape[0], -1)
+                signed_m_buf = signed_m_buf.view(original_shape[0], -1)
 
                 # Orthogonalization step
                 if group['low_rank_ortho']:
@@ -326,8 +317,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                         coeffs=group['ns_coeffs'],
                     )
 
-                if len(p.shape) > 2 or state['reshaped_1d_muon']:
-                    update = update.view(p.shape)
+                update = update.view(original_shape)
 
                 vt_buf = state['second_momentum_buffer']
                 vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
@@ -378,7 +368,16 @@ class AdaMuon_adv(torch.optim.Optimizer):
             p.data.add_(-update)
         del update
 
-        state['step'] += 1
+
+    @torch.no_grad()
+    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        if not group.get('compiled_optimizer', False):
+            self.__step_parameter(p, group)
+        else:
+            self._compiled_step_parameter(p, group)
+
+    def compile(self, *args, **kwargs):
+        self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def step(self, closure=None):
