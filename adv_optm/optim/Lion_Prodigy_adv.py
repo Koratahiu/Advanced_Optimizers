@@ -96,7 +96,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             orthogonal_gradient=orthogonal_gradient,
             clip_threshold=clip_threshold,
             beta3=beta3, d=d0, d0=d0, d_max=d0, d_numerator=0.0, d_coef=d_coef,
-            growth_rate=growth_rate, safeguard_warmup=safeguard_warmup, k=0, slice_p=slice_p,
+            growth_rate=growth_rate, safeguard_warmup=safeguard_warmup, slice_p=slice_p,
             fsdp_in_use=fsdp_in_use,
             prodigy_steps=prodigy_steps,
             d_limiter=d_limiter,
@@ -108,6 +108,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         super().__init__(params, defaults)
         # Use the device of the first parameter to avoid hardcoding '.cuda()'
         self.device = self.param_groups[0]['params'][0].device
+        self.global_step = 0
         # Global state for accumulating metrics across parameter updates within a single step.
         self.init_step()
 
@@ -133,7 +134,6 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         if self.beta3 is None:
             self.beta3 = math.sqrt(self.beta2)
         
-        k = g_group['k']
         self.d = g_group['d']
         lr = g_group['lr']
 
@@ -141,37 +141,20 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
 
         self.d_numerator = torch.tensor(g_group.get('d_numerator', 0.0) * self.beta3, device=self.device)
 
+        for group in self.param_groups:
+            for i, p in enumerate(group['params']):
+                self.__init_state(p, group)
+
     @torch.no_grad()
-    def step_parameter(self, p: torch.Tensor, group: dict, i: Optional[int] = None):
-        """Performs a single optimization step on a single parameter."""
-        if p.grad is None:
-            return
-
-        if hasattr(p, "_fsdp_flattened"):
-            self.fsdp_in_use = True
-
-        grad = p.grad
-        if grad.dtype != torch.float32 and self.factored:
-            grad = grad.float()
-        if group["clip_threshold"] > 0.0:
-            grad_norm = torch.norm(grad.detach())
-            if grad_norm > group["clip_threshold"]:
-                clip_coef = group["clip_threshold"] / grad_norm
-                grad.mul_(clip_coef)
-        if group["orthogonal_gradient"]:
-            grad = _orthogonalize_gradient(p, grad)
+    def __init_state(self, p, group):
         state = self.state[p]
 
-        # State Initialization
-        if 'step' not in state:
-            state['step'] = 0
+        if len(state) == 0:
 
-            should_factor = (
+            state['factored'] = (
                 self.factored and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
             )
-
-            state['factored'] = should_factor
 
             dtype = torch.float32 if self.factored else p.dtype
 
@@ -193,6 +176,26 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
             else: # Fallback to standard Lion
                 state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
+
+    @torch.no_grad()
+    def __step_parameter(self, p: torch.Tensor, group: dict):
+        """Performs a single optimization step on a single parameter."""
+        if p.grad is None:
+            return
+
+
+        grad = p.grad
+        if grad.dtype != torch.float32 and self.factored:
+            grad = grad.float()
+        if group["clip_threshold"] > 0.0:
+            grad_norm = torch.norm(grad.detach())
+            if grad_norm > group["clip_threshold"]:
+                clip_coef = group["clip_threshold"] / grad_norm
+                grad.mul_(clip_coef)
+        if group["orthogonal_gradient"]:
+            grad = _orthogonalize_gradient(p, grad)
+        state = self.state[p]
+
 
         if state['factored']:
             # Factored Path
@@ -248,7 +251,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             exp_avg.mul_(self.beta2).add_(grad, alpha=self.d * (1 - self.beta2))
 
         prodigy_steps = group['prodigy_steps']
-        if prodigy_steps <= 0 or group['k'] < prodigy_steps:
+        if prodigy_steps <= 0 or self.global_step < prodigy_steps:
             # --- Accumulate Prodigy stats ---
             d0, safeguard_warmup, slice_p = group['d0'], group['safeguard_warmup'], group['slice_p']
             s, p0 = state['s'], state['p0']
@@ -287,6 +290,23 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         del update_for_param
 
     @torch.no_grad()
+    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        if hasattr(p, "_fsdp_flattened"):
+            self.fsdp_in_use = True
+
+        if self.global_step is None and 'step' in self.state[p]:
+            # Backward compatibility
+            self.global_step = self.state[p]['step']
+
+        if not group.get('compiled_optimizer', False):
+            self.__step_parameter(p, group)
+        else:
+            self._compiled_step_parameter(p, group)
+
+    def compile(self, *args, **kwargs):
+        self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
+
+    @torch.no_grad()
     def step(self, closure: Optional[callable] = None):
         """Performs a single optimization step."""
         loss = None
@@ -308,7 +328,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         """Calculates the new `d` based on the accumulated stats."""
         g_group = self.param_groups[0]
         # Only perform d-adaptation if prodigy_steps has not been reached
-        prodigy_active = not (g_group.get('prodigy_steps', 0) > 0 and g_group['k'] >= g_group['prodigy_steps'])
+        prodigy_active = not (g_group.get('prodigy_steps', 0) > 0 and self.global_step >= g_group['prodigy_steps'])
 
         if prodigy_active:
             d_max, d_coef, growth_rate = g_group['d_max'], g_group['d_coef'], g_group['growth_rate']
@@ -337,5 +357,4 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 group['d'] = self.d
                 group['d_max'] = d_max
         # Increment step counter for all groups, regardless of whether d was updated
-        for group in self.param_groups:
-            group['k'] += 1
+        self.global_step += 1
