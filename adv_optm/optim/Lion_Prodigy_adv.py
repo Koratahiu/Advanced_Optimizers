@@ -80,6 +80,8 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         slice_p: int = 11,
         prodigy_steps: int = 0,
         d_limiter: bool = True,
+        # Compiled
+        compiled_optimizer: bool = True,
     ):
         if not lr > 0.0:
             raise ValueError(f"Learning rate must be > 0.0, but got {lr}")
@@ -100,6 +102,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             fsdp_in_use=fsdp_in_use,
             prodigy_steps=prodigy_steps,
             d_limiter=d_limiter,
+            compiled_optimizer=compiled_optimizer,
         )
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
@@ -111,6 +114,9 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         self.global_step = 0
         # Global state for accumulating metrics across parameter updates within a single step.
         self.init_step()
+
+        if compiled_optimizer:
+            self.compile(fullgraph=False, dynamic=False) #FIXME
 
     @property
     def supports_fused_back_pass(self) -> bool:
@@ -250,29 +256,6 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             # Update momentum
             exp_avg.mul_(self.beta2).add_(grad, alpha=self.d * (1 - self.beta2))
 
-        prodigy_steps = group['prodigy_steps']
-        if prodigy_steps <= 0 or self.global_step < prodigy_steps:
-            # --- Accumulate Prodigy stats ---
-            d0, safeguard_warmup, slice_p = group['d0'], group['safeguard_warmup'], group['slice_p']
-            s, p0 = state['s'], state['p0']
-            grad_flat = grad.flatten().float()
-            p_flat = p.data.flatten().float()
-            p0 = p0.float()
-
-            self.d_numerator += (self.d / d0) * self.dlr * torch.dot(grad_flat[::slice_p], p0.data - p_flat[::slice_p])
-
-            alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
-            s.mul_(self.beta3).add_(grad_flat[::slice_p], alpha=alpha)
-            self.d_denom += s.abs().sum()
-
-            del s, p0, grad_flat, p_flat, alpha
-        else:
-            # Free memory if prodigy_steps is reached
-            if 's' in state:
-                del state['s']
-            if 'p0' in state:
-                del state['p0']
-
         if group["weight_decay"] != 0:
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 add_stochastic_(p.data, p.data,
@@ -290,6 +273,47 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         del update_for_param
 
     @torch.no_grad()
+    def __prodigy_accumulate_stats(self, p: torch.Tensor, group: dict):
+        """
+        Separates the global Prodigy D-adaptation state accumulation from the
+        parameter update logic.
+        """
+        state = self.state[p]
+        prodigy_steps = group['prodigy_steps']
+        if prodigy_steps <= 0 or self.global_step < prodigy_steps:
+
+            # --- Accumulate Prodigy stats ---
+            
+            if p.grad is None:
+                return
+
+            grad = p.grad
+
+            # Use existing state tensors
+            s, p0 = state['s'], state['p0']
+            d0, safeguard_warmup, slice_p = group['d0'], group['safeguard_warmup'], group['slice_p']
+
+            # The tensors for calculation must be floated and flattened as done in __step_parameter
+            grad_flat = grad.flatten().float()
+            p_flat = p.data.flatten().float()
+            p0 = p0.float()
+
+            dot_product_result = torch.dot(grad_flat[::slice_p], p0.data - p_flat[::slice_p])
+            self.d_numerator.add_((self.d / d0) * self.dlr * dot_product_result.to(self.device))
+
+            alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
+            s.mul_(self.beta3).add_(grad_flat[::slice_p], alpha=alpha)
+            self.d_denom.add_(s.abs().sum().to(self.device))
+
+            del s, p0, grad_flat, p_flat, alpha, dot_product_result
+        else:
+            # Free memory if prodigy_steps is reached
+            if 's' in state:
+                del state['s']
+            if 'p0' in state:
+                del state['p0']
+
+    @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
         if hasattr(p, "_fsdp_flattened"):
             self.fsdp_in_use = True
@@ -302,6 +326,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             self.__step_parameter(p, group)
         else:
             self._compiled_step_parameter(p, group)
+        self.__prodigy_accumulate_stats(p, group) # FIXME
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
