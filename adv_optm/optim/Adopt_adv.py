@@ -133,7 +133,8 @@ class Adopt_adv(torch.optim.Optimizer):
             cautious_mask = False
         if betas[0] == 0.0 and Simplified_AdEMAMix:
             raise ValueError(f"Beta1 cannot be 0.0 when using Simplified_AdEMAMix. Got {betas[0]}")
-        if kourkoutas_beta and not (betas[1] > beta2_min): raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
+        if kourkoutas_beta and not (betas[1] > beta2_min):
+            raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
         if use_AdEMAMix and Simplified_AdEMAMix:
             print("Warning: use_AdEMAMix is incompatible with Simplified_AdEMAMix, Disabling use_AdEMAMix.")
         if grams_moment and Simplified_AdEMAMix:

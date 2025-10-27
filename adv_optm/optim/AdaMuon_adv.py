@@ -1,11 +1,11 @@
 import torch
-torch._dynamo.config.force_parameter_static_shapes = False
 
 from ..util.BF16_Stochastic_Rounding import add_stochastic_
 from ..util.Newton_Schulz import _newton_schulz_iteration
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
+torch._dynamo.config.force_parameter_static_shapes = False
 
 class AdaMuon_adv(torch.optim.Optimizer):
     """

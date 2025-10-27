@@ -68,7 +68,7 @@ class KourkoutasHelper:
         master_defaults = self.optimizer.defaults
 
         for layer_key, info in self.layer_info.items():
-            params, group = info['params'], info['group_ref']
+            group = info['group_ref']
 
             if not group.get('kourkoutas_beta', False):
                 continue
