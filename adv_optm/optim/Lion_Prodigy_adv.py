@@ -111,11 +111,12 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         super().__init__(params, defaults)
         # Use the device of the first parameter to avoid hardcoding '.cuda()'
         self.device = self.param_groups[0]['params'][0].device
+
         self.global_step = 0
-        # Global state for accumulating metrics across parameter updates within a single step.
         self.init_step()
 
         if compiled_optimizer:
+            torch._dynamo.config.cache_size_limit = 8192
             self.compile(fullgraph=False, dynamic=False) #FIXME
 
     @property
@@ -132,7 +133,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
 
     def init_step(self):
         """Resets accumulators and calculates dlr for the upcoming step."""
-        self.d_denom = torch.tensor(0.0, device=self.device)
+        self.d_denom = 0.0
 
         g_group = self.param_groups[0]
         self.beta1, self.beta2 = g_group['betas']
@@ -145,7 +146,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
 
         self.dlr = self.d * lr
 
-        self.d_numerator = torch.tensor(g_group.get('d_numerator', 0.0) * self.beta3, device=self.device)
+        self.d_numerator = g_group.get('d_numerator', 0.0) * self.beta3
 
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
@@ -184,7 +185,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
 
     @torch.no_grad()
-    def __step_parameter(self, p: torch.Tensor, group: dict):
+    def __step_parameter(self, p: torch.Tensor, group: dict, d: torch.Tensor | float, dlr: torch.Tensor | float):
         """Performs a single optimization step on a single parameter."""
         if p.grad is None:
             return
@@ -216,7 +217,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 exp_avg = exp_avg.float()
 
             # Compute update term c_t = β1*m_{t-1} + (1-β1)*g_t
-            signed_update = exp_avg.clone().mul_(self.beta1).add_(grad_reshaped, alpha=self.d * (1-self.beta1)).sign_()
+            signed_update = exp_avg.clone().mul_(self.beta1).add_(grad_reshaped, alpha=d * (1-self.beta1)).sign_()
 
             if self.cautious_mask:
                 mask = (signed_update * grad_reshaped > 0).to(grad_reshaped.dtype)
@@ -225,10 +226,10 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 del mask
 
             # Parameter update: p_t = p_{t-1} - lr * sign(c_t)
-            update_for_param = signed_update.view(p.shape).mul(self.dlr)
+            update_for_param = signed_update.view(p.shape).mul(dlr)
 
             # Update momentum m_t = β2*m_{t-1} + (1-β2)*lr*g_t
-            exp_avg.mul_(self.beta2).add_(grad_reshaped, alpha=self.d * (1 - self.beta2))
+            exp_avg.mul_(self.beta2).add_(grad_reshaped, alpha=d * (1 - self.beta2))
             del grad_reshaped
 
             # Compress new momentum m_t and store factors
@@ -243,7 +244,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             # Compute update term and sign for the update
             if exp_avg.dtype != torch.float32 and self.factored:
                 exp_avg = exp_avg.float()
-            signed_update = exp_avg.clone().mul_(self.beta1).add_(grad, alpha=self.d * (1-self.beta1)).sign_()
+            signed_update = exp_avg.clone().mul_(self.beta1).add_(grad, alpha=d * (1-self.beta1)).sign_()
 
             if self.cautious_mask:
                 mask = (signed_update * grad > 0).to(grad.dtype)
@@ -251,18 +252,18 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 signed_update.mul_(mask)
                 del mask
 
-            update_for_param = signed_update.mul(self.dlr)
+            update_for_param = signed_update.mul(dlr)
 
             # Update momentum
-            exp_avg.mul_(self.beta2).add_(grad, alpha=self.d * (1 - self.beta2))
+            exp_avg.mul_(self.beta2).add_(grad, alpha=d * (1 - self.beta2))
 
         if group["weight_decay"] != 0:
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 add_stochastic_(p.data, p.data,
-                                alpha=-group["weight_decay"] * self.dlr)
+                                alpha=-group["weight_decay"] * dlr)
             else:
                 p.data.add_(
-                    p.data, alpha=-group["weight_decay"] * self.dlr
+                    p.data, alpha=-group["weight_decay"] * dlr
                 )
 
         if p.dtype == torch.bfloat16 and self.stochastic_rounding:
@@ -273,60 +274,25 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         del update_for_param
 
     @torch.no_grad()
-    def __prodigy_accumulate_stats(self, p: torch.Tensor, group: dict):
-        """
-        Separates the global Prodigy D-adaptation state accumulation from the
-        parameter update logic.
-        """
-        state = self.state[p]
-        prodigy_steps = group['prodigy_steps']
-        if prodigy_steps <= 0 or self.global_step < prodigy_steps:
-
-            # --- Accumulate Prodigy stats ---
-            
-            if p.grad is None:
-                return
-
-            grad = p.grad
-
-            # Use existing state tensors
-            s, p0 = state['s'], state['p0']
-            d0, safeguard_warmup, slice_p = group['d0'], group['safeguard_warmup'], group['slice_p']
-
-            # The tensors for calculation must be floated and flattened as done in __step_parameter
-            grad_flat = grad.flatten().float()
-            p_flat = p.data.flatten().float()
-            p0 = p0.float()
-
-            dot_product_result = torch.dot(grad_flat[::slice_p], p0.data - p_flat[::slice_p])
-            self.d_numerator.add_((self.d / d0) * self.dlr * dot_product_result.to(self.device))
-
-            alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
-            s.mul_(self.beta3).add_(grad_flat[::slice_p], alpha=alpha)
-            self.d_denom.add_(s.abs().sum().to(self.device))
-
-            del s, p0, grad_flat, p_flat, alpha, dot_product_result
-        else:
-            # Free memory if prodigy_steps is reached
-            if 's' in state:
-                del state['s']
-            if 'p0' in state:
-                del state['p0']
-
-    @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
         if hasattr(p, "_fsdp_flattened"):
             self.fsdp_in_use = True
 
         if self.global_step is None and 'step' in self.state[p]:
-            # Backward compatibility
+            # For backward compatibility
             self.global_step = self.state[p]['step']
+            del self.state[p]['step']
+
+        if isinstance(self.d_numerator, float):
+            self.d_numerator = torch.tensor(self.d_numerator, device=p.device)
+            self.d_denom = torch.tensor(self.d_denom, device=p.device)
 
         if not group.get('compiled_optimizer', False):
-            self.__step_parameter(p, group)
+            self.__step_parameter(p, group, self.d, self.dlr)
         else:
-            self._compiled_step_parameter(p, group)
-        self.__prodigy_accumulate_stats(p, group) # FIXME
+            d_tensor = torch.tensor(self.d, device=p.device)
+            dlr_tensor = torch.tensor(self.dlr, device=p.device)
+            self._compiled_step_parameter(p, group, d_tensor, dlr_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)

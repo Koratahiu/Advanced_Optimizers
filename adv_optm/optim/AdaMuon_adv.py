@@ -116,7 +116,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
         self.init_step()
 
         if compiled_optimizer:
-            self.compile(fullgraph=False, dynamic=True)
+            torch._dynamo.config.cache_size_limit = 8192
+            self.compile(fullgraph=False, dynamic=False)
 
     @property
     def supports_fused_back_pass(self):

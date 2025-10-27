@@ -146,6 +146,7 @@ class AdamW_adv(torch.optim.Optimizer):
         self.global_step = 0
 
         if compiled_optimizer:
+            torch._dynamo.config.cache_size_limit = 8192
             self.compile(fullgraph=True) # FIXME
 
     @property
@@ -350,7 +351,7 @@ class AdamW_adv(torch.optim.Optimizer):
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
         if self.global_step is None and 'step' in self.state[p]:
-            # Backward compatibility
+            # For backward compatibility
             self.global_step = self.state[p]['step']
         if group['use_bias_correction']:
             current_step = self.global_step + 1
