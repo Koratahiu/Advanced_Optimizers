@@ -83,7 +83,7 @@ class Adopt_adv(torch.optim.Optimizer):
         k_logging (int): if > 0 and kourkoutas_beta=True, enables periodic console
             logging of Kourkoutas-β statistics (min, max, mean of `β₂` across layers)
             every logging steps. Useful for debugging and tuning. Set to 0 to disable
-            logging (default: 0). 
+            logging (default: 0).
         layer_key_fn (Optional[Callable]): A function that takes a parameter `p`
             and returns a unique, hashable key representing its "layer" or "bucket".
             If `None`, parameters are bucketed by their memory ID (tensor-wise).
@@ -144,7 +144,7 @@ class Adopt_adv(torch.optim.Optimizer):
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "vector_reshape": vector_reshape, "beta3_ema": beta3_ema, "alpha": alpha,
-            "alpha_grad": alpha_grad, 
+            "alpha_grad": alpha_grad,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
         }
@@ -202,20 +202,20 @@ class Adopt_adv(torch.optim.Optimizer):
 
                 # m_0 = 0
                 if group['betas'][0] > 0:
-                    state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
+                    state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
                     state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                     if not self.grams_moment:
                         packed_d2 = (d2 + 7) // 8
                         state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
                 if self.use_AdEMAMix:
-                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
+                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
                     state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                     packed_d2 = (d2 + 7) // 8
                     state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
                 # v_0 = g_0^2 (SMMF_ADOPT NMF storage)
                 vt_init = grad.view(d1, d2).square_()
                 # Allocate NMF factors for v
-                state['mu_v_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
+                state['mu_v_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
                 state['mv_v_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                 # Initialize v_0 using NMF
                 _nnmf(vt_init, out=(state['mu_v_nmf'], state['mv_v_nmf']))
@@ -317,7 +317,7 @@ class Adopt_adv(torch.optim.Optimizer):
             if self.use_atan2:
                 update.mul_(group['lr'] * 1.2732395447351628)
             else:
-                update.mul_(group['lr']) 
+                update.mul_(group['lr'])
 
             # Update second moment v_t for the *next* step using raw g_t
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
@@ -340,7 +340,7 @@ class Adopt_adv(torch.optim.Optimizer):
             del vt
 
         else: # Standard ADOPT logic for non-factored tensors
-            v = state['exp_avg_sq'] # v_{t-1}                
+            v = state['exp_avg_sq'] # v_{t-1}
 
             # ADOPT Step A: Decorrelate g_t using v_{t-1}
             denom = v.sqrt()
@@ -385,7 +385,7 @@ class Adopt_adv(torch.optim.Optimizer):
             if self.use_atan2:
                 update.mul_(group['lr'] * 1.2732395447351628)
             else:
-                update.mul_(group['lr']) 
+                update.mul_(group['lr'])
 
             # Update second moment v_t for the next step using raw g_t
             v.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)

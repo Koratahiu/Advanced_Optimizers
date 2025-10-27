@@ -114,7 +114,7 @@ class Lion_adv(torch.optim.Optimizer):
             if state['factored']:
                 state['effective_shape'] = _get_effective_shape(p.numel())
                 d1, d2 = state['effective_shape']
-                state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
+                state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
                 state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                 packed_d2 = (d2 + 7) // 8
                 state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)

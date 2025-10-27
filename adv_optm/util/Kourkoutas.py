@@ -1,6 +1,5 @@
 import torch
 from torch.optim import Optimizer
-from typing import Callable
 
 class KourkoutasHelper:
     """
@@ -58,7 +57,7 @@ class KourkoutasHelper:
         Calculates dynamic beta2 for all layers using the completed scalar accumulators
         from the PREVIOUS step. Should be called once at the start of an optimizer step.
         """
-        
+
         beta2_log = []
         # These are just for the sample log, initialize them
         sun, pooled_grad_norm, r_ema_tensor = (torch.tensor(0.0),)*3
@@ -81,7 +80,7 @@ class KourkoutasHelper:
                 self.layer_state[layer_key] = {
                     'sum_sq_accumulator': torch.tensor(0.0, device=first_param_in_layer.device, dtype=torch.float32)
                 }
-            
+
             if 'kourkoutas_r_ema' not in param_state:
                 param_state['kourkoutas_r_ema'] = torch.tensor(0.0, device=first_param_in_layer.device, dtype=torch.float32)
 
@@ -96,14 +95,14 @@ class KourkoutasHelper:
 
             r_ema_tensor = param_state['kourkoutas_r_ema']
             accumulator = self.layer_state[layer_key]['sum_sq_accumulator']
-            
+
             pooled_grad_norm = torch.sqrt(accumulator)
-            
+
             # Update the persistent EMA tensor in-place.
             r_ema_tensor.mul_(ema_alpha).add_(pooled_grad_norm, alpha=1.0 - ema_alpha)
-            
+
             sun = torch.tensor(0.0, device=r_ema_tensor.device) # Default sun to 0 for warmup
-            
+
             if current_step < k_warmup_steps:
                 beta2 = beta2_max
             else:
@@ -113,7 +112,7 @@ class KourkoutasHelper:
 
             # Store the final calculated beta2 in the helper's transient state for this step.
             self.layer_state[layer_key]['dynamic_beta2'] = beta2.item() if isinstance(beta2, torch.Tensor) else beta2
-            
+
             # Reset the accumulator for the next optimizer step.
             accumulator.zero_()
 

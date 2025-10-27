@@ -168,7 +168,7 @@ class Muon_adv(torch.optim.Optimizer):
                     state['effective_shape'] = _get_effective_shape(p.numel())
                     d1, d2 = state['effective_shape']
             if state['factored']:
-                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
+                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                     state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
                     packed_d2 = (d2 + 7) // 8
                     state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)

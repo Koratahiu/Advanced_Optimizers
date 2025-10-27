@@ -66,7 +66,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         k_logging (int): if > 0 and kourkoutas_beta=True, enables periodic console
             logging of Kourkoutas-β statistics (min, max, mean of `β₂` across layers)
             every logging steps. Useful for debugging and tuning. Set to 0 to disable
-            logging (default: 0). 
+            logging (default: 0).
         layer_key_fn (Optional[Callable]): A function that takes a parameter `p`
             and returns a unique, hashable key representing its "layer" or "bucket".
             If `None`, parameters are bucketed by their memory ID (tensor-wise).
@@ -170,17 +170,17 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
                 d1, d2 = state['effective_shape']
 
                 # First moment (m)
-                state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
+                state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                 state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
                 packed_d2 = (d2 + 7) // 8
                 state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
                 # Second moment (v)
-                state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
+                state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                 state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
             else:  # Fallback to standard optimizer for non-factored tensors
                 state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
-            
+
             if group['use_bias_correction']:
                 state['num_sum'] = 0.0
                 state['den_sum'] = 0.0

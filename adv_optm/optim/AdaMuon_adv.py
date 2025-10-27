@@ -112,7 +112,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         self.stochastic_rounding = stochastic_rounding
 
         super().__init__(params, defaults)
-        
+
         self.init_step()
 
         if compiled_optimizer:
@@ -154,11 +154,11 @@ class AdaMuon_adv(torch.optim.Optimizer):
             if state['factored']:
                     state['effective_shape'] = _get_effective_shape(p.numel())
                     d1, d2 = state['effective_shape']
-                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
+                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                     state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
                     packed_d2 = (d2 + 7) // 8
                     state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
-                    state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
+                    state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                     state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
             else:
                 if len(p.shape) >= 2:
