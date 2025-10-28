@@ -27,10 +27,6 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         stochastic_rounding (bool, optional): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
         cautious_mask (bool): whether to use the cautious masking technique. (default: False).
-        clip_threshold (float, optional): whether to clip the gradients norm
-            per-parameter as proposed in the paper `Lions and Muons: Optimization via
-            Stochastic Frank-Wolfe` (https://arxiv.org/abs/2506.04192) to make Lion more stable
-            (default: 0.0).
         nnmf_factor (bool): whether to use the factorization or use the
             uncompressed optimizer. (default: True)
         d0 (float):
@@ -68,7 +64,6 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         stochastic_rounding: bool = True,
         orthogonal_gradient: bool = False,
         cautious_mask: bool = False,
-        clip_threshold: float = 0.0,
         nnmf_factor: bool = False,
         # prodigy parameters
         beta3: float = None,
@@ -81,7 +76,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         prodigy_steps: int = 0,
         d_limiter: bool = True,
         # Compiled
-        compiled_optimizer: bool = True,
+        compiled_optimizer: bool = False,
     ):
         if not lr > 0.0:
             raise ValueError(f"Learning rate must be > 0.0, but got {lr}")
@@ -96,7 +91,6 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             weight_decay=weight_decay,
             vector_reshape=vector_reshape,
             orthogonal_gradient=orthogonal_gradient,
-            clip_threshold=clip_threshold,
             beta3=beta3, d=d0, d0=d0, d_max=d0, d_numerator=0.0, d_coef=d_coef,
             growth_rate=growth_rate, safeguard_warmup=safeguard_warmup, slice_p=slice_p,
             fsdp_in_use=fsdp_in_use,
@@ -194,11 +188,6 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         grad = p.grad
         if grad.dtype != torch.float32 and self.factored:
             grad = grad.float()
-        if group["clip_threshold"] > 0.0:
-            grad_norm = torch.norm(grad.detach())
-            if grad_norm > group["clip_threshold"]:
-                clip_coef = group["clip_threshold"] / grad_norm
-                grad.mul_(clip_coef)
         if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)
         state = self.state[p]
@@ -281,7 +270,6 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         if self.global_step is None and 'step' in self.state[p]:
             # For backward compatibility
             self.global_step = self.state[p]['step']
-            del self.state[p]['step']
 
         if isinstance(self.d_numerator, float):
             self.d_numerator = torch.tensor(self.d_numerator, device=p.device)

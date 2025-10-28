@@ -119,6 +119,8 @@ class Adopt_adv(torch.optim.Optimizer):
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
         nnmf_factor: bool = False,
+        # Compiled
+        compiled_optimizer: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -148,6 +150,7 @@ class Adopt_adv(torch.optim.Optimizer):
             "alpha_grad": alpha_grad,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
+            "compiled_optimizer": compiled_optimizer,
         }
         self.clip_lambda = clip_lambda
         self.stochastic_rounding = stochastic_rounding
@@ -162,8 +165,16 @@ class Adopt_adv(torch.optim.Optimizer):
         self.layer_key_fn = layer_key_fn
         super().__init__(params, defaults)
 
+        self.init_step()
+
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
+
+        self.global_step = 0
+
+        if compiled_optimizer:
+            torch._dynamo.config.cache_size_limit = 8192
+            self.compile(fullgraph=True)
 
     @property
     def supports_fused_back_pass(self): return True
@@ -172,28 +183,21 @@ class Adopt_adv(torch.optim.Optimizer):
     @property
     def supports_flat_params(self): return False
 
-    @torch.no_grad()
-    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-        if p.grad is None:
-            return
+    def init_step(self):
+        for group in self.param_groups:
+            for p in group['params']:
+                self.__init_state(p, group)
 
-        grad = p.grad
-        if self.factored and grad.dtype != torch.float32:
-            grad = grad.float()
-        if self.orthogonal_gradient:
-            grad = _orthogonalize_gradient(p, grad)
+    @torch.no_grad()
+    def __init_state(self, p, group):
         state = self.state[p]
 
-        # State Initialization
-        if 'step' not in state:
-            state['step'] = 0
+        if len(state) == 0:
 
-            should_factor = (
+            state['factored'] = (
                 self.factored and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
             )
-
-            state['factored'] = should_factor
 
             dtype = torch.float32 if self.factored else p.dtype
 
@@ -213,35 +217,60 @@ class Adopt_adv(torch.optim.Optimizer):
                     state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                     packed_d2 = (d2 + 7) // 8
                     state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
-                # v_0 = g_0^2 (SMMF_ADOPT NMF storage)
-                vt_init = grad.view(d1, d2).square_()
-                # Allocate NMF factors for v
-                state['mu_v_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
-                state['mv_v_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                # Initialize v_0 using NMF
-                _nnmf(vt_init, out=(state['mu_v_nmf'], state['mv_v_nmf']))
+
             else: # Fallback for non-factored tensors
                 if group['betas'][0] > 0:
                     state['exp_avg'] = torch.zeros_like(p, dtype=dtype) # m_0
                 if self.use_AdEMAMix:
                     state['exp_avg_slow'] = torch.zeros_like(p, dtype=dtype)
-                state['exp_avg_sq'] = grad.square()   # v_0
+
+    @torch.no_grad()
+    def __init_step(self, p, group):
+        if p.grad is None:
+            return
+        
+        state = self.state[p]
+
+        if 'exp_avg_sq' in state or 'mu_v_nmf' in state:
+            return
+
+        grad = p.grad
+        dtype = torch.float32 if self.factored else p.dtype
+
+        if state['factored']:
+            d1, d2 = state['effective_shape']
+            # v_0 = g_0^2 (SMMF_ADOPT NMF storage)
+            vt_init = grad.view(d1, d2).square_()
+            # Allocate NMF factors for v
+            state['mu_v_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
+            state['mv_v_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
+            # Initialize v_0 using NMF
+            _nnmf(vt_init, out=(state['mu_v_nmf'], state['mv_v_nmf']))
+            del vt_init
+        else:
+            state['exp_avg_sq'] = grad.square()   # v_0
+
+
+    @torch.no_grad()
+    def __step_parameter(self, p: torch.Tensor, group: dict, lr: torch.Tensor | float):
+        if p.grad is None:
+            return
+
+        grad = p.grad
+        if self.factored and grad.dtype != torch.float32:
+            grad = grad.float()
+        if self.orthogonal_gradient:
+            grad = _orthogonalize_gradient(p, grad)
+        state = self.state[p]
+
 
         beta1, beta2 = group['betas']
 
-        current_step = state['step']
         if group.get('kourkoutas_beta', False):
-            # Call prepare_step() once at the beginning of the step for all params
-            self.kourkoutas_helper.maybe_prepare_step(current_step)
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
             # Get the dynamic beta2 calculated in prepare_step()
             beta2 = self.kourkoutas_helper.get_beta2(p, group)
-
-        # The first step is for initialization only (skip when use_atan2 as it's scale invariant).
-        if state['step'] == 0 and not self.use_atan2:
-            state['step'] += 1
-            return
 
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
@@ -284,7 +313,7 @@ class Adopt_adv(torch.optim.Optimizer):
             else:
                 normalized_grad = grad_reshaped / denom.add_(group['eps'])
                 if self.clip_lambda is not None:
-                    clip_val = self.clip_lambda(state['step'])
+                    clip_val = self.clip_lambda(self.global_step)
                     normalized_grad.clamp_(-clip_val, clip_val)
             del denom
 
@@ -295,7 +324,7 @@ class Adopt_adv(torch.optim.Optimizer):
                 else:
                     mt.mul_(beta1).add_(normalized_grad, alpha=1.0 - beta1)
                 if self.grams_moment:
-                    mt = grad_reshaped.sign() * mt.abs()
+                    mt = grad_reshaped.sign().mul_(mt.abs())
                 elif self.cautious_mask:
                     mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
@@ -316,9 +345,9 @@ class Adopt_adv(torch.optim.Optimizer):
             update = update.view(p.shape)
 
             if self.use_atan2:
-                update.mul_(group['lr'] * 1.2732395447351628)
+                update.mul_(lr * 1.2732395447351628)
             else:
-                update.mul_(group['lr'])
+                update.mul_(lr)
 
             # Update second moment v_t for the *next* step using raw g_t
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
@@ -351,7 +380,7 @@ class Adopt_adv(torch.optim.Optimizer):
             else:
                 normalized_grad = grad / denom.add_(group['eps'])
                 if self.clip_lambda is not None:
-                    clip_val = self.clip_lambda(state['step'])
+                    clip_val = self.clip_lambda(self.global_step)
                     normalized_grad.clamp_(-clip_val, clip_val)
             del denom
 
@@ -364,7 +393,7 @@ class Adopt_adv(torch.optim.Optimizer):
                     m.mul_(beta1).add_(normalized_grad, alpha=1.0 - beta1)
 
             if self.grams_moment:
-                m = grad.sign() * m.abs()
+                m = grad.sign().mul_(m.abs())
             elif self.cautious_mask:
                 mask = (m * grad > 0).to(grad.dtype)
                 mask.div_(mask.mean().clamp_(min=1e-3))
@@ -384,9 +413,9 @@ class Adopt_adv(torch.optim.Optimizer):
                 update = m.clone() if beta1 > 0 else normalized_grad
 
             if self.use_atan2:
-                update.mul_(group['lr'] * 1.2732395447351628)
+                update.mul_(lr * 1.2732395447351628)
             else:
-                update.mul_(group['lr'])
+                update.mul_(lr)
 
             # Update second moment v_t for the next step using raw g_t
             v.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
@@ -394,9 +423,9 @@ class Adopt_adv(torch.optim.Optimizer):
         # Parameter Update
         if group["weight_decay"] != 0:
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * group["lr"])
+                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * lr)
             else:
-                p.data.add_(p.data, alpha=-group["weight_decay"] * group["lr"])
+                p.data.add_(p.data, alpha=-group["weight_decay"] * lr)
 
         if p.dtype == torch.bfloat16 and self.stochastic_rounding:
             add_stochastic_(p.data, -update)
@@ -404,7 +433,33 @@ class Adopt_adv(torch.optim.Optimizer):
             p.data.add_(-update)
         del update
 
-        state['step'] += 1
+    @torch.no_grad()
+    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        if self.global_step is None and 'step' in self.state[p]:
+            # For backward compatibility
+            self.global_step = self.state[p]['step']
+        
+        if self.global_step == 0:
+            self.__init_step(p, group)
+
+        # The first step is for initialization only (skip when use_atan2 as it's scale invariant).
+        if self.global_step == 0 and not self.use_atan2:
+            self.global_step += 1
+            return
+
+        if group.get('kourkoutas_beta', False):
+            # Prepare Kourkoutas-β once per step using the global step counter.
+            self.kourkoutas_helper.maybe_prepare_step(self.global_step)
+
+        if not group.get('compiled_optimizer', False):
+            self.__step_parameter(p, group, group['lr'])
+        else:
+            lr_tensor = torch.tensor(group['lr'], device=p.device)
+            self._compiled_step_parameter(p, group, lr_tensor)
+
+    def compile(self, *args, **kwargs):
+        self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
+
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -417,5 +472,7 @@ class Adopt_adv(torch.optim.Optimizer):
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
+
+        self.global_step += 1
 
         return loss

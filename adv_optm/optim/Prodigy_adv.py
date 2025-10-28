@@ -147,7 +147,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
         # Compiled
-        compiled_optimizer: bool = True,
+        compiled_optimizer: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -342,7 +342,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 else:
                     mt.mul_(self.beta1).add_(grad_reshaped, alpha=d * (1.0 - self.beta1))
                 if self.grams_moment:
-                    mt.copy_(grad_reshaped.sign() * mt.abs())
+                    mt = grad_reshaped.sign().mul_(mt.abs())
                 elif self.cautious_mask:
                     mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
@@ -404,7 +404,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 else:
                     exp_avg.mul_(self.beta1).add_(grad, alpha=d * (1.0 - self.beta1))
                 if self.grams_moment:
-                    exp_avg = grad.sign() * exp_avg.abs()
+                    exp_avg = grad.sign().mul_(exp_avg.abs())
                 elif self.cautious_mask:
                     mask = (exp_avg * grad > 0).to(grad.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
@@ -480,7 +480,6 @@ class Prodigy_adv(torch.optim.Optimizer):
         if self.global_step is None and 'step' in self.state[p]:
             # For backward compatibility
             self.global_step = self.state[p]['step']
-            del self.state[p]['step']
 
         if self.kourkoutas_beta:
             self.kourkoutas_helper.maybe_prepare_step(self.global_step)
