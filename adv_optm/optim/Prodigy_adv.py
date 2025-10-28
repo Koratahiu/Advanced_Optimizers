@@ -147,7 +147,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
         # Compiled
-        compiled_optimizer: bool = True,
+        compiled_optimizer: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")

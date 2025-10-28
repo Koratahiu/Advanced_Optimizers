@@ -120,7 +120,7 @@ class Adopt_adv(torch.optim.Optimizer):
         layer_key_fn: Optional[Callable] = None,
         nnmf_factor: bool = False,
         # Compiled
-        compiled_optimizer: bool = True,
+        compiled_optimizer: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")

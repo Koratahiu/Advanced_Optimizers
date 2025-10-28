@@ -76,7 +76,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         prodigy_steps: int = 0,
         d_limiter: bool = True,
         # Compiled
-        compiled_optimizer: bool = True,
+        compiled_optimizer: bool = False,
     ):
         if not lr > 0.0:
             raise ValueError(f"Learning rate must be > 0.0, but got {lr}")
