@@ -238,12 +238,12 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             update = torch.add(mt, grad_reshaped, alpha=alpha_grad)
             del grad_reshaped
 
-            denom = vt.sqrt().add_(group['eps'] * torch.sqrt(den_sum))
+            denom = vt.sqrt().add_(group['eps'] * math.sqrt(den_sum))
             update.div_(denom)
             del denom
 
             if group['use_bias_correction']:
-                update = (update / num_sum) * torch.sqrt(den_sum)
+                update = (update / num_sum) * math.sqrt(den_sum)
 
             update = update.view(p.shape).mul_(group['lr'])
 
@@ -264,12 +264,12 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
             exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
-            denom = exp_avg_sq.sqrt().add_(group['eps'] * torch.sqrt(den_sum))
+            denom = exp_avg_sq.sqrt().add_(group['eps'] * math.sqrt(den_sum))
             update.div_(denom)
             del denom
 
             if group['use_bias_correction']:
-                update = (update / num_sum) * torch.sqrt(den_sum)
+                update = (update / num_sum) * math.sqrt(den_sum)
 
             update.mul_(group['lr'])
 
@@ -312,7 +312,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             lr_tensor = torch.tensor(group['lr'], device=p.device)
             num_sum_tesnor = torch.tensor(self.num_sum, device=p.device)
             den_sum_tesnor = torch.tensor(self.den_sum, device=p.device)
-            self._compiled_step_parameter(p, group, lr_tensor, beta1, num_sum_tesnor, den_sum_tesnor)
+            self._compiled_step_parameter(p, group, lr_tensor, beta1, self.num_sum, self.den_sum)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
