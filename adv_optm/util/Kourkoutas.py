@@ -71,7 +71,7 @@ class KourkoutasHelper:
         for layer_key, info in self.layer_info.items():
             params, group = info['params'], info['group_ref']
 
-            if not group.get('kourkoutas_beta', False):
+            if not group.get('kourkoutas_beta', False) and not group.get('adam_kourkoutas_beta', False):
                 continue
 
             first_param_in_layer = info['params'][0]
