@@ -168,8 +168,8 @@ class Muon_adv(torch.optim.Optimizer):
                     state['effective_shape'] = _get_effective_shape(p.numel())
                     d1, d2 = state['effective_shape']
             if state['factored']:
-                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
-                    state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+                    state['mu_mbuf_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
+                    state['mv_mbuf_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
                     packed_d2 = (d2 + 7) // 8
                     state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
             else:
@@ -189,7 +189,7 @@ class Muon_adv(torch.optim.Optimizer):
                     state['normuon_v'] = torch.zeros(num_rows, device=p.device, dtype=torch.float32)
 
     @torch.no_grad()
-    def __step_parameter(self, p: torch.Tensor, group: dict):
+    def __step_parameter(self, p: torch.Tensor, group: dict, lr: torch.Tensor | float):
         if p.grad is None:
             return
 
@@ -206,7 +206,7 @@ class Muon_adv(torch.optim.Optimizer):
 
             # Reconstruct momentum from previous step's factors & sign
             d1, d2 = state['effective_shape']
-            mt_buf = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
+            mt_buf = _unnmf((state['mu_mbuf_nmf'], state['mv_mbuf_nmf']))
             unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
             torch.where(unpacked_sign, mt_buf, -mt_buf, out=mt_buf)
             del unpacked_sign
@@ -273,15 +273,15 @@ class Muon_adv(torch.optim.Optimizer):
                 # Scale learning rate
                 update_norm = torch.linalg.vector_norm(update)
 
-                scaled_lr = group['normuon_lr_scale'] * group['lr'] * (p.numel()**0.5) / update_norm.add_(group['normuon_eps'])
+                scaled_lr = group['normuon_lr_scale'] * lr * (p.numel()**0.5) / update_norm.add_(group['normuon_eps'])
 
                 update = update.view(p.shape).mul_(scaled_lr)
                 del update_norm, scaled_lr
             else: # Original Muon learning rate application
-                update = update.view(p.shape).mul_(group['lr'])
+                update = update.view(p.shape).mul_(lr)
 
             state['sign'] = _pack_bools(mt_buf > 0)
-            _nnmf(mt_buf.abs(), out=(state['mu_m_nmf'], state['mv_m_nmf']))
+            _nnmf(mt_buf.abs(), out=(state['mu_mbuf_nmf'], state['mv_mbuf_nmf']))
             del mt_buf
 
         else: # Standard Muon logic for non-factored tensors
@@ -384,16 +384,16 @@ class Muon_adv(torch.optim.Optimizer):
                         update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
                     # Scale learning rate
                     update_norm = torch.linalg.vector_norm(update)
-                    scaled_lr = group['normuon_lr_scale'] * group['lr'] * (p.numel()**0.5) / update_norm.add_(group['normuon_eps'])
+                    scaled_lr = group['normuon_lr_scale'] * lr * (p.numel()**0.5) / update_norm.add_(group['normuon_eps'])
                     update.mul_(scaled_lr)
                 else: # Original Muon learning rate application
-                    update.mul_(group['lr'])
+                    update.mul_(lr)
 
                 # reshape back to the original shape.
                 update = update.view(original_shape)
 
 
-            else: # Fallback to standard SGD with momentum for 1D params (biases, etc.) when not reshaped
+            else: # Fallback to standard SGD with momentum for 1D params (biases, etc.)
                 # Momentum update
                 mt_buf = state['momentum_buffer']
                 mt_buf.mul_(beta1).add_(grad)
@@ -405,14 +405,14 @@ class Muon_adv(torch.optim.Optimizer):
                 else:
                     # Standard momentum
                     update = mt_buf.clone()
-                update.mul_(group['lr'])
+                update.mul_(lr)
 
         # Decoupled weight decay
         if group["weight_decay"] != 0:
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * group["lr"])
+                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * lr)
             else:
-                p.data.add_(p.data, alpha=-group["weight_decay"] * group["lr"])
+                p.data.add_(p.data, alpha=-group["weight_decay"] * lr)
 
         if p.dtype == torch.bfloat16 and self.stochastic_rounding:
             add_stochastic_(p.data, -update)
@@ -422,10 +422,11 @@ class Muon_adv(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-        if not self.compiled_optimizer:
-            self.__step_parameter(p, group)
+        if not group.get('compiled_optimizer', False):
+            self.__step_parameter(p, group, group['lr'])
         else:
-            self._compiled_step_parameter(p, group)
+            lr_tensor = torch.tensor(group['lr'], device=p.device)
+            self._compiled_step_parameter(p, group, lr_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)

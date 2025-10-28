@@ -97,6 +97,8 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
         nnmf_factor: bool = False,
+        # Compiled
+        compiled_optimizer: bool = True,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -118,15 +120,32 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
+            "compiled_optimizer": compiled_optimizer,
         }
         self.stochastic_rounding = stochastic_rounding
         self.factored = nnmf_factor
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
+        self.use_bias_correction = use_bias_correction
+        if use_bias_correction:
+            self.num_sum = betas[0] * 1.0
+            self.den_sum = betas[1] * (1.0 - betas[1])
+        else:
+            self.num_sum = 1.0
+            self.den_sum = 1.0
+
         super().__init__(params, defaults)
+
+        self.init_step()
 
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
+
+        self.global_step = 0
+
+        if compiled_optimizer:
+            torch._dynamo.config.cache_size_limit = 8192
+            self.compile(fullgraph=True)
 
     @property
     def supports_fused_back_pass(self):
@@ -140,28 +159,21 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
     def supports_flat_params(self):
         return False
 
-    @torch.no_grad()
-    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-        if p.grad is None:
-            return
+    def init_step(self):
+        for group in self.param_groups:
+            for p in group['params']:
+                self.__init_state(p, group)
 
-        grad = p.grad
-        if grad.dtype != torch.float32 and self.factored:
-            grad = grad.float()
-        if group["orthogonal_gradient"]:
-            grad = _orthogonalize_gradient(p, grad)
+    @torch.no_grad()
+    def __init_state(self, p, group):
         state = self.state[p]
 
-        # State Initialization
-        if 'step' not in state:
-            state['step'] = 0
+        if len(state) == 0:
 
-            should_factor = (
+            state['factored'] = (
                 self.factored and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
             )
-
-            state['factored'] = should_factor
 
             dtype = torch.float32 if self.factored else p.dtype
             device = p.device
@@ -182,39 +194,31 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
                 state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
-            if group['use_bias_correction']:
-                state['num_sum'] = 0.0
-                state['den_sum'] = 0.0
-            else:
-                state['num_sum'] = 1.0
-                state['den_sum'] = 1.0
 
-        beta1_final, beta2 = group["betas"]
 
-        current_step = state['step']
+    @torch.no_grad()
+    def __step_parameter(self, p: torch.Tensor, group: dict, lr: torch.Tensor | float, beta1: float, num_sum: float, den_sum: float):
+        if p.grad is None:
+            return
+
+        grad = p.grad
+        if grad.dtype != torch.float32 and self.factored:
+            grad = grad.float()
+        if group["orthogonal_gradient"]:
+            grad = _orthogonalize_gradient(p, grad)
+        state = self.state[p]
+
+
+        ___, beta2 = group["betas"]
+
         if group.get('kourkoutas_beta', False):
-            # Call prepare_step() once at the beginning of the step for all params
-            self.kourkoutas_helper.maybe_prepare_step(current_step)
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
             # Get the dynamic beta2 calculated in prepare_step()
             beta2 = self.kourkoutas_helper.get_beta2(p, group)
 
-        beta1_warmup = group["beta1_warmup"]
         alpha_grad = group["alpha_grad"]
 
-        if beta1_warmup is not None:
-            step = state['step'] + 1
-            beta1 = linear_hl_warmup_scheduler(step, beta_end=beta1_final, beta_start=group['min_beta1'], warmup=beta1_warmup)
-        else:
-            beta1 = beta1_final
-
-        if group['use_bias_correction']:
-            state['num_sum'] = beta1 * state['num_sum'] + 1.0
-            if group.get('kourkoutas_beta', False):
-                state['den_sum'] = group['betas'][1] * state['den_sum'] + (1.0 - group['betas'][1])
-            else:
-                state['den_sum'] = beta2 * state['den_sum'] + (1.0 - beta2)
 
         if state['factored']:
             d1, d2 = state['effective_shape']
@@ -234,12 +238,12 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             update = torch.add(mt, grad_reshaped, alpha=alpha_grad)
             del grad_reshaped
 
-            denom = vt.sqrt().add_(group['eps'] * math.sqrt(state['den_sum']))
+            denom = vt.sqrt().add_(group['eps'] * math.sqrt(den_sum))
             update.div_(denom)
             del denom
 
             if group['use_bias_correction']:
-                update = (update / state['num_sum']) * math.sqrt(state['den_sum'])
+                update = (update / num_sum) * math.sqrt(den_sum)
 
             update = update.view(p.shape).mul_(group['lr'])
 
@@ -260,12 +264,12 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
             exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
-            denom = exp_avg_sq.sqrt().add_(group['eps'] * math.sqrt(state['den_sum']))
+            denom = exp_avg_sq.sqrt().add_(group['eps'] * math.sqrt(den_sum))
             update.div_(denom)
             del denom
 
             if group['use_bias_correction']:
-                update = (update / state['num_sum']) * math.sqrt(state['den_sum'])
+                update = (update / num_sum) * math.sqrt(den_sum)
 
             update.mul_(group['lr'])
 
@@ -285,6 +289,34 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         state['step'] += 1
 
     @torch.no_grad()
+    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        if self.global_step is None and 'step' in self.state[p]:
+            # For backward compatibility
+            o_state = self.state[p]
+            self.global_step = o_state['step']
+            self.num_sum = group["betas"][0] * o_state['num_sum'] + 1.0
+            self.den_sum = group['betas'][1] * o_state['den_sum'] + (1.0 - group['betas'][1])
+
+        if group["beta1_warmup"] is not None:
+            step = self.global_step + 1
+            beta1 = linear_hl_warmup_scheduler(step, beta_end=group["betas"][0], beta_start=group['min_beta1'], warmup=group["beta1_warmup"])
+        else:
+            beta1 = group["betas"][0]
+
+        if group.get('kourkoutas_beta', False):
+            # Prepare Kourkoutas-β once per step using the global step counter.
+            self.kourkoutas_helper.maybe_prepare_step(self.global_step)
+
+        if not group.get('compiled_optimizer', False):
+            self.__step_parameter(p, group, group['lr'], beta1, self.num_sum, self.den_sum)
+        else:
+            lr_tensor = torch.tensor(group['lr'], device=p.device)
+            self._compiled_step_parameter(p, group, lr_tensor)
+
+    def compile(self, *args, **kwargs):
+        self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
+
+    @torch.no_grad()
     def step(self, closure=None):
         """Performs a single optimization step."""
         loss = None
@@ -295,5 +327,12 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
+        
+        g_group = self.param_groups[0]
+        if g_group['use_bias_correction']:
+            self.num_sum = g_group["betas"][0] * self.num_sum + 1.0
+            self.den_sum = g_group['betas'][1] * self.den_sum + (1.0 - g_group['betas'][1])
+
+        self.global_step += 1
 
         return loss

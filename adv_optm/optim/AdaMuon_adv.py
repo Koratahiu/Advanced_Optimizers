@@ -75,7 +75,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         ns_steps: int = 5,
         ns_eps: float = 1e-7,
         ns_coeffs: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
-        stochastic_rounding: bool = True,
+        stochastic_rounding: bool = False,
         use_atan2: bool = False,
         nesterov: bool = False,
         Simplified_AdEMAMix: bool = False,
@@ -86,7 +86,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         ortho_rank: int = 128,
         nnmf_factor: bool = False,
         # Compiled
-        compiled_optimizer: bool = True,
+        compiled_optimizer: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -111,13 +111,15 @@ class AdaMuon_adv(torch.optim.Optimizer):
         }
         self.stochastic_rounding = stochastic_rounding
 
+        if compiled_optimizer:
+            torch._dynamo.config.cache_size_limit = 8192
+            print ("applying compile")
+            self.compile(fullgraph=False)
+
         super().__init__(params, defaults)
 
         self.init_step()
 
-        if compiled_optimizer:
-            torch._dynamo.config.cache_size_limit = 8192
-            self.compile(fullgraph=False, dynamic=False)
 
     @property
     def supports_fused_back_pass(self):
@@ -155,19 +157,19 @@ class AdaMuon_adv(torch.optim.Optimizer):
             if state['factored']:
                     state['effective_shape'] = _get_effective_shape(p.numel())
                     d1, d2 = state['effective_shape']
-                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
-                    state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+                    state['mu_mbuf_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
+                    state['mv_mbuf_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
                     packed_d2 = (d2 + 7) // 8
                     state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
-                    state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
-                    state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+                    state['mu_vbuf_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
+                    state['mv_vbuf_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
             else:
                 if len(p.shape) >= 2:
                     state['second_momentum_buffer'] = torch.zeros_like(p)
                 state['momentum_buffer'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def __step_parameter(self, p: torch.Tensor, group: dict):
+    def __step_parameter(self, p: torch.Tensor, group: dict, lr: torch.Tensor | float):
         if p.grad is None:
             return
 
@@ -185,7 +187,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             # Reconstruct momentum from previous step's factors & sign
             d1, d2 = state['effective_shape']
-            mt_buf = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
+            mt_buf = _unnmf((state['mu_mbuf_nmf'], state['mv_mbuf_nmf']))
             unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
             torch.where(unpacked_sign, mt_buf, -mt_buf, out=mt_buf)
             del unpacked_sign
@@ -235,7 +237,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 )
 
             # Reconstruct second momentum from previous step's factors
-            vt_buf = _unnmf((state['mu_v_nmf'], state['mv_v_nmf']))
+            vt_buf = _unnmf((state['mu_vbuf_nmf'], state['mv_vbuf_nmf']))
 
             # Update second momentum in full-size
             vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
@@ -254,18 +256,17 @@ class AdaMuon_adv(torch.optim.Optimizer):
             rms_target = group['rms_target']
             num_elements = update.numel()
             # Add eps to prevent division by zero
-            scaling_factor = rms_target * (num_elements ** 0.5) / (update.norm() + group['eps'])
+            update.mul_(rms_target * (num_elements ** 0.5) / (update.norm() + group['eps']))
 
-            update.mul_(scaling_factor)
-            update = update.view(p.shape).mul_(group['lr'])
-            del num_elements, scaling_factor
+            update = update.view(p.shape).mul_(lr)
+            del num_elements
 
             # Compress updated moments and store new factors
             state['sign'] = _pack_bools(mt_buf > 0)
-            _nnmf(mt_buf.abs(), out=(state['mu_m_nmf'], state['mv_m_nmf']))
+            _nnmf(mt_buf.abs(), out=(state['mu_mbuf_nmf'], state['mv_mbuf_nmf']))
             del mt_buf
 
-            _nnmf(vt_buf.abs(), out=(state['mu_v_nmf'], state['mv_v_nmf']))
+            _nnmf(vt_buf.abs(), out=(state['mu_vbuf_nmf'], state['mv_vbuf_nmf']))
             del vt_buf
 
         else: # Standard AdaMuon logic for non-factored tensors
@@ -337,12 +338,11 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 rms_target = group['rms_target']
                 num_elements = update.numel()
                 # Add eps to prevent division by zero
-                scaling_factor = rms_target * (num_elements ** 0.5) / (update.norm() + group['eps'])
+                update.mul_(rms_target * (num_elements ** 0.5) / (update.norm() + group['eps']))
 
-                update.mul_(scaling_factor)
-                del num_elements, scaling_factor
+                del num_elements
 
-                update.mul_(group['lr'])
+                update.mul_(lr)
 
             else: # Fallback to standard SGD with momentum for 1D params (biases, etc.) when not reshaped
                 # Momentum update
@@ -354,14 +354,14 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     signed_m_buf = torch.sign(mt_buf.add(grad, alpha=alpha_grad))
                 else:
                     update = mt_buf.clone()
-                update.mul_(group['lr'])
+                update.mul_(lr)
 
         # Decoupled weight decay
         if group["weight_decay"] != 0:
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * group["lr"])
+                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * lr)
             else:
-                p.data.add_(p.data, alpha=-group["weight_decay"] * group["lr"])
+                p.data.add_(p.data, alpha=-group["weight_decay"] * lr)
 
         if p.dtype == torch.bfloat16 and self.stochastic_rounding:
             add_stochastic_(p.data, -update)
@@ -372,10 +372,13 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+#        if 'momentum_buffer' not in self.state[p] and 'mu_mbuf_nmf' not in self.state[p]:
+#            return
         if not group.get('compiled_optimizer', False):
-            self.__step_parameter(p, group)
+            self.__step_parameter(p, group, group['lr'])
         else:
-            self._compiled_step_parameter(p, group)
+            lr_tensor = torch.tensor(group['lr'], device=p.device)
+            self._compiled_step_parameter(p, group, lr_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
@@ -391,5 +394,4 @@ class AdaMuon_adv(torch.optim.Optimizer):
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
-
         return loss

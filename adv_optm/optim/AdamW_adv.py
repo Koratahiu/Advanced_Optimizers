@@ -67,10 +67,6 @@ class AdamW_adv(torch.optim.Optimizer):
             logging of Kourkoutas-β statistics (min, max, mean of `β₂` across layers)
             every logging steps. Useful for debugging and tuning. Set to 0 to disable
             logging (default: 0).
-        layer_key_fn (Optional[Callable]): A function that takes a parameter `p`
-            and returns a unique, hashable key representing its "layer" or "bucket".
-            If `None`, parameters are bucketed by their memory ID (tensor-wise).
-            (default: None)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
     """
@@ -98,10 +94,9 @@ class AdamW_adv(torch.optim.Optimizer):
         tiny_spike: float = 1e-9,
         k_warmup_steps: int = 0,
         k_logging: int = 0,
-        layer_key_fn: Optional[Callable] = None,
         nnmf_factor: bool = False,
         # Compiled
-        compiled_optimizer: bool = True,
+        compiled_optimizer: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -133,7 +128,6 @@ class AdamW_adv(torch.optim.Optimizer):
         self.use_AdEMAMix = use_AdEMAMix
         self.factored = nnmf_factor
         self.kourkoutas_beta = kourkoutas_beta
-        self.layer_key_fn = layer_key_fn
 
         super().__init__(params, defaults)
 
@@ -142,12 +136,11 @@ class AdamW_adv(torch.optim.Optimizer):
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
 
-
         self.global_step = 0
 
         if compiled_optimizer:
             torch._dynamo.config.cache_size_limit = 8192
-            self.compile(fullgraph=True) # FIXME
+            self.compile(fullgraph=True)
 
     @property
     def supports_fused_back_pass(self):
@@ -207,7 +200,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
     @torch.no_grad()
-    def __step_parameter(self, p: torch.Tensor, group: dict, bias_correction1: float, bias_correction2: float):
+    def __step_parameter(self, p: torch.Tensor, group: dict, lr: torch.Tensor | float, bias_correction1: torch.Tensor | float, bias_correction2: torch.Tensor | float):
         if p.grad is None:
             return
 
@@ -227,7 +220,7 @@ class AdamW_adv(torch.optim.Optimizer):
             # Get the dynamic beta2 calculated in prepare_step()
             beta2 = self.kourkoutas_helper.get_beta2(p, group)
 
-        step_size = group['lr'] / bias_correction1
+        step_size = lr / bias_correction1
 
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
@@ -247,7 +240,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 # Update momentum in full-size
                 mt.mul_(beta1).add_(grad_reshaped, alpha=1.0 - beta1)
                 if self.grams_moment:
-                    mt.copy_(grad_reshaped.sign() * mt.abs())
+                    mt = (grad_reshaped.sign().mul_(mt.abs()))
                 elif self.cautious_mask:
                     mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
@@ -305,7 +298,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 exp_avg = state['exp_avg']
                 exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
                 if self.grams_moment:
-                    exp_avg = grad.sign() * exp_avg.abs()
+                    exp_avg = grad.sign().mul_(exp_avg.abs())
                 elif self.cautious_mask:
                     mask = (exp_avg * grad > 0).to(grad.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
@@ -338,9 +331,9 @@ class AdamW_adv(torch.optim.Optimizer):
         # Decoupled weight decay
         if group["weight_decay"] != 0:
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * group["lr"])
+                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * lr)
             else:
-                p.data.add_(p.data, alpha=-group["weight_decay"] * group["lr"])
+                p.data.add_(p.data, alpha=-group["weight_decay"] * lr)
 
         if p.dtype == torch.bfloat16 and self.stochastic_rounding:
             add_stochastic_(p.data, -update)
@@ -350,9 +343,13 @@ class AdamW_adv(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+#        if 'exp_avg_sq' not in self.state[p] and 'mu_v_nmf' not in self.state[p]:
+#            return
+
         if self.global_step is None and 'step' in self.state[p]:
             # For backward compatibility
             self.global_step = self.state[p]['step']
+
         if group['use_bias_correction']:
             current_step = self.global_step + 1
             beta1, beta2 = group['betas']
@@ -367,9 +364,12 @@ class AdamW_adv(torch.optim.Optimizer):
             self.kourkoutas_helper.maybe_prepare_step(self.global_step)
 
         if not group.get('compiled_optimizer', False):
-            self.__step_parameter(p, group, bias_correction1, bias_correction2)
+            self.__step_parameter(p, group, group['lr'], bias_correction1, bias_correction2)
         else:
-            self._compiled_step_parameter(p, group, bias_correction1, bias_correction2)
+            lr_tensor = torch.tensor(group['lr'], device=p.device)
+            bias_correction1_tensor = torch.tensor(bias_correction1, device=p.device)
+            bias_correction2_tensor = torch.tensor(bias_correction2, device=p.device)
+            self._compiled_step_parameter(p, group, lr_tensor, bias_correction1_tensor, bias_correction2_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
