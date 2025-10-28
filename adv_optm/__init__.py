@@ -20,4 +20,4 @@ __all__ = [
     "AdaMuon_adv",
 ]
 
-__version__ = "1.2.dev12"
+__version__ = "1.2.dev13"
