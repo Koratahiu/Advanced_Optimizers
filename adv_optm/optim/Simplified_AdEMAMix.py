@@ -197,7 +197,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
 
     @torch.no_grad()
-    def __step_parameter(self, p: torch.Tensor, group: dict, lr: torch.Tensor | float, beta1: float, num_sum: float, den_sum: float):
+    def __step_parameter(self, p: torch.Tensor, group: dict, lr: torch.Tensor | float, beta1, num_sum, den_sum):
         if p.grad is None:
             return
 
@@ -238,12 +238,12 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             update = torch.add(mt, grad_reshaped, alpha=alpha_grad)
             del grad_reshaped
 
-            denom = vt.sqrt().add_(group['eps'] * math.sqrt(den_sum))
+            denom = vt.sqrt().add_(group['eps'] * torch.sqrt(den_sum))
             update.div_(denom)
             del denom
 
             if group['use_bias_correction']:
-                update = (update / num_sum) * math.sqrt(den_sum)
+                update = (update / num_sum) * torch.sqrt(den_sum)
 
             update = update.view(p.shape).mul_(group['lr'])
 
@@ -264,12 +264,12 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
             exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
-            denom = exp_avg_sq.sqrt().add_(group['eps'] * math.sqrt(den_sum))
+            denom = exp_avg_sq.sqrt().add_(group['eps'] * torch.sqrt(den_sum))
             update.div_(denom)
             del denom
 
             if group['use_bias_correction']:
-                update = (update / num_sum) * math.sqrt(den_sum)
+                update = (update / num_sum) * torch.sqrt(den_sum)
 
             update.mul_(group['lr'])
 
@@ -286,16 +286,15 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             p.data.add_(-update)
         del update
 
-        state['step'] += 1
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
         if self.global_step is None and 'step' in self.state[p]:
             # For backward compatibility
-            o_state = self.state[p]
-            self.global_step = o_state['step']
-            self.num_sum = group["betas"][0] * o_state['num_sum'] + 1.0
-            self.den_sum = group['betas'][1] * o_state['den_sum'] + (1.0 - group['betas'][1])
+            g_state = self.state[p]
+            self.global_step = g_state['step']
+            self.num_sum = group["betas"][0] * g_state['num_sum'] + 1.0
+            self.den_sum = group['betas'][1] * g_state['den_sum'] + (1.0 - group['betas'][1])
 
         if group["beta1_warmup"] is not None:
             step = self.global_step + 1
@@ -311,7 +310,9 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             self.__step_parameter(p, group, group['lr'], beta1, self.num_sum, self.den_sum)
         else:
             lr_tensor = torch.tensor(group['lr'], device=p.device)
-            self._compiled_step_parameter(p, group, lr_tensor)
+            num_sum_tesnor = torch.tensor(self.num_sum, device=p.device)
+            den_sum_tesnor = torch.tensor(self.den_sum, device=p.device)
+            self._compiled_step_parameter(p, group, lr_tensor, beta1, num_sum_tesnor, den_sum_tesnor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
