@@ -105,7 +105,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             logging (default: 0).
         layer_key_fn (Optional[Callable]): A function that takes a parameter `p`
             and returns a unique, hashable key representing its "layer" or "bucket".
-            If `None`, parameters are bucketed by their memory ID (tensor-wise).
+            If `None`, parameters are bucketed by their shape.
             (default: None)
     """
 
@@ -484,16 +484,18 @@ class Prodigy_adv(torch.optim.Optimizer):
         if self.kourkoutas_beta:
             self.kourkoutas_helper.maybe_prepare_step(self.global_step)
 
-        if isinstance(self.d_numerator, float):
-            self.d_numerator = torch.tensor(self.d_numerator, device=p.device)
-            self.d_denom = torch.tensor(self.d_denom, device=p.device)
-
         if not group.get('compiled_optimizer', False):
+            if isinstance(self.d_numerator, float):
+                self.d_numerator = torch.tensor(self.d_numerator, device=p.device)
+                self.d_denom = torch.tensor(self.d_denom, device=p.device)
             self.__step_parameter(p, group, self.d, self.dlr)
         else:
-            d_tensor = torch.tensor(self.d, device=p.device)
-            dlr_tensor = torch.tensor(self.dlr, device=p.device)
-            self._compiled_step_parameter(p, group, d_tensor, dlr_tensor)
+            if isinstance(self.d_numerator, float):
+                self.d_numerator = torch.tensor(self.d_numerator, device=p.device)
+                self.d_denom = torch.tensor(self.d_denom, device=p.device)
+                self.d_tensor = torch.tensor(self.d, device=p.device)
+                self.dlr_tensor = torch.tensor(self.dlr, device=p.device)
+            self._compiled_step_parameter(p, group, self.d_tensor, self.dlr_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)

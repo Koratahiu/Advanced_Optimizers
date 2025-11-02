@@ -111,7 +111,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
 
         if compiled_optimizer:
             torch._dynamo.config.cache_size_limit = 8192
-            self.compile(fullgraph=False, dynamic=False) #FIXME
+            self.compile(fullgraph=True)
 
     @property
     def supports_fused_back_pass(self) -> bool:

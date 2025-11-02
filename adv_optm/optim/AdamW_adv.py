@@ -51,6 +51,10 @@ class AdamW_adv(torch.optim.Optimizer):
             momentum. (default: 5.0)
         kourkoutas_beta (bool): whether to enable the layer-wise dynamic β₂ logic.
             If `False`, the optimizer behaves as standard AdamW. (default: False)
+        layer_key_fn (Optional[Callable]): A function that takes a parameter `p`
+            and returns a unique, hashable key representing its "layer" or "bucket".
+            If `None`, parameters are bucketed by their shape.
+            (default: None)
         beta2_min (float): The minimum value for dynamic β₂, used during periods of
             high gradient variance ("sunspikes"). Must be less than `betas[1]`.
             (default: 0.88)
@@ -89,6 +93,7 @@ class AdamW_adv(torch.optim.Optimizer):
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
         kourkoutas_beta: bool = False,
+        layer_key_fn: Optional[Callable] = None,
         beta2_min: float = 0.9,
         ema_alpha: float = 0.95,
         tiny_spike: float = 1e-9,
@@ -127,6 +132,7 @@ class AdamW_adv(torch.optim.Optimizer):
         self.grams_moment = grams_moment
         self.use_AdEMAMix = use_AdEMAMix
         self.factored = nnmf_factor
+        self.layer_key_fn = layer_key_fn
         self.kourkoutas_beta = kourkoutas_beta
 
         super().__init__(params, defaults)
@@ -135,8 +141,6 @@ class AdamW_adv(torch.optim.Optimizer):
 
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
-
-        self.global_step = 0
 
         if compiled_optimizer:
             torch._dynamo.config.cache_size_limit = 8192
@@ -164,6 +168,8 @@ class AdamW_adv(torch.optim.Optimizer):
         state = self.state[p]
 
         if len(state) == 0:
+
+            state['step'] = 0
 
             state['factored'] = (
                 self.factored and
@@ -343,15 +349,13 @@ class AdamW_adv(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-#        if 'exp_avg_sq' not in self.state[p] and 'mu_v_nmf' not in self.state[p]:
-#            return
 
-        if self.global_step is None and 'step' in self.state[p]:
-            # For backward compatibility
-            self.global_step = self.state[p]['step']
+        state = self.state[p]
+
+        step = state['step']
 
         if group['use_bias_correction']:
-            current_step = self.global_step + 1
+            current_step = step + 1
             beta1, beta2 = group['betas']
             bias_correction1 = 1.0 - beta1 ** current_step
             bias_correction2 = 1.0 - beta2 ** current_step
@@ -361,15 +365,19 @@ class AdamW_adv(torch.optim.Optimizer):
 
         if group.get('kourkoutas_beta', False):
             # Prepare Kourkoutas-β once per step using the global step counter.
-            self.kourkoutas_helper.maybe_prepare_step(self.global_step)
+            self.kourkoutas_helper.maybe_prepare_step(step)
+        
+        self.state[p]['step'] += 1
 
         if not group.get('compiled_optimizer', False):
             self.__step_parameter(p, group, group['lr'], bias_correction1, bias_correction2)
         else:
-            lr_tensor = torch.tensor(group['lr'], device=p.device)
-            bias_correction1_tensor = torch.tensor(bias_correction1, device=p.device)
-            bias_correction2_tensor = torch.tensor(bias_correction2, device=p.device)
-            self._compiled_step_parameter(p, group, lr_tensor, bias_correction1_tensor, bias_correction2_tensor)
+            if not hasattr(self, 'lr_tensor') or self.lr_tensor is None:
+                # convert to tensors for compiled path once a step
+                self.lr_tensor = torch.tensor(group['lr'], device=p.device)
+                self.bc1_tensor = torch.tensor(bias_correction1, device=p.device)
+                self.bc2_tensor = torch.tensor(bias_correction2, device=p.device)
+            self._compiled_step_parameter(p, group, self.lr_tensor, self.bc1_tensor, self.bc2_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
@@ -386,6 +394,7 @@ class AdamW_adv(torch.optim.Optimizer):
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
 
-        self.global_step += 1
-
+        if self.param_groups[0].get('compiled_optimizer', False):
+            # Reset compile tensors once a step
+            self.lr_tensor = None
         return loss
