@@ -63,6 +63,9 @@ class AdaMuon_adv(torch.optim.Optimizer):
             (default: False)
         ortho_rank (int): The rank for low-rank orthogonalization.
             (default: 128)
+        accelerated_ns (bool): If True, enables Chebyshev-accelerated Newton-Schulz, which
+            dynamically calculates optimal 3rd-order polynomial coefficients. (default: False)
+        cns_a_bound (float): Initial lower bound for singular values for CANS. (default: 1e-4)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
         --- Auxiliary AdamW_adv Parameters (used for 'adam' groups) ---
@@ -96,11 +99,16 @@ class AdaMuon_adv(torch.optim.Optimizer):
         nesterov: bool = False,
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
-        vector_reshape: bool = False,
+        normuon_variant: bool = False,
         # Low-rank Muon
         low_rank_ortho: bool = False,
         ortho_rank: int = 128,
+        # Factored
+        vector_reshape: bool = False,
         nnmf_factor: bool = False,
+        # CANS
+        accelerated_ns: bool = False,
+        cns_a_bound: float = 1e-4,
         # Compiled
         compiled_optimizer: bool = False,
         # --- AdamW_adv specific parameters ---
@@ -139,9 +147,12 @@ class AdaMuon_adv(torch.optim.Optimizer):
             "vector_reshape": vector_reshape,
             "nesterov":nesterov, "use_atan2":use_atan2,
             "Simplified_AdEMAMix": Simplified_AdEMAMix, "alpha_grad": alpha_grad,
+            "normuon_variant": normuon_variant,
             # Low-rank Ortho
             "low_rank_ortho": low_rank_ortho, "ortho_rank": ortho_rank,
             "compiled_optimizer":compiled_optimizer,
+            # CANS
+            "accelerated_ns": accelerated_ns, "cns_a_bound": cns_a_bound,
             # AdamW_adv defaults
             "adam_betas": adam_betas, "adam_eps": adam_eps, "adam_weight_decay": adam_weight_decay,
             "adam_use_bias_correction": adam_use_bias_correction, "adam_use_atan2": adam_use_atan2,
@@ -156,7 +167,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
         super().__init__(params, defaults)
 
-        self.global_step = 0 # For Adam bias correction and Kourkoutas
         self.kourkoutas_helper = None
         if any(group.get('adam_kourkoutas_beta', False) for group in self.param_groups):
             self.kourkoutas_helper = KourkoutasHelper(self)
@@ -214,15 +224,24 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     state['mv_mbuf_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
                     packed_d2 = (d2 + 7) // 8
                     state['sign_buf'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
-                    state['mu_vbuf_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
-                    state['mv_vbuf_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+                    if not group['normuon_variant']:
+                        state['mu_vbuf_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
+                        state['mv_vbuf_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
             else:
-                if len(p.shape) >= 2:
+                if len(p.shape) >= 2 and not group['normuon_variant']:
                     state['second_momentum_buffer'] = torch.zeros_like(p)
                 state['momentum_buffer'] = torch.zeros_like(p)
 
+            # NorMuon state initialization
+            if group['normuon_variant']:
+                if state['factored']:
+                    state['normuon_v'] = torch.zeros(d1, device=p.device, dtype=torch.float32)
+                elif len(p.shape) >= 2:
+                    state['normuon_v'] = torch.zeros(p.shape[0], device=p.device, dtype=torch.float32)
 
         elif optim_type == 'adam':
+
+            state['step'] = 0
 
             state['factored'] = (
                 group['adam_nnmf_factor'] and
@@ -301,12 +320,12 @@ class AdaMuon_adv(torch.optim.Optimizer):
                         Q, _ = torch.linalg.qr(MG)
                     projected_M = Q.T @ M
                     ortho_projected_M = _newton_schulz_iteration(
-                        projected_M, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs']
+                        projected_M, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs'], cns=group['accelerated_ns'], cns_a_bound=group['cns_a_bound']
                     )
                     update = Q @ ortho_projected_M
                 else: # Fallback for invalid rank
                     update = _newton_schulz_iteration(
-                        signed_m_buf, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs']
+                        signed_m_buf, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs'], cns=group['accelerated_ns'], cns_a_bound=group['cns_a_bound']
                     )
             else:
                 # Original full Newton-Schulz
@@ -315,41 +334,61 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     steps=group['ns_steps'],
                     eps=group['ns_eps'],
                     coeffs=group['ns_coeffs'],
+                    cns=group['accelerated_ns'],
+                    cns_a_bound=group['cns_a_bound'],
                 )
             del signed_m_buf
 
-            # Reconstruct second momentum from previous step's factors
-            vt_buf = _unnmf((state['mu_vbuf_nmf'], state['mv_vbuf_nmf']))
-
-            # Update second momentum in full-size
-            vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
-
-            # Apply second momentum update (adaptive scaling)
-            if group['use_atan2']:
-                a = 1.2732395
-                denom = vt_buf.sqrt()
-                update.atan2_(denom).mul_(a)
+            if group['normuon_variant']:
+                v_t = state['normuon_v']
+                # Update 2nd moment estimate
+                mean_squared_update = torch.mean(update.square(), dim=1)
+                v_t.mul_(beta2).add_(mean_squared_update, alpha=1 - beta2)
+                # Normalize update
+                if group['use_atan2']:
+                    a = 1.2732395
+                    update.atan2_(v_t.sqrt().unsqueeze(1)).mul_(a)
+                else:
+                    update.div_(v_t.sqrt().unsqueeze(1).add_(group['eps']))
+                # Scale learning rate
+                update_norm = torch.linalg.vector_norm(update)
+                scaled_lr = group['rms_target'] * lr * (p.numel()**0.5) / update_norm.add_(group['eps'])
+                update = update.view(p.shape).mul_(scaled_lr)
+                del mean_squared_update, update_norm, scaled_lr
             else:
-                denom = vt_buf.sqrt().add_(group['eps'])
-                update.div_(denom)
-            del denom
+                # Reconstruct second momentum from previous step's factors
+                vt_buf = _unnmf((state['mu_vbuf_nmf'], state['mv_vbuf_nmf']))
 
-            # RMS-aligned rescaling
-            rms_target = group['rms_target']
-            num_elements = update.numel()
-            # Add eps to prevent division by zero
-            update.mul_(rms_target * (num_elements ** 0.5) / (update.norm() + group['eps']))
+                # Update second momentum in full-size
+                vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
 
-            update = update.view(p.shape).mul_(lr)
-            del num_elements
+                # Apply second momentum update (adaptive scaling)
+                if group['use_atan2']:
+                    a = 1.2732395
+                    denom = vt_buf.sqrt()
+                    update.atan2_(denom).mul_(a)
+                else:
+                    denom = vt_buf.sqrt().add_(group['eps'])
+                    update.div_(denom)
+                del denom
+
+                # RMS-aligned rescaling
+                rms_target = group['rms_target']
+                num_elements = update.numel()
+                # Add eps to prevent division by zero
+                update.mul_(rms_target * (num_elements ** 0.5) / (update.norm().add_(group['eps'])))
+
+                update = update.view(p.shape).mul_(lr)
+                del num_elements
 
             # Compress updated moments and store new factors
             state['sign_buf'] = _pack_bools(mt_buf > 0)
             _nnmf(mt_buf.abs(), out=(state['mu_mbuf_nmf'], state['mv_mbuf_nmf']))
             del mt_buf
 
-            _nnmf(vt_buf.abs(), out=(state['mu_vbuf_nmf'], state['mv_vbuf_nmf']))
-            del vt_buf
+            if not group['normuon_variant']:
+                _nnmf(vt_buf.abs(), out=(state['mu_vbuf_nmf'], state['mv_vbuf_nmf']))
+                del vt_buf
 
         else: # Standard AdaMuon logic for non-factored tensors
 
@@ -387,12 +426,12 @@ class AdaMuon_adv(torch.optim.Optimizer):
                             Q, _ = torch.linalg.qr(MG)
                         projected_M = Q.T @ M
                         ortho_projected_M = _newton_schulz_iteration(
-                            projected_M, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs']
+                            projected_M, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs'], cns=group['accelerated_ns'], cns_a_bound=group['cns_a_bound']
                         )
                         update = Q @ ortho_projected_M
                     else: # Fallback for invalid rank
                         update = _newton_schulz_iteration(
-                            signed_m_buf, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs']
+                            signed_m_buf, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs'], cns=group['accelerated_ns'], cns_a_bound=group['cns_a_bound']
                         )
                 else:
                     # Original full Newton-Schulz
@@ -401,42 +440,59 @@ class AdaMuon_adv(torch.optim.Optimizer):
                         steps=group['ns_steps'],
                         eps=group['ns_eps'],
                         coeffs=group['ns_coeffs'],
+                        cns=group['accelerated_ns'],
+                        cns_a_bound=group['cns_a_bound'],
                     )
                 del signed_m_buf
 
                 update = update.view(original_shape)
 
-                vt_buf = state['second_momentum_buffer']
-                vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
-
-                # Apply second momentum update (adaptive scaling)
-                if group['use_atan2']:
-                    a = 1.2732395
-                    denom = vt_buf.sqrt()
-                    update.atan2_(denom).mul_(a)
+                if group['normuon_variant']:
+                    # NorMuon Logic
+                    v_t = state['normuon_v']
+                    # Update 2nd moment estimate
+                    mean_squared_update = torch.mean(update.square(), dim=1)
+                    v_t.mul_(beta2).add_(mean_squared_update, alpha=1 - beta2)
+                    # Normalize update
+                    if group['use_atan2']:
+                        a = 1.2732395
+                        update.atan2_(v_t.sqrt().unsqueeze(1)).mul_(a)
+                    else:
+                        update.div_(v_t.sqrt().unsqueeze(1).add_(group['eps']))
+                    # Scale learning rate
+                    update_norm = torch.linalg.vector_norm(update)
+                    scaled_lr = group['rms_target'] * lr * (p.numel()**0.5) / update_norm.add_(group['eps'])
+                    update.mul_(scaled_lr)
+                    del mean_squared_update, update_norm, scaled_lr
                 else:
-                    denom = vt_buf.sqrt().add_(group['eps'])
-                    update.div_(denom)
-                del denom
-
-                # RMS-aligned rescaling
-                rms_target = group['rms_target']
-                num_elements = update.numel()
-                # Add eps to prevent division by zero
-                update.mul_(rms_target * (num_elements ** 0.5) / (update.norm() + group['eps']))
-
-                del num_elements
-
-                update.mul_(lr)
+                    # Original AdaMuon Logic
+                    vt_buf = state['second_momentum_buffer']
+                    vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
+                    # Apply second momentum update (adaptive scaling)
+                    if group['use_atan2']:
+                        a = 1.2732395
+                        denom = vt_buf.sqrt()
+                        update.atan2_(denom).mul_(a)
+                    else:
+                        denom = vt_buf.sqrt().add_(group['eps'])
+                        update.div_(denom)
+                    del denom
+                    # RMS-aligned rescaling
+                    rms_target = group['rms_target']
+                    num_elements = update.numel()
+                    # Add eps to prevent division by zero
+                    update.mul_(rms_target * (num_elements ** 0.5) / (update.norm().add_(group['eps'])))
+                    del num_elements
+                    update.mul_(lr)
 
             else: # Fallback to standard SGD with momentum for 1D params (biases, etc.)
                 # Momentum update
                 mt_buf = state['momentum_buffer']
                 mt_buf.mul_(beta1).add_(grad)
                 if nesterov:
-                    # Nesterov momentum
                     update = grad.add(mt_buf, alpha=beta1)
-#                 elif Simplified_AdEMAMix: # TODO, it will break SGD since it requires x100 lower LR
+                # FIXME, Simplified_AdEMAMix will break SGD since it requires x100 lower LR
+#                 elif Simplified_AdEMAMix:
 #                     update = mt_buf.add(grad, alpha=alpha_grad)
                 else:
                     update = mt_buf.clone()
@@ -599,7 +655,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
         state = self.state[p]
 
 
-
         # Determine if using Adam or Muon based on state keys
         # We can use optm_type but I see this as a safer way.
         if 'momentum_buffer' in state or 'mu_mbuf_nmf' in state:
@@ -611,32 +666,41 @@ class AdaMuon_adv(torch.optim.Optimizer):
         is_compiled = group.get('compiled_optimizer', False)
 
         if use_adam:
+            step = state['step']
+
             if self.kourkoutas_helper:
                 # Prepare Kourkoutas-β once per optimizer step.
-                self.kourkoutas_helper.maybe_prepare_step(self.global_step)
+                self.kourkoutas_helper.maybe_prepare_step(step)
+
             # Adam-specific setup (bias correction)
             if group['adam_use_bias_correction']:
-                current_step = self.global_step + 1
+                current_step = step + 1
                 beta1_adam, beta2_adam = group['adam_betas']
                 bias_correction1 = 1.0 - beta1_adam ** current_step
                 bias_correction2 = 1.0 - beta2_adam ** current_step
             else:
                 bias_correction1 = 1.0
                 bias_correction2 = 1.0
+
+            self.state[p]['step'] += 1
+
             # Dispatch to compiled or uncompiled Adam step
             if is_compiled and self._compiled_adam_step is not None:
-                # Tensors must be used for compiled functions
-                lr_tensor = torch.tensor(lr, device=p.device)
-                bc1_tensor = torch.tensor(bias_correction1, device=p.device)
-                bc2_tensor = torch.tensor(bias_correction2, device=p.device)
-                self._compiled_adam_step(p, grad, state, group, lr_tensor, bc1_tensor, bc2_tensor)
+                # convert to tensors for compiled path once a step
+                if not hasattr(self, 'lr_adam_tensor') or self.lr_adam_tensor is None:
+                    self.lr_adam_tensor = torch.tensor(group['lr'])
+                    self.bc1 = torch.tensor(bias_correction1)
+                    self.bc2 = torch.tensor(bias_correction2)
+                self._compiled_adam_step(p, grad, state, group, self.lr_adam_tensor, self.bc1, self.bc2)
             else:
                 self._adam_step_parameter(p, grad, state, group, lr, bias_correction1, bias_correction2)
         else: # Muon path
             # Dispatch to compiled or uncompiled Muon step
             if is_compiled and self._compiled_muon_step is not None:
-                lr_tensor = torch.tensor(lr, device=p.device)
-                self._compiled_muon_step(p, grad, state, group, lr_tensor)
+                # convert to tensors for compiled path once a step
+                if not hasattr(self, 'lr_tensor') or self.lr_tensor is None:
+                    self.lr_tensor = torch.tensor(group['lr'])
+                self._compiled_muon_step(p, grad, state, group, self.lr_tensor)
             else:
                 self._muon_step_parameter(p, grad, state, group, lr)
 
@@ -659,6 +723,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
 
-        self.global_step += 1
-
+        if self.param_groups[0].get('compiled_optimizer', False):
+            # Reset compile tensors once a step
+            self.lr_tensor = None
+            self.lr_adam_tensor = None
         return loss
