@@ -76,6 +76,7 @@ class Muon_adv(torch.optim.Optimizer):
         adam_beta3_ema (float): Beta3 for AdEMAMix.
         adam_alpha (float): Alpha for AdEMAMix.
         adam_kourkoutas_beta (bool): Kourkoutas-β for AdamW.
+        adam_nnmf_factor (bool): 1-bit factored for AdamW.
     """
 
     def __init__(
@@ -125,6 +126,7 @@ class Muon_adv(torch.optim.Optimizer):
         adam_ema_alpha: float = 0.95,
         adam_tiny_spike: float = 1e-9,
         adam_k_warmup_steps: int = 0,
+        adam_nnmf_factor: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -165,6 +167,7 @@ class Muon_adv(torch.optim.Optimizer):
             "adam_kourkoutas_beta": adam_kourkoutas_beta, "adam_beta2_min": adam_beta2_min,
             "adam_ema_alpha": adam_ema_alpha, "adam_tiny_spike": adam_tiny_spike,
             "adam_k_warmup_steps": adam_k_warmup_steps,
+            "adam_nnmf_factor":adam_nnmf_factor,
         }
         self.stochastic_rounding = stochastic_rounding
         self.compiled_optimizer = compiled_optimizer
