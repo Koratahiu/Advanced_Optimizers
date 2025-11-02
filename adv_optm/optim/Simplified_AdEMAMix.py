@@ -69,7 +69,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             logging (default: 0).
         layer_key_fn (Optional[Callable]): A function that takes a parameter `p`
             and returns a unique, hashable key representing its "layer" or "bucket".
-            If `None`, parameters are bucketed by their memory ID (tensor-wise).
+            If `None`, parameters are bucketed by their shape.
             (default: None)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)

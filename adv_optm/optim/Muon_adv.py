@@ -60,6 +60,9 @@ class Muon_adv(torch.optim.Optimizer):
         normuon_lr_scale (float): Scaling factor for the NorMuon learning rate.
             (default: 0.2)
         normuon_atan2 (bool): whether to use the atan2 for NorMuon. (default: False)
+        accelerated_ns (bool): If True, enables Chebyshev-accelerated Newton-Schulz, which
+            dynamically calculates optimal 3rd-order polynomial coefficients. (default: False)
+        cns_a_bound (float): Initial lower bound for singular values for CANS. (default: 1e-4)
         --- Auxiliary AdamW_adv Parameters (used for 'adam' groups) ---
         adam_betas (tuple[float, float]): Betas for the AdamW optimizer part.
         adam_eps (float): Epsilon for the AdamW optimizer part.
@@ -100,6 +103,9 @@ class Muon_adv(torch.optim.Optimizer):
         normuon_eps: float = 1e-8,
         normuon_lr_scale: float = 0.2,
         normuon_atan2: bool = False,
+        # CANS
+        accelerated_ns: bool = False,
+        cns_a_bound: float = 1e-4,
         # Compiled
         compiled_optimizer: bool = False,
         # --- AdamW_adv specific parameters ---
@@ -148,6 +154,8 @@ class Muon_adv(torch.optim.Optimizer):
             "normuon_variant": normuon_variant, "beta2_normuon": beta2_normuon,
             "normuon_eps": normuon_eps, "normuon_lr_scale": normuon_lr_scale,
             "normuon_atan2": normuon_atan2,
+            # CANS
+            "accelerated_ns": accelerated_ns, "cns_a_bound": cns_a_bound,
             # AdamW_adv defaults
             "adam_betas": adam_betas, "adam_eps": adam_eps, "adam_weight_decay": adam_weight_decay,
             "adam_use_bias_correction": adam_use_bias_correction, "adam_use_atan2": adam_use_atan2,
@@ -163,7 +171,6 @@ class Muon_adv(torch.optim.Optimizer):
 
         super().__init__(params, defaults)
 
-        self.global_step = 0 # For Adam bias correction and Kourkoutas
         self.kourkoutas_helper = None
         if any(group.get('adam_kourkoutas_beta', False) for group in self.param_groups):
             self.kourkoutas_helper = KourkoutasHelper(self)
@@ -214,6 +221,7 @@ class Muon_adv(torch.optim.Optimizer):
 
         if optim_type == 'muon':
 
+
             state['factored'] = (
                 group['nnmf_factor'] and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
@@ -238,8 +246,11 @@ class Muon_adv(torch.optim.Optimizer):
                 elif len(p.shape) >= 2:
                     state['normuon_v'] = torch.zeros(p.shape[0], device=p.device, dtype=torch.float32)
 
+            group['adam_kourkoutas_beta'] = False
 
         elif optim_type == 'adam':
+
+            state['step'] = 0
 
             state['factored'] = (
                 group['adam_nnmf_factor'] and
@@ -319,12 +330,12 @@ class Muon_adv(torch.optim.Optimizer):
                         Q, _ = torch.linalg.qr(MG)
                     projected_M = Q.T @ M
                     ortho_projected_M = _newton_schulz_iteration(
-                        projected_M, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs']
+                        projected_M, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs'], cns=group['accelerated_ns'], cns_a_bound=group['cns_a_bound']
                     )
                     update = Q @ ortho_projected_M
                 else: # Fallback for invalid rank
                     update = _newton_schulz_iteration(
-                        update, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs']
+                        update, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs'], cns=group['accelerated_ns'], cns_a_bound=group['cns_a_bound']
                     )
             else:
                 # Original full Newton-Schulz
@@ -333,10 +344,12 @@ class Muon_adv(torch.optim.Optimizer):
                     steps=group['ns_steps'],
                     eps=group['ns_eps'],
                     coeffs=group['ns_coeffs'],
+                    cns=group['accelerated_ns'],
+                    cns_a_bound=group['cns_a_bound'],
                 )
 
 
-            if group['normuon_variant'] and 'normuon_v' in state:
+            if group['normuon_variant']:
                 v_t = state['normuon_v']
                 beta2_normuon = group['beta2_normuon']
                 # Update 2nd moment estimate
@@ -414,6 +427,8 @@ class Muon_adv(torch.optim.Optimizer):
                             steps=group['ns_steps'],
                             eps=group['ns_eps'],
                             coeffs=group['ns_coeffs'],
+                            cns=group['accelerated_ns'],
+                            cns_a_bound=group['cns_a_bound'],
                         )
 
                         # 5. Project back to the original space
@@ -424,6 +439,8 @@ class Muon_adv(torch.optim.Optimizer):
                             steps=group['ns_steps'],
                             eps=group['ns_eps'],
                             coeffs=group['ns_coeffs'],
+                            cns=group['accelerated_ns'],
+                            cns_a_bound=group['cns_a_bound'],
                         )
                 else:
                     # Original NewtonSchulz
@@ -432,10 +449,12 @@ class Muon_adv(torch.optim.Optimizer):
                         steps=group['ns_steps'],
                         eps=group['ns_eps'],
                         coeffs=group['ns_coeffs'],
+                        cns=group['accelerated_ns'],
+                        cns_a_bound=group['cns_a_bound'],
                     )
 
                 # NorMuon Logic
-                if group['normuon_variant'] and 'normuon_v' in state:
+                if group['normuon_variant']:
                     v_t = state['normuon_v']
                     beta2_normuon = group['beta2_normuon']
                     # Update 2nd moment estimate
@@ -629,10 +648,6 @@ class Muon_adv(torch.optim.Optimizer):
 
         state = self.state[p]
 
-        if self.kourkoutas_helper:
-            # Prepare Kourkoutas-β once per optimizer step.
-            self.kourkoutas_helper.maybe_prepare_step(self.global_step)
-
         # Determine if using Adam or Muon based on state keys
         # We can use optm_type but I see this as a safer way.
         if 'momentum_buffer' in state or 'mu_mbuf_nmf' in state:
@@ -644,15 +659,23 @@ class Muon_adv(torch.optim.Optimizer):
         is_compiled = group.get('compiled_optimizer', False)
 
         if use_adam:
+            step = state['step']
+
+            if self.kourkoutas_helper:
+                # Prepare Kourkoutas-β once per optimizer step.
+                self.kourkoutas_helper.maybe_prepare_step(step)
+
             # Adam-specific setup (bias correction)
             if group['adam_use_bias_correction']:
-                current_step = self.global_step + 1
+                current_step = step + 1
                 beta1_adam, beta2_adam = group['adam_betas']
                 bias_correction1 = 1.0 - beta1_adam ** current_step
                 bias_correction2 = 1.0 - beta2_adam ** current_step
             else:
                 bias_correction1 = 1.0
                 bias_correction2 = 1.0
+
+            self.state[p]['step'] += 1
 
             # Dispatch to compiled or uncompiled Adam step
             if is_compiled and self._compiled_adam_step is not None:
@@ -689,7 +712,5 @@ class Muon_adv(torch.optim.Optimizer):
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
-
-        self.global_step += 1
 
         return loss

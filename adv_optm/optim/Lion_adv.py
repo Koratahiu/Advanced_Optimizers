@@ -42,6 +42,8 @@ class Lion_adv(torch.optim.Optimizer):
         orthogonal_gradient: bool = False,
         cautious_mask: bool = False,
         nnmf_factor: bool = True,
+        # Compiled
+        compiled_optimizer: bool = False,
     ):
         if not lr > 0.0:
             raise ValueError(f"Learning rate must be > 0.0, but got {lr}")
@@ -56,11 +58,19 @@ class Lion_adv(torch.optim.Optimizer):
             weight_decay=weight_decay,
             vector_reshape=vector_reshape,
             orthogonal_gradient=orthogonal_gradient,
+            compiled_optimizer=compiled_optimizer,
         )
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
         self.factored = nnmf_factor
         super().__init__(params, defaults)
+
+        self.init_step()
+
+        if compiled_optimizer:
+            torch._dynamo.config.cache_size_limit = 8192
+            self.compile(fullgraph=True)
+
 
     @property
     def supports_fused_back_pass(self) -> bool:
@@ -118,7 +128,6 @@ class Lion_adv(torch.optim.Optimizer):
 
 
         beta1, beta2 = group["betas"]
-        lr = group["lr"]
 
         if state['factored']:
             # Factored Path
@@ -188,6 +197,18 @@ class Lion_adv(torch.optim.Optimizer):
             p.data.add_(-update)
 
         del update
+
+    @torch.no_grad()
+    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+
+        if not group.get('compiled_optimizer', False):
+            self.__step_parameter(p, group, group["lr"])
+        else:
+            lr_tensor = torch.tensor(group["lr"], device=p.device)
+            self._compiled_step_parameter(p, group, lr_tensor)
+
+    def compile(self, *args, **kwargs):
+        self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def step(self, closure: Optional[callable] = None):
