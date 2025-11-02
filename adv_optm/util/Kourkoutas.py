@@ -154,4 +154,5 @@ class KourkoutasHelper:
         """
         layer_key = self.optimizer.layer_key_fn(p)
         # The default is the max value, which is correct for unmapped params or edge cases
-        return self.layer_state.get(layer_key, {}).get('dynamic_beta2', group['betas'][1])
+        beta2_default = group.get('betas', group.get('adam_betas'))[1] if group.get('betas', group.get('adam_betas')) else 0.999
+        return self.layer_state.get(layer_key, {}).get('dynamic_beta2', beta2_default)
