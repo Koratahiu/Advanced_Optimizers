@@ -307,7 +307,7 @@ class Adopt_adv(torch.optim.Optimizer):
                 else:
                     mt.mul_(beta1).add_(normalized_grad, alpha=1.0 - beta1)
                 if self.grams_moment:
-                    mt = grad_reshaped.sign() * mt.abs()
+                    mt = grad_reshaped.sign().mul_(mt.abs())
                 elif self.cautious_mask:
                     mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
@@ -376,7 +376,7 @@ class Adopt_adv(torch.optim.Optimizer):
                     m.mul_(beta1).add_(normalized_grad, alpha=1.0 - beta1)
 
             if self.grams_moment:
-                m = grad.sign() * m.abs()
+                m = grad.sign().mul_(m.abs())
             elif self.cautious_mask:
                 mask = (m * grad > 0).to(grad.dtype)
                 mask.div_(mask.mean().clamp_(min=1e-3))

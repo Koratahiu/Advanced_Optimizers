@@ -343,7 +343,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 else:
                     mt.mul_(self.beta1).add_(grad_reshaped, alpha=self.d * (1.0 - self.beta1))
                 if self.grams_moment:
-                    mt.copy_(grad_reshaped.sign() * mt.abs())
+                    mt = (grad_reshaped.sign().mul_(mt.abs()))
                 elif self.cautious_mask:
                     mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
