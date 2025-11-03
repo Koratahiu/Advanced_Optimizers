@@ -170,8 +170,6 @@ class Adopt_adv(torch.optim.Optimizer):
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
 
-        self.global_step = 0
-
         if compiled_optimizer:
             torch._dynamo.config.cache_size_limit = 8192
             self.compile(fullgraph=True)
@@ -193,6 +191,8 @@ class Adopt_adv(torch.optim.Optimizer):
         state = self.state[p]
 
         if len(state) == 0:
+
+            state['step'] = 0
 
             state['factored'] = (
                 self.factored and
@@ -313,7 +313,7 @@ class Adopt_adv(torch.optim.Optimizer):
             else:
                 normalized_grad = grad_reshaped / denom.add_(group['eps'])
                 if self.clip_lambda is not None:
-                    clip_val = self.clip_lambda(self.global_step)
+                    clip_val = self.clip_lambda(state['step'] - 1)
                     normalized_grad.clamp_(-clip_val, clip_val)
             del denom
 
@@ -380,7 +380,7 @@ class Adopt_adv(torch.optim.Optimizer):
             else:
                 normalized_grad = grad / denom.add_(group['eps'])
                 if self.clip_lambda is not None:
-                    clip_val = self.clip_lambda(self.global_step)
+                    clip_val = self.clip_lambda(state['step'] - 1)
                     normalized_grad.clamp_(-clip_val, clip_val)
             del denom
 
@@ -435,27 +435,31 @@ class Adopt_adv(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-        if self.global_step is None and 'step' in self.state[p]:
-            # For backward compatibility
-            self.global_step = self.state[p]['step']
+        state = self.state[p]
+
+        step = state['step']
         
-        if self.global_step == 0:
+        if step == 0:
             self.__init_step(p, group)
 
         # The first step is for initialization only (skip when use_atan2 as it's scale invariant).
-        if self.global_step == 0 and not self.use_atan2:
-            self.global_step += 1
+        if step == 0 and not self.use_atan2:
+            state['step'] += 1
             return
 
         if group.get('kourkoutas_beta', False):
             # Prepare Kourkoutas-β once per step using the global step counter.
-            self.kourkoutas_helper.maybe_prepare_step(self.global_step)
+            self.kourkoutas_helper.maybe_prepare_step(step)
+
+        self.state[p]['step'] += 1
 
         if not group.get('compiled_optimizer', False):
             self.__step_parameter(p, group, group['lr'])
         else:
-            lr_tensor = torch.tensor(group['lr'], device=p.device)
-            self._compiled_step_parameter(p, group, lr_tensor)
+            if not hasattr(self, 'lr_tensor') or self.lr_tensor is None:
+                # convert to tensors for compiled path once a step
+                self.lr_tensor = torch.tensor(group['lr'], device=p.device)
+            self._compiled_step_parameter(p, group, self.lr_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
@@ -473,6 +477,7 @@ class Adopt_adv(torch.optim.Optimizer):
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
 
-        self.global_step += 1
-
+        if self.param_groups[0].get('compiled_optimizer', False):
+            # Reset compile tensors once a step
+            self.lr_tensor = None
         return loss

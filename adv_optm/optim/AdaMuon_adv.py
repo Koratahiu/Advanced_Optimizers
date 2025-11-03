@@ -46,6 +46,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             (default: (3.4445, -4.7750, 2.0315)).
         stochastic_rounding (bool): whether to use stochastic rounding for
             BF16 parameter updates (default: True).
+        orthogonal_gradient (bool): whether to use OrthoGrad.  (default: False)
         nesterov (bool): enables Nesterov momentum (default: False).
         use_atan2 (bool): whether to use the atan2 update rule. (default: False)
         Simplified_AdEMAMix (bool): whether to use the Simplified AdEMAMix update rule.
@@ -95,6 +96,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         ns_eps: float = 1e-7,
         ns_coeffs: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
         stochastic_rounding: bool = False,
+        orthogonal_gradient: bool = False,
         use_atan2: bool = False,
         nesterov: bool = False,
         Simplified_AdEMAMix: bool = False,
@@ -147,7 +149,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             "vector_reshape": vector_reshape,
             "nesterov":nesterov, "use_atan2":use_atan2,
             "Simplified_AdEMAMix": Simplified_AdEMAMix, "alpha_grad": alpha_grad,
-            "normuon_variant": normuon_variant,
+            "normuon_variant": normuon_variant, "orthogonal_gradient": orthogonal_gradient,
             # Low-rank Ortho
             "low_rank_ortho": low_rank_ortho, "ortho_rank": ortho_rank,
             "compiled_optimizer":compiled_optimizer,
@@ -282,6 +284,10 @@ class AdaMuon_adv(torch.optim.Optimizer):
         nesterov = group['nesterov']
         Simplified_AdEMAMix = group['Simplified_AdEMAMix']
         alpha_grad = group['alpha_grad']
+        if grad.dtype != torch.float32 and state.get('factored', False):
+            grad = grad.float()
+        if group.get("orthogonal_gradient"):
+            grad = _orthogonalize_gradient(p, grad)
 
         if state['factored']: # Factored AdaMuon
 
