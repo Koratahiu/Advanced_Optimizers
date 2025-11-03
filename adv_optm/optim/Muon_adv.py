@@ -41,6 +41,7 @@ class Muon_adv(torch.optim.Optimizer):
             stability. (default: 100.0)
         stochastic_rounding (bool): whether to use stochastic rounding for
             BF16 parameter updates (default: True).
+        orthogonal_gradient (bool): whether to use OrthoGrad.  (default: False)
         vector_reshape_muon (bool): whether to reshape 1D vectors into 2D
             matrices for muon NewtonSchulz (default: False).
         vector_reshape (bool): whether to reshape 1D vectors into 2D
@@ -92,6 +93,7 @@ class Muon_adv(torch.optim.Optimizer):
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
         stochastic_rounding: bool = True,
+        orthogonal_gradient: bool = False,
         vector_reshape_muon: bool = False,
         vector_reshape: bool = False,
         nnmf_factor: bool = False,
@@ -149,6 +151,7 @@ class Muon_adv(torch.optim.Optimizer):
             "vector_reshape": vector_reshape,
             "vector_reshape_muon": vector_reshape_muon,
             "Simplified_AdEMAMix": Simplified_AdEMAMix, "alpha_grad": alpha_grad,
+            "orthogonal_gradient": orthogonal_gradient,
             'compiled_optimizer': compiled_optimizer,
             # Low-rank Ortho
             "low_rank_ortho": low_rank_ortho, "ortho_rank": ortho_rank,
@@ -293,6 +296,10 @@ class Muon_adv(torch.optim.Optimizer):
         nesterov = group['nesterov']
         Simplified_AdEMAMix = group['Simplified_AdEMAMix']
         alpha_grad = group['alpha_grad']
+        if grad.dtype != torch.float32 and state.get('factored', False):
+            grad = grad.float()
+        if group.get("orthogonal_gradient"):
+            grad = _orthogonalize_gradient(p, grad)
 
         if state['factored']: # Factored Muon
 
