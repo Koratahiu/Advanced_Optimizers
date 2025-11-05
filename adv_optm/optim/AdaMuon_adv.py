@@ -351,11 +351,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 mean_squared_update = torch.mean(update.square(), dim=1)
                 v_t.mul_(beta2).add_(mean_squared_update, alpha=1 - beta2)
                 # Normalize update
-                if group['use_atan2']:
-                    a = 1.2732395
-                    update.atan2_(v_t.sqrt().unsqueeze(1)).mul_(a)
-                else:
-                    update.div_(v_t.sqrt().unsqueeze(1).add_(group['eps']))
+                update.div_(v_t.sqrt().unsqueeze(1).add_(group['eps']))
                 # Scale learning rate
                 update_norm = torch.linalg.vector_norm(update)
                 scaled_lr = group['rms_target'] * lr * (p.numel()**0.5) / update_norm.add_(group['eps'])
@@ -460,11 +456,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     mean_squared_update = torch.mean(update.square(), dim=1)
                     v_t.mul_(beta2).add_(mean_squared_update, alpha=1 - beta2)
                     # Normalize update
-                    if group['use_atan2']:
-                        a = 1.2732395
-                        update.atan2_(v_t.sqrt().unsqueeze(1)).mul_(a)
-                    else:
-                        update.div_(v_t.sqrt().unsqueeze(1).add_(group['eps']))
+                    update.div_(v_t.sqrt().unsqueeze(1).add_(group['eps']))
                     # Scale learning rate
                     update_norm = torch.linalg.vector_norm(update)
                     scaled_lr = group['rms_target'] * lr * (p.numel()**0.5) / update_norm.add_(group['eps'])

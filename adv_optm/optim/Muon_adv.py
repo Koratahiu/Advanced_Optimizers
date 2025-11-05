@@ -60,7 +60,6 @@ class Muon_adv(torch.optim.Optimizer):
         normuon_eps (float): Epsilon for NorMuon normalization stability. (default: 1e-8)
         normuon_lr_scale (float): Scaling factor for the NorMuon learning rate.
             (default: 0.2)
-        normuon_atan2 (bool): whether to use the atan2 for NorMuon. (default: False)
         accelerated_ns (bool): If True, enables Chebyshev-accelerated Newton-Schulz, which
             dynamically calculates optimal 3rd-order polynomial coefficients. (default: False)
         cns_a_bound (float): Initial lower bound for singular values for CANS. (default: 1e-4)
@@ -105,7 +104,6 @@ class Muon_adv(torch.optim.Optimizer):
         beta2_normuon: float = 0.95,
         normuon_eps: float = 1e-8,
         normuon_lr_scale: float = 0.2,
-        normuon_atan2: bool = False,
         # CANS
         accelerated_ns: bool = False,
         cns_a_bound: float = 1e-4,
@@ -158,7 +156,6 @@ class Muon_adv(torch.optim.Optimizer):
             # NorMuon
             "normuon_variant": normuon_variant, "beta2_normuon": beta2_normuon,
             "normuon_eps": normuon_eps, "normuon_lr_scale": normuon_lr_scale,
-            "normuon_atan2": normuon_atan2,
             # CANS
             "accelerated_ns": accelerated_ns, "cns_a_bound": cns_a_bound,
             # AdamW_adv defaults
@@ -366,11 +363,7 @@ class Muon_adv(torch.optim.Optimizer):
                 mean_squared_update = torch.mean(update.square(), dim=1)
                 v_t.mul_(beta2_normuon).add_(mean_squared_update, alpha=1 - beta2_normuon)
                 # Normalize update
-                if group['normuon_atan2']:
-                    a = 1.2732395
-                    update.atan2_(v_t.sqrt().unsqueeze(1)).mul_(a)
-                else:
-                    update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
+                update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
                 # Scale learning rate
                 update_norm = torch.linalg.vector_norm(update)
 
@@ -471,11 +464,7 @@ class Muon_adv(torch.optim.Optimizer):
                     mean_squared_update = torch.mean(update.square(), dim=1)
                     v_t.mul_(beta2_normuon).add_(mean_squared_update, alpha=1 - beta2_normuon)
                     # Normalize update
-                    if group['normuon_atan2']:
-                        a = 1.2732395
-                        update.atan2_(v_t.sqrt().unsqueeze(1)).mul_(a)
-                    else:
-                        update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
+                    update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
                     # Scale learning rate
                     update_norm = torch.linalg.vector_norm(update)
                     scaled_lr = group['normuon_lr_scale'] * lr * (p.numel()**0.5) / update_norm.add_(group['normuon_eps'])
