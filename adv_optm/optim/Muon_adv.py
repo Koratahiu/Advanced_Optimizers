@@ -45,8 +45,6 @@ class Muon_adv(torch.optim.Optimizer):
         stochastic_rounding (bool): whether to use stochastic rounding for
             BF16 parameter updates (default: True).
         orthogonal_gradient (bool): whether to use OrthoGrad.  (default: False)
-        vector_reshape_muon (bool): whether to reshape 1D vectors into 2D
-            matrices for muon NewtonSchulz (default: False).
         vector_reshape (bool): whether to reshape 1D vectors into 2D
             matrices to apply low-rank compression (default: True).
         nnmf_factor (bool): whether to use the factorization or disable it to use
@@ -61,8 +59,9 @@ class Muon_adv(torch.optim.Optimizer):
         beta2_normuon (float): The exponential decay rate for the second moment estimates
             used in NorMuon. (default: 0.95)
         normuon_eps (float): Epsilon for NorMuon normalization stability. (default: 1e-8)
-        normuon_lr_scale (float): Scaling factor for the NorMuon learning rate.
-            (default: 0.2)
+        rms_rescaling (bool): Use Root-Mean-Square for the final update
+            vector, used for RMS-aligned rescaling. Allows for the reuse of existing Adam
+            learning rate schedules. (default: True).
         accelerated_ns (bool): If True, enables Chebyshev-accelerated Newton-Schulz, which
             dynamically calculates optimal 3rd-order polynomial coefficients. (default: False)
         cns_a_bound (float): Initial lower bound for singular values for CANS. (default: 1e-4)
@@ -97,7 +96,7 @@ class Muon_adv(torch.optim.Optimizer):
         alpha_grad: float = 100.0,
         stochastic_rounding: bool = True,
         orthogonal_gradient: bool = False,
-        vector_reshape_muon: bool = False,
+        rms_rescaling: bool = True,
         vector_reshape: bool = False,
         nnmf_factor: bool = False,
         # Low-rank Muon
@@ -107,7 +106,6 @@ class Muon_adv(torch.optim.Optimizer):
         normuon_variant: bool = False,
         beta2_normuon: float = 0.95,
         normuon_eps: float = 1e-8,
-        normuon_lr_scale: float = 0.2,
         # CANS
         accelerated_ns: bool = False,
         cns_a_bound: float = 1e-4,
@@ -150,8 +148,7 @@ class Muon_adv(torch.optim.Optimizer):
             "lr": lr, "beta1": beta1, "weight_decay": weight_decay,
             "nesterov": nesterov, "ns_steps": ns_steps, "ns_eps": ns_eps,
             "ns_coeffs": ns_coeffs, "nnmf_factor": nnmf_factor,
-            "vector_reshape": vector_reshape, "cautious_wd": cautious_wd,
-            "vector_reshape_muon": vector_reshape_muon,
+            "vector_reshape": vector_reshape,  "rms_rescaling": rms_rescaling,
             "Simplified_AdEMAMix": Simplified_AdEMAMix, "alpha_grad": alpha_grad,
             "orthogonal_gradient": orthogonal_gradient,
             'compiled_optimizer': compiled_optimizer,
@@ -159,7 +156,7 @@ class Muon_adv(torch.optim.Optimizer):
             "low_rank_ortho": low_rank_ortho, "ortho_rank": ortho_rank,
             # NorMuon
             "normuon_variant": normuon_variant, "beta2_normuon": beta2_normuon,
-            "normuon_eps": normuon_eps, "normuon_lr_scale": normuon_lr_scale,
+            "normuon_eps": normuon_eps,
             # CANS
             "accelerated_ns": accelerated_ns, "cns_a_bound": cns_a_bound,
             # AdamW_adv defaults
@@ -368,15 +365,16 @@ class Muon_adv(torch.optim.Optimizer):
                 v_t.mul_(beta2_normuon).add_(mean_squared_update, alpha=1 - beta2_normuon)
                 # Normalize update
                 update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
-                # Scale learning rate
-                update_norm = torch.linalg.vector_norm(update)
+                del mean_squared_update
 
-                scaled_lr = group['normuon_lr_scale'] * lr * (p.numel()**0.5) / update_norm.add_(group['normuon_eps'])
-
-                update = update.view(p.shape).mul_(scaled_lr)
-                del update_norm, scaled_lr
-            else: # Original Muon learning rate application
-                update = update.view(p.shape).mul_(lr)
+                # RMS-aligned rescaling
+                if group['rms_rescaling']:
+                    rms_target = 0.2 # default (Adam) value for RMS
+                    update_norm = torch.linalg.vector_norm(update)
+                    update = update.view(p.shape).mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
+                    del update_norm
+                else:
+                    update = update.view(p.shape).mul_(lr)
 
             state['sign_buf'] = _pack_bools(mt_buf > 0)
             _nnmf(mt_buf.abs(), out=(state['mu_mbuf_nmf'], state['mv_mbuf_nmf']))
@@ -469,15 +467,15 @@ class Muon_adv(torch.optim.Optimizer):
                     v_t.mul_(beta2_normuon).add_(mean_squared_update, alpha=1 - beta2_normuon)
                     # Normalize update
                     update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
-                    # Scale learning rate
-                    update_norm = torch.linalg.vector_norm(update)
-                    scaled_lr = group['normuon_lr_scale'] * lr * (p.numel()**0.5) / update_norm.add_(group['normuon_eps'])
-                    update.mul_(scaled_lr)
-                else: # Original Muon learning rate application
-                    update.mul_(lr)
 
-                # reshape back to the original shape.
-                update = update.view(original_shape)
+                # RMS-aligned rescaling
+                if group['rms_rescaling']:
+                    rms_target = 0.2 # default (Adam) value for RMS
+                    update_norm = torch.linalg.vector_norm(update)
+                    update = update.view(original_shape).mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
+                    del update_norm
+                else:
+                    update = update.view(original_shape).mul_(lr)
 
 
             else: # Fallback to standard SGD with momentum for 1D params (biases, etc.)
