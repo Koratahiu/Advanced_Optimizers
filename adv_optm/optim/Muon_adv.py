@@ -1,6 +1,6 @@
 import torch
 
-from ..util.BF16_Stochastic_Rounding import add_stochastic_
+from ..util.param_update import apply_parameter_update
 from ..util.Newton_Schulz import _newton_schulz_iteration
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
@@ -25,6 +25,9 @@ class Muon_adv(torch.optim.Optimizer):
         lr (float): learning rate (default: 1e-3).
         beta1 (float): momentum factor (default: 0.9).
         weight_decay (float): weight decay (L2 penalty) (default: 0).
+        cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
+            applied only to parameter coordinates where the sign of the parameter
+            and the sign of the optimizer update align (default: False).
         nesterov (bool): enables Nesterov momentum (default: True).
         ns_steps (int): number of Newton-Schulz iterations to perform (default: 5).
         ns_eps (float): epsilon for Newton-Schulz normalization stability (default: 1e-7).
@@ -85,6 +88,7 @@ class Muon_adv(torch.optim.Optimizer):
         lr: float = 1e-3,
         beta1: float = 0.9,
         weight_decay: float = 0.0,
+        cautious_wd: bool = False,
         nesterov: bool = True,
         ns_steps: int = 5,
         ns_eps: float = 1e-7,
@@ -146,7 +150,7 @@ class Muon_adv(torch.optim.Optimizer):
             "lr": lr, "beta1": beta1, "weight_decay": weight_decay,
             "nesterov": nesterov, "ns_steps": ns_steps, "ns_eps": ns_eps,
             "ns_coeffs": ns_coeffs, "nnmf_factor": nnmf_factor,
-            "vector_reshape": vector_reshape,
+            "vector_reshape": vector_reshape, "cautious_wd": cautious_wd,
             "vector_reshape_muon": vector_reshape_muon,
             "Simplified_AdEMAMix": Simplified_AdEMAMix, "alpha_grad": alpha_grad,
             "orthogonal_gradient": orthogonal_gradient,
@@ -483,25 +487,16 @@ class Muon_adv(torch.optim.Optimizer):
                 if nesterov:
                     # Nesterov momentum
                     update = grad.add(mt_buf, alpha=beta1)
-                elif Simplified_AdEMAMix:
-                    update = torch.add(mt_buf, grad, alpha=alpha_grad)
+                # FIXME, Simplified_AdEMAMix will break SGD since it requires x100 lower LR
+#                elif Simplified_AdEMAMix:
+#                    update = torch.add(mt_buf, grad, alpha=alpha_grad)
                 else:
                     # Standard momentum
                     update = mt_buf.clone()
                 update.mul_(lr)
 
-        # Decoupled weight decay
-        if group["weight_decay"] != 0:
-            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * lr)
-            else:
-                p.data.add_(p.data, alpha=-group["weight_decay"] * lr)
-
-        if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-            add_stochastic_(p.data, -update)
-        else:
-            p.data.add_(-update)
-        del update
+        # Param Update
+        apply_parameter_update(self, p, group, update, lr)
 
     @torch.no_grad()
     def _adam_step_parameter(self, p, grad, state, group, lr, bias_correction1, bias_correction2):
@@ -626,18 +621,8 @@ class Muon_adv(torch.optim.Optimizer):
 
             update.mul_(step_size)
 
-        # Decoupled weight decay
-        if group["adam_weight_decay"] != 0:
-            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data, alpha=-group["adam_weight_decay"] * lr)
-            else:
-                p.data.add_(p.data, alpha=-group["adam_weight_decay"] * lr)
-
-        if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-            add_stochastic_(p.data, -update)
-        else:
-            p.data.add_(-update)
-        del update
+        # Param Update
+        apply_parameter_update(self, p, group, update, lr, group["adam_weight_decay"])
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
@@ -678,18 +663,21 @@ class Muon_adv(torch.optim.Optimizer):
 
             # Dispatch to compiled or uncompiled Adam step
             if is_compiled and self._compiled_adam_step is not None:
-                # Tensors must be used for compiled functions
-                lr_tensor = torch.tensor(lr, device=p.device)
-                bc1_tensor = torch.tensor(bias_correction1, device=p.device)
-                bc2_tensor = torch.tensor(bias_correction2, device=p.device)
-                self._compiled_adam_step(p, grad, state, group, lr_tensor, bc1_tensor, bc2_tensor)
+                # convert to tensors for compiled path once a step
+                if not hasattr(self, 'lr_adam_tensor') or self.lr_adam_tensor is None:
+                    self.lr_adam_tensor = torch.tensor(group['lr'])
+                    self.bc1 = torch.tensor(bias_correction1)
+                    self.bc2 = torch.tensor(bias_correction2)
+                self._compiled_adam_step(p, grad, state, group, self.lr_adam_tensor, self.bc1, self.bc2)
             else:
                 self._adam_step_parameter(p, grad, state, group, lr, bias_correction1, bias_correction2)
         else: # Muon path
             # Dispatch to compiled or uncompiled Muon step
             if is_compiled and self._compiled_muon_step is not None:
-                lr_tensor = torch.tensor(lr, device=p.device)
-                self._compiled_muon_step(p, grad, state, group, lr_tensor)
+                # convert to tensors for compiled path once a step
+                if not hasattr(self, 'lr_tensor') or self.lr_tensor is None:
+                    self.lr_tensor = torch.tensor(group['lr'])
+                self._compiled_muon_step(p, grad, state, group, self.lr_tensor)
             else:
                 self._muon_step_parameter(p, grad, state, group, lr)
 
@@ -712,4 +700,8 @@ class Muon_adv(torch.optim.Optimizer):
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
 
+        if self.param_groups[0].get('compiled_optimizer', False):
+            # Reset compile tensors once a step
+            self.lr_tensor = None
+            self.lr_adam_tensor = None
         return loss

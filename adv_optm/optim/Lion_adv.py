@@ -2,7 +2,7 @@ import torch
 
 from typing import Tuple, Optional
 
-from ..util.BF16_Stochastic_Rounding import add_stochastic_
+from ..util.param_update import apply_parameter_update
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -22,6 +22,9 @@ class Lion_adv(torch.optim.Optimizer):
         betas (Tuple[float, float], optional): coefficients for computing
             running averages of the update (default: (0.9, 0.99)).
         weight_decay (float, optional): weight decay (L2 penalty) (default: 0.0).
+        cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
+            applied only to parameter coordinates where the sign of the parameter
+            and the sign of the optimizer update align (default: False).
         vector_reshape (bool, optional): whether to reshape 1D vectors into 2D
             matrices to apply low-rank compression (default: True).
         stochastic_rounding (bool, optional): whether to use stochastic
@@ -37,6 +40,7 @@ class Lion_adv(torch.optim.Optimizer):
         lr: float = 1e-4,
         betas: Tuple[float, float] = (0.9, 0.99),
         weight_decay: float = 0.0,
+        cautious_wd: bool = False,
         vector_reshape: bool = False,
         stochastic_rounding: bool = True,
         orthogonal_gradient: bool = False,
@@ -56,6 +60,7 @@ class Lion_adv(torch.optim.Optimizer):
             lr=lr,
             betas=betas,
             weight_decay=weight_decay,
+            cautious_wd=cautious_wd,
             vector_reshape=vector_reshape,
             orthogonal_gradient=orthogonal_gradient,
             compiled_optimizer=compiled_optimizer,
@@ -182,21 +187,8 @@ class Lion_adv(torch.optim.Optimizer):
             # Standard Lion momentum update
             exp_avg.mul_(beta2).add_(grad, alpha=1-beta2)
 
-        if group["weight_decay"] != 0:
-            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data,
-                                alpha=-group["weight_decay"] * lr)
-            else:
-                p.data.add_(
-                    p.data, alpha=-group["weight_decay"] * lr
-                )
-
-        if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-            add_stochastic_(p.data, -update)
-        else:
-            p.data.add_(-update)
-
-        del update
+        # Param Update
+        apply_parameter_update(self, p, group, update, lr)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
@@ -204,8 +196,10 @@ class Lion_adv(torch.optim.Optimizer):
         if not group.get('compiled_optimizer', False):
             self.__step_parameter(p, group, group["lr"])
         else:
-            lr_tensor = torch.tensor(group["lr"], device=p.device)
-            self._compiled_step_parameter(p, group, lr_tensor)
+            if not hasattr(self, 'lr_tensor') or self.lr_tensor is None:
+                # convert to tensors for compiled path once a step
+                self.lr_tensor = torch.tensor(group['lr'], device=p.device)
+            self._compiled_step_parameter(p, group, self.lr_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
@@ -223,4 +217,7 @@ class Lion_adv(torch.optim.Optimizer):
                 if p.grad is not None:
                     self.step_parameter(p, group, i)
 
+        if self.param_groups[0].get('compiled_optimizer', False):
+            # Reset compile tensors once a step
+            self.lr_tensor = None
         return loss

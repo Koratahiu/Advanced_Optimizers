@@ -5,7 +5,7 @@ import math
 
 from typing import Optional, Callable
 
-from ..util.BF16_Stochastic_Rounding import add_stochastic_
+from ..util.param_update import apply_parameter_update
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -26,7 +26,10 @@ class Prodigy_adv(torch.optim.Optimizer):
             averages of gradient and its square (default: (0.9, 0.999))
         eps (float): term added to the denominator to improve
             numerical stability (default: 1e-8)
-        weight_decay (float): weight decay (L2 penalty) (default: 0)
+        weight_decay (float): weight decay (L2 penalty) (default: 0).
+        cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
+            applied only to parameter coordinates where the sign of the parameter
+            and the sign of the optimizer update align (default: False).
         vector_reshape (bool): whether to reshape 1D vectors into 2D
             matrices to apply low-rank compression (default: True).
         stochastic_rounding (bool): whether to use stochastic
@@ -116,6 +119,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         betas: tuple[float, float] = (0.9, 0.999),
         eps: float = 1e-8,
         weight_decay: float = 0.0,
+        cautious_wd: bool = False,
         vector_reshape: bool = False,
         stochastic_rounding: bool = True,
         use_atan2: bool = False,
@@ -183,8 +187,9 @@ class Prodigy_adv(torch.optim.Optimizer):
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "vector_reshape": vector_reshape, "use_atan2": use_atan2,
             "orthogonal_gradient": orthogonal_gradient,
-            "beta3_ema": beta3_ema, "alpha": alpha,
+            "beta3_ema": beta3_ema, "alpha": alpha, "cautious_wd": cautious_wd,
             "beta3": beta3, "d": d0, "d0": d0, "d_max": d0, "d_numerator": 0.0, "d_coef": d_coef,
+            "k": 0,
             "growth_rate": growth_rate, "safeguard_warmup": safeguard_warmup, "slice_p": slice_p,
             "fsdp_in_use": fsdp_in_use, "prodigy_steps": prodigy_steps, "d_limiter": d_limiter,
             "alpha_grad": alpha_grad,
@@ -211,7 +216,6 @@ class Prodigy_adv(torch.optim.Optimizer):
             self.kourkoutas_helper = KourkoutasHelper(self)
 
         self.init_step()
-        self.global_step = 0
 
         if compiled_optimizer:
             torch._dynamo.config.cache_size_limit = 8192
@@ -442,7 +446,7 @@ class Prodigy_adv(torch.optim.Optimizer):
 
         # --- Accumulate Prodigy stats ---
         prodigy_steps = group['prodigy_steps']
-        if prodigy_steps <= 0 or self.global_step < prodigy_steps:
+        if prodigy_steps <= 0 or group['k'] < prodigy_steps:
             d0, safeguard_warmup, slice_p = group['d0'], group['safeguard_warmup'], group['slice_p']
             s, p0 = state['s'], state['p0']
             grad_flat = grad.flatten().float()
@@ -463,30 +467,16 @@ class Prodigy_adv(torch.optim.Optimizer):
             if 'p0' in state:
                 del state['p0']
 
-        # Decoupled weight decay
-        if group["weight_decay"] != 0:
-            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * dlr)
-            else:
-                p.data.add_(p.data, alpha=-group["weight_decay"] * dlr)
-
-        if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-            add_stochastic_(p.data, -update)
-        else:
-            p.data.add_(-update)
-        del update
+        # Param Update
+        apply_parameter_update(self, p, group, update, dlr)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
         if hasattr(p, "_fsdp_flattened"):
             self.fsdp_in_use = True
 
-        if self.global_step is None and 'step' in self.state[p]:
-            # For backward compatibility
-            self.global_step = self.state[p]['step']
-
         if self.kourkoutas_beta:
-            self.kourkoutas_helper.maybe_prepare_step(self.global_step)
+            self.kourkoutas_helper.maybe_prepare_step(group['k'])
 
         if not group.get('compiled_optimizer', False):
             if isinstance(self.d_numerator, float):
@@ -525,7 +515,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         g_group = self.param_groups[0]
 
         # Only perform d-adaptation if prodigy_steps has not been reached
-        prodigy_active = not (g_group.get('prodigy_steps', 0) > 0 and self.global_step >= g_group['prodigy_steps'])
+        prodigy_active = not (g_group.get('prodigy_steps', 0) > 0 and g_group['k'] >= g_group['prodigy_steps'])
 
         if prodigy_active:
             d_max, d_coef, growth_rate = g_group['d_max'], g_group['d_coef'], g_group['growth_rate']
@@ -558,4 +548,6 @@ class Prodigy_adv(torch.optim.Optimizer):
                 group['d_max'] = d_max
 
         # Increment step counter for all groups, regardless of whether d was updated
-        self.global_step += 1
+        for group in self.param_groups:
+            group['k'] += 1
+

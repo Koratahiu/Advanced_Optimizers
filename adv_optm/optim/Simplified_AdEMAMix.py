@@ -3,7 +3,7 @@ from typing import Optional, Callable
 
 import math
 
-from ..util.BF16_Stochastic_Rounding import add_stochastic_
+from ..util.param_update import apply_parameter_update
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -39,6 +39,9 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         eps (float): term added to the denominator to improve
             numerical stability (default: 1e-8)
         weight_decay (float): weight decay (L2 penalty) (default: 0).
+        cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
+            applied only to parameter coordinates where the sign of the parameter
+            and the sign of the optimizer update align (default: False).
         alpha_grad (float): Coeficient for mixing the current gradient and EMA. for small batch
             sizes set it to high values, up to 100. And for large batch sized set it to small
             value, down to 0. (default: 100)
@@ -82,6 +85,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         betas: tuple[float, float] = (0.99, 0.999),
         eps: float = 1e-8,
         weight_decay: float = 0.0,
+        cautious_wd: bool = False,
         alpha_grad: float = 100.0,
         beta1_warmup: int | None = None,
         min_beta1: float | None = 0.9,
@@ -116,7 +120,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "alpha_grad": alpha_grad, "beta1_warmup": beta1_warmup, "min_beta1": min_beta1,
-            "vector_reshape": vector_reshape,
+            "vector_reshape": vector_reshape, "cautious_wd": cautious_wd,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
@@ -135,6 +139,11 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             self.den_sum = 1.0
 
         super().__init__(params, defaults)
+
+        if beta1_warmup is not None:
+            self.beta1 = linear_hl_warmup_scheduler(1, beta_end=betas[0], beta_start=min_beta1, warmup=beta1_warmup)
+        else:
+            self.beta1 = betas[0]
 
         self.init_step()
 
@@ -273,46 +282,30 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
             update.mul_(group['lr'])
 
-        # Decoupled weight decay
-        if group["weight_decay"] != 0:
-            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * group["lr"])
-            else:
-                p.data.add_(p.data, alpha=-group["weight_decay"] * group["lr"])
-
-        if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-            add_stochastic_(p.data, -update)
-        else:
-            p.data.add_(-update)
-        del update
-
+        # Param Update
+        apply_parameter_update(self, p, group, update, lr)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-        if self.global_step is None and 'step' in self.state[p]:
-            # For backward compatibility
-            g_state = self.state[p]
-            self.global_step = g_state['step']
-            self.num_sum = group["betas"][0] * g_state['num_sum'] + 1.0
-            self.den_sum = group['betas'][1] * g_state['den_sum'] + (1.0 - group['betas'][1])
 
-        if group["beta1_warmup"] is not None:
-            step = self.global_step + 1
-            beta1 = linear_hl_warmup_scheduler(step, beta_end=group["betas"][0], beta_start=group['min_beta1'], warmup=group["beta1_warmup"])
-        else:
-            beta1 = group["betas"][0]
+        state = self.state[p]
+
+        step = state['step']
 
         if group.get('kourkoutas_beta', False):
             # Prepare Kourkoutas-β once per step using the global step counter.
-            self.kourkoutas_helper.maybe_prepare_step(self.global_step)
+            self.kourkoutas_helper.maybe_prepare_step(step)
+
+        self.state[p]['step'] += 1
 
         if not group.get('compiled_optimizer', False):
-            self.__step_parameter(p, group, group['lr'], beta1, self.num_sum, self.den_sum)
+            self.__step_parameter(p, group, group['lr'], self.beta1, self.num_sum, self.den_sum)
         else:
-            lr_tensor = torch.tensor(group['lr'], device=p.device)
-            num_sum_tesnor = torch.tensor(self.num_sum, device=p.device)
-            den_sum_tesnor = torch.tensor(self.den_sum, device=p.device)
-            self._compiled_step_parameter(p, group, lr_tensor, beta1, self.num_sum, self.den_sum)
+            if not hasattr(self, 'lr_tensor') or self.lr_tensor is None:
+                self.lr_tensor = torch.tensor(group['lr'], device=p.device)
+                self.num_sum_tesnor = torch.tensor(self.num_sum, device=p.device)
+                self.den_sum_tesnor = torch.tensor(self.den_sum, device=p.device)
+            self._compiled_step_parameter(p, group, self.lr_tensor, self.beta1, self.num_sum_tesnor, self.den_sum_tesnor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
@@ -334,6 +327,13 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             self.num_sum = g_group["betas"][0] * self.num_sum + 1.0
             self.den_sum = g_group['betas'][1] * self.den_sum + (1.0 - g_group['betas'][1])
 
-        self.global_step += 1
+        if group["beta1_warmup"] is not None:
+            current_step = self.state[p][0]['step'] + 1
+            self.beta1 = linear_hl_warmup_scheduler(current_step, beta_end=group["betas"][0], beta_start=group['min_beta1'], warmup=group["beta1_warmup"])
+        else:
+            self.beta1 = group["betas"][0]
 
+        if self.param_groups[0].get('compiled_optimizer', False):
+            # Reset compile tensors once a step
+            self.lr_tensor = None
         return loss

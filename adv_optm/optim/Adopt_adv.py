@@ -1,7 +1,7 @@
 import torch
 from typing import Callable, Optional
 
-from ..util.BF16_Stochastic_Rounding import add_stochastic_
+from ..util.param_update import apply_parameter_update
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf, _unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -27,7 +27,10 @@ class Adopt_adv(torch.optim.Optimizer):
             averages of momentum and variance (default: (0.9, 0.9999))
         eps (float): term added to the denominator to improve
             numerical stability (default: 1e-6)
-        weight_decay (float): weight decay (L2 penalty) (default: 0)
+        weight_decay (float): weight decay (L2 penalty) (default: 0).
+        cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
+            applied only to parameter coordinates where the sign of the parameter
+            and the sign of the optimizer update align (default: False).
         clip_lambda (Callable, optional): A function that takes the current step
             and returns a value to clip the normalized gradient. Only used when
             `use_atan2` is False. (default: `lambda step: step**0.25`)
@@ -99,6 +102,7 @@ class Adopt_adv(torch.optim.Optimizer):
         betas: tuple[float, float] = (0.9, 0.9999),
         eps: float = 1e-6,
         weight_decay: float = 0.0,
+        cautious_wd: bool = False,
         clip_lambda: Optional[Callable[[int], float]] = lambda step: step**0.25,
         vector_reshape: bool = False,
         stochastic_rounding: bool = True,
@@ -147,7 +151,7 @@ class Adopt_adv(torch.optim.Optimizer):
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "vector_reshape": vector_reshape, "beta3_ema": beta3_ema, "alpha": alpha,
-            "alpha_grad": alpha_grad,
+            "alpha_grad": alpha_grad, "cautious_wd": cautious_wd,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
             "compiled_optimizer": compiled_optimizer,
@@ -430,18 +434,8 @@ class Adopt_adv(torch.optim.Optimizer):
             # Update second moment v_t for the next step using raw g_t
             vt.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
 
-        # Parameter Update
-        if group["weight_decay"] != 0:
-            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * lr)
-            else:
-                p.data.add_(p.data, alpha=-group["weight_decay"] * lr)
-
-        if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-            add_stochastic_(p.data, -update)
-        else:
-            p.data.add_(-update)
-        del update
+        # Param Update
+        apply_parameter_update(self, p, group, update, lr)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):

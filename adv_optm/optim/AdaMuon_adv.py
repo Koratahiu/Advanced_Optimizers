@@ -1,6 +1,6 @@
 import torch
 
-from ..util.BF16_Stochastic_Rounding import add_stochastic_
+from ..util.param_update import apply_parameter_update
 from ..util.Newton_Schulz import _newton_schulz_iteration
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
@@ -33,7 +33,10 @@ class AdaMuon_adv(torch.optim.Optimizer):
         lr (float): learning rate (default: 1e-3).
         betas (tuple[float, float]): coefficients used for both first and second moment
             estimation (default: (0.95, 0.95))
-        weight_decay (float): weight decay (L2 penalty) (default: 0.1).
+        weight_decay (float): weight decay (L2 penalty) (default: 0.0).
+        cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
+            applied only to parameter coordinates where the sign of the parameter
+            and the sign of the optimizer update align (default: False).
         eps (float): term added to the denominator for adaptive scaling to improve
             numerical stability (default: 1e-8).
         rms_target (float): The target Root-Mean-Square value for the final update
@@ -89,7 +92,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
         params,
         lr: float = 1e-3,
         betas: tuple[float, float] = (0.95, 0.95),
-        weight_decay: float = 0.1,
+        weight_decay: float = 0,
+        cautious_wd: bool = False,
         eps: float = 1e-8,
         rms_target: float = 0.2,
         ns_steps: int = 5,
@@ -146,7 +150,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             "lr": lr, "betas": betas, "weight_decay": weight_decay,
             "eps": eps, "rms_target": rms_target, "ns_steps": ns_steps,
             "ns_eps": ns_eps, "ns_coeffs": ns_coeffs, "nnmf_factor": nnmf_factor,
-            "vector_reshape": vector_reshape,
+            "vector_reshape": vector_reshape, "cautious_wd": cautious_wd,
             "nesterov":nesterov, "use_atan2":use_atan2,
             "Simplified_AdEMAMix": Simplified_AdEMAMix, "alpha_grad": alpha_grad,
             "normuon_variant": normuon_variant, "orthogonal_gradient": orthogonal_gradient,
@@ -496,18 +500,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     update = mt_buf.clone()
                 update.mul_(lr)
 
-        # Decoupled weight decay
-        if group["weight_decay"] != 0:
-            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * lr)
-            else:
-                p.data.add_(p.data, alpha=-group["weight_decay"] * lr)
-
-        if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-            add_stochastic_(p.data, -update)
-        else:
-            p.data.add_(-update)
-        del update
+        # Param Update
+        apply_parameter_update(self, p, group, update, lr)
 
     @torch.no_grad()
     def _adam_step_parameter(self, p, grad, state, group, lr, bias_correction1, bias_correction2):
@@ -632,18 +626,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             update.mul_(step_size)
 
-        # Decoupled weight decay
-        if group["adam_weight_decay"] != 0:
-            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data, alpha=-group["adam_weight_decay"] * lr)
-            else:
-                p.data.add_(p.data, alpha=-group["adam_weight_decay"] * lr)
-
-        if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-            add_stochastic_(p.data, -update)
-        else:
-            p.data.add_(-update)
-        del update
+        # Param Update
+        apply_parameter_update(self, p, group, update, lr, group["adam_weight_decay"])
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
