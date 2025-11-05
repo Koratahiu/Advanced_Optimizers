@@ -96,7 +96,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             cautious_wd=cautious_wd,
             vector_reshape=vector_reshape,
             orthogonal_gradient=orthogonal_gradient,
-            beta3=beta3, d=d0, d0=d0, d_max=d0, d_numerator=0.0, d_coef=d_coef, k=0, 
+            beta3=beta3, d=d0, d0=d0, d_max=d0, d_numerator=0.0, d_coef=d_coef, k=0,
             growth_rate=growth_rate, safeguard_warmup=safeguard_warmup, slice_p=slice_p,
             fsdp_in_use=fsdp_in_use,
             prodigy_steps=prodigy_steps,
@@ -350,4 +350,3 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         # Increment step counter for all groups, regardless of whether d was updated
         for group in self.param_groups:
             group['k'] += 1
-

@@ -364,7 +364,7 @@ class AdamW_adv(torch.optim.Optimizer):
         if group.get('kourkoutas_beta', False):
             # Prepare Kourkoutas-β once per step using the global step counter.
             self.kourkoutas_helper.maybe_prepare_step(step)
-        
+
         self.state[p]['step'] += 1
 
         if not group.get('compiled_optimizer', False):

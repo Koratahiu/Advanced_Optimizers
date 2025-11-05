@@ -321,7 +321,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
-        
+
         g_group = self.param_groups[0]
         if g_group['use_bias_correction']:
             self.num_sum = g_group["betas"][0] * self.num_sum + 1.0

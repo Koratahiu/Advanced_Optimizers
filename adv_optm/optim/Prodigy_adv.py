@@ -550,4 +550,3 @@ class Prodigy_adv(torch.optim.Optimizer):
         # Increment step counter for all groups, regardless of whether d was updated
         for group in self.param_groups:
             group['k'] += 1
-

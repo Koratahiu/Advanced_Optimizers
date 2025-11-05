@@ -221,13 +221,6 @@ class Adopt_adv(torch.optim.Optimizer):
                     state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                     packed_d2 = (d2 + 7) // 8
                     state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
-                # v_0 = g_0^2 (SMMF_ADOPT NMF storage)
-                vt_init = grad.view(d1, d2).square_()
-                # Allocate NMF factors for vt
-                state['mu_v_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
-                state['mv_v_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                # Initialize v_0 using NMF
-                _nnmf(vt_init, out=(state['mu_v_nmf'], state['mv_v_nmf']))
             else: # Fallback for non-factored tensors
                 if group['betas'][0] > 0:
                     state['exp_avg'] = torch.zeros_like(p, dtype=dtype) # m_0
@@ -238,7 +231,7 @@ class Adopt_adv(torch.optim.Optimizer):
     def __init_step(self, p, group):
         if p.grad is None:
             return
-        
+
         state = self.state[p]
 
         if 'exp_avg_sq' in state or 'mu_v_nmf' in state:
@@ -442,7 +435,7 @@ class Adopt_adv(torch.optim.Optimizer):
         state = self.state[p]
 
         step = state['step']
-        
+
         if step == 0:
             self.__init_step(p, group)
 
