@@ -181,35 +181,6 @@ This is especially effective for **noisy training, small batch sizes, and high l
 
 ---
 
-## Recommended Preset (Tested on LoRA/FT/Embedding)
-
-```yaml
-Learning Rate: 1
-optimizer: PRODIGY_Adv
-settings:
-  - beta1: 0.99 # Controls momentum decay, ~100-step effective memory. Adjust to 0.999 (1000 steps) or 0.9999 (10000 steps) based on training length and stability needs.
-  - beta2: 0.999
-  - kourkoutas_beta: True   # For Kourkoutas-β
-  - K-β Warmup Steps: 50    # Or 100, 200, depending on your run
-  - Simplified_AdEMAMix: True
-  - Grad α: 100
-  - OrthoGrad: True
-  - weight_decay: 0.0
-  - initial_d:
-      • LoRA: 1e-8
-      • Full fine-tune: 1e-10
-      • Embedding: 1e-7
-  - d_coef: 1
-  - factored: False  # Can be true or false, quality should not degrade due to Simplified_AdEMAMix’s high tolerance to 1-bit factorization.
-```
-
-> ✅ **Why it works**:  
-> - `Kourkoutas-β` handles beta2 values
-> - `Simplified_AdEMAMix` ensures responsiveness in small-batch noise
-> - `OrthoGrad` prevents overfitting without weight decay
-
----
-
 ## 📚 References
 
 1. [Revisiting BFloat16 Training](https://arxiv.org/abs/2010.06192)  
