@@ -36,9 +36,9 @@ class AdaMuon_adv(torch.optim.Optimizer):
         weight_decay (float): weight decay (L2 penalty) (default: 0.1).
         eps (float): term added to the denominator for adaptive scaling to improve
             numerical stability (default: 1e-8).
-        rms_target (float): The target Root-Mean-Square value for the final update
+        rms_rescaling (bool): Use Root-Mean-Square for the final update
             vector, used for RMS-aligned rescaling. Allows for the reuse of existing Adam
-            learning rate schedules. (default: 0.2).
+            learning rate schedules. (default: True).
         ns_steps (int): number of Newton-Schulz iterations to perform (default: 5).
         ns_eps (float): epsilon for Newton-Schulz normalization stability (default: 1e-7).
         ns_coeffs (tuple[float, float, float]): The (a, b, c) coefficients for the
@@ -91,11 +91,11 @@ class AdaMuon_adv(torch.optim.Optimizer):
         betas: tuple[float, float] = (0.95, 0.95),
         weight_decay: float = 0.1,
         eps: float = 1e-8,
-        rms_target: float = 0.2,
+        rms_rescaling: bool = True,
         ns_steps: int = 5,
         ns_eps: float = 1e-7,
         ns_coeffs: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
-        stochastic_rounding: bool = False,
+        stochastic_rounding: bool = True,
         orthogonal_gradient: bool = False,
         use_atan2: bool = False,
         nesterov: bool = False,
@@ -144,7 +144,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
         defaults = {
             "lr": lr, "betas": betas, "weight_decay": weight_decay,
-            "eps": eps, "rms_target": rms_target, "ns_steps": ns_steps,
+            "eps": eps, "rms_rescaling": rms_rescaling, "ns_steps": ns_steps,
             "ns_eps": ns_eps, "ns_coeffs": ns_coeffs, "nnmf_factor": nnmf_factor,
             "vector_reshape": vector_reshape,
             "nesterov":nesterov, "use_atan2":use_atan2,
@@ -352,18 +352,12 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 v_t.mul_(beta2).add_(mean_squared_update, alpha=1 - beta2)
                 # Normalize update
                 update.div_(v_t.sqrt().unsqueeze(1).add_(group['eps']))
-                # Scale learning rate
-                update_norm = torch.linalg.vector_norm(update)
-                scaled_lr = group['rms_target'] * lr * (p.numel()**0.5) / update_norm.add_(group['eps'])
-                update = update.view(p.shape).mul_(scaled_lr)
-                del mean_squared_update, update_norm, scaled_lr
+                del mean_squared_update
             else:
                 # Reconstruct second momentum from previous step's factors
                 vt_buf = _unnmf((state['mu_vbuf_nmf'], state['mv_vbuf_nmf']))
-
                 # Update second momentum in full-size
                 vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
-
                 # Apply second momentum update (adaptive scaling)
                 if group['use_atan2']:
                     a = 1.2732395
@@ -374,14 +368,14 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     update.div_(denom)
                 del denom
 
-                # RMS-aligned rescaling
-                rms_target = group['rms_target']
-                num_elements = update.numel()
-                # Add eps to prevent division by zero
-                update.mul_(rms_target * (num_elements ** 0.5) / (update.norm().add_(group['eps'])))
-
+            # RMS-aligned rescaling
+            if group['rms_rescaling']:
+                rms_target = 0.2 # default (Adam) value for RMS
+                update_norm = torch.linalg.vector_norm(update)
+                update = update.view(p.shape).mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
+                del update_norm
+            else:
                 update = update.view(p.shape).mul_(lr)
-                del num_elements
 
             # Compress updated moments and store new factors
             state['sign_buf'] = _pack_bools(mt_buf > 0)
@@ -457,11 +451,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     v_t.mul_(beta2).add_(mean_squared_update, alpha=1 - beta2)
                     # Normalize update
                     update.div_(v_t.sqrt().unsqueeze(1).add_(group['eps']))
-                    # Scale learning rate
-                    update_norm = torch.linalg.vector_norm(update)
-                    scaled_lr = group['rms_target'] * lr * (p.numel()**0.5) / update_norm.add_(group['eps'])
-                    update.mul_(scaled_lr)
-                    del mean_squared_update, update_norm, scaled_lr
+                    del mean_squared_update
                 else:
                     # Original AdaMuon Logic
                     vt_buf = state['second_momentum_buffer']
@@ -475,13 +465,15 @@ class AdaMuon_adv(torch.optim.Optimizer):
                         denom = vt_buf.sqrt().add_(group['eps'])
                         update.div_(denom)
                     del denom
-                    # RMS-aligned rescaling
-                    rms_target = group['rms_target']
-                    num_elements = update.numel()
-                    # Add eps to prevent division by zero
-                    update.mul_(rms_target * (num_elements ** 0.5) / (update.norm().add_(group['eps'])))
-                    del num_elements
-                    update.mul_(lr)
+
+                # RMS-aligned rescaling
+                if group['rms_rescaling']:
+                    rms_target = 0.2 # default (Adam) value for RMS
+                    update_norm = torch.linalg.vector_norm(update)
+                    update = update.view(p.shape).mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
+                    del update_norm
+                else:
+                    update = update.view(p.shape).mul_(lr)
 
             else: # Fallback to standard SGD with momentum for 1D params (biases, etc.)
                 # Momentum update
