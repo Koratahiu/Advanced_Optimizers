@@ -223,7 +223,6 @@ settings:
       • Full fine-tune: 1e-10
       • Embedding: 1e-7
   - d_coef: 1
-  - d_limiter: True # To stablizie Prodigy with Simplified_AdEMAMix
   - factored: False  # Can be true or false, quality should not degrade due to Simplified_AdEMAMix’s high tolerance to 1-bit factorization.
 ```
 
