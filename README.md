@@ -139,7 +139,7 @@ This library integrates multiple state-of-the-art optimization techniques valida
 > - **Full FT**: `1e-10`
 > - **Embedding**: `1e-7`
 
-> ⚠️ **Incompatible** with: **Cautious**, **Grams**, **atan2**, and standard gradient clipping.
+> ⚠️ **Incompatible** with: **Cautious**, **Grams**, **atan2**, and standard update clipping.
 
 ---
 
