@@ -141,11 +141,17 @@ This library integrates multiple state-of-the-art optimization techniques valida
 
 > ⚠️ **Incompatible** with: **Cautious**, **Grams**, **atan2**, and standard gradient clipping.
 
+---
+
 ### atan2
 
 - Replaces `eps` in Adam-family optimizers with a **scale-invariant**, bounded update rule.
 - Automatically clips updates to **[-2, 2]**, preventing destabilizing jumps.
 - **Highly recommended** for `Adopt_Adv`, which is prone to instability without clipping.
+
+> 📚 **Reference**:  
+> - Paper: https://arxiv.org/abs/2407.05872
+> - Code: https://github.com/lucidrains/adam-atan2-pytorch
 
 ---
 
@@ -211,3 +217,4 @@ settings:
 3. [The AdEMAMix Optimizer](https://arxiv.org/abs/2409.03137)  
 4. [Connections between Schedule-Free Optimizers, AdEMAMix, and Accelerated SGD](https://arxiv.org/abs/2502.02431)  
 6. [Kourkoutas-β: A Sunspike-Driven Adam Optimizer with Desert Flair](https://arxiv.org/abs/2508.12996)
+7. [Scaling Exponents Across Parameterizations and Optimizers](https://arxiv.org/abs/2407.05872)
