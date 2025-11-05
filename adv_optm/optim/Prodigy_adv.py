@@ -343,12 +343,14 @@ class Prodigy_adv(torch.optim.Optimizer):
                 else:
                     mt.mul_(self.beta1).add_(grad_reshaped, alpha=self.d * (1.0 - self.beta1))
                 if self.grams_moment:
-                    mt = (grad_reshaped.sign().mul_(mt.abs()))
+                    update_mt = (grad_reshaped.sign().mul_(mt.abs()))
                 elif self.cautious_mask:
                     mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
-                    mt.mul_(mask)
+                    update_mt = mt.mul(mask)
                     del mask
+                else:
+                    update_mt = mt.clone()
 
             vt = _unnmf((state['mu_v_nmf'], state['mv_v_nmf']))
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=self.d * self.d * (1.0 - beta2))
@@ -362,13 +364,13 @@ class Prodigy_adv(torch.optim.Optimizer):
                 del unpacked_sign_slow
                 mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=self.d * (1.0 - beta3_ema))
                 if self.beta1 > 0:
-                    update = torch.add(mt, mt_slow, alpha=alpha_t)
+                    update = torch.add(update_mt, mt_slow, alpha=alpha_t)
                 else:
                     update = torch.add(grad_reshaped.mul(self.d), mt_slow, alpha=alpha_t)
             elif self.Simplified_AdEMAMix:
-                update = torch.add(mt, grad_reshaped, alpha=alpha_grad * self.d)
+                update = torch.add(update_mt, grad_reshaped, alpha=alpha_grad * self.d)
             else:
-                update = mt.clone() if self.beta1 > 0 else grad_reshaped.mul(self.d)
+                update = update_mt if self.beta1 > 0 else grad_reshaped.mul(self.d)
             del grad_reshaped
 
             if group['use_atan2']:
@@ -405,24 +407,26 @@ class Prodigy_adv(torch.optim.Optimizer):
                 else:
                     exp_avg.mul_(self.beta1).add_(grad, alpha=self.d * (1.0 - self.beta1))
                 if self.grams_moment:
-                    exp_avg = grad.sign() * exp_avg.abs()
+                    update_mt = grad.sign().mul_(exp_avg.abs())
                 elif self.cautious_mask:
                     mask = (exp_avg * grad > 0).to(grad.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
-                    exp_avg.mul_(mask)
+                    update_mt = exp_avg.mul(mask)
                     del mask
+                else:
+                    update_mt = exp_avg.clone()
 
             if self.use_AdEMAMix:
                 exp_avg_slow = state['exp_avg_slow']
                 exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=self.d * (1.0 - beta3_ema))
                 if self.beta1 > 0:
-                    update = torch.add(exp_avg, exp_avg_slow, alpha=alpha_t)
+                    update = torch.add(update_mt, exp_avg_slow, alpha=alpha_t)
                 else:
                     update = torch.add(grad.mul(self.d), exp_avg_slow, alpha=alpha_t)
             elif self.Simplified_AdEMAMix:
-                update = torch.add(exp_avg, grad, alpha=alpha_grad * self.d)
+                update = torch.add(update_mt, grad, alpha=alpha_grad * self.d)
             else:
-                update = exp_avg.clone() if self.beta1 > 0 else grad.mul(self.d)
+                update = update_mt if self.beta1 > 0 else grad.mul(self.d)
 
             exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=self.d * self.d * (1.0 - beta2))
 
