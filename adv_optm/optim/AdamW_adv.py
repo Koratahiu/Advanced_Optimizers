@@ -252,12 +252,14 @@ class AdamW_adv(torch.optim.Optimizer):
                 grad_reshaped = grad.view(d1, d2)
                 mt.mul_(beta1).add_(grad_reshaped, alpha=1.0 - beta1)
                 if self.grams_moment:
-                    mt.copy_(grad_reshaped.sign() * mt.abs())
+                    update_mt = (grad_reshaped.sign().mul_(mt.abs()))
                 elif self.cautious_mask:
                     mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
-                    mt.mul_(mask)
+                    update_mt = mt.mul(mask)
                     del mask
+                else:
+                    update_mt = mt.clone()
 
             vt = _unnmf((state['mu_v_nmf'], state['mv_v_nmf']))
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
@@ -272,11 +274,11 @@ class AdamW_adv(torch.optim.Optimizer):
 
                 mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=1.0 - beta3_ema)
                 if beta1 > 0:
-                    update = torch.add(mt, mt_slow, alpha=alpha_t)
+                    update = torch.add(update_mt, mt_slow, alpha=alpha_t)
                 else:
                     update = torch.add(grad_reshaped, mt_slow, alpha=alpha_t)
             else:
-                update = mt.clone() if beta1 > 0 else grad_reshaped.clone()
+                update = update_mt if beta1 > 0 else grad_reshaped.clone()
             del grad_reshaped
 
             if group['use_atan2']:
@@ -310,22 +312,24 @@ class AdamW_adv(torch.optim.Optimizer):
                 exp_avg = state['exp_avg']
                 exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
                 if self.grams_moment:
-                    exp_avg = grad.sign() * exp_avg.abs()
+                    update_mt = grad.sign().mul_(exp_avg.abs())
                 elif self.cautious_mask:
                     mask = (exp_avg * grad > 0).to(grad.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
-                    exp_avg.mul_(mask)
+                    update_mt = exp_avg.mul(mask)
                     del mask
+                else:
+                    update_mt = exp_avg.clone()
 
             if self.use_AdEMAMix:
                 exp_avg_slow = state['exp_avg_slow']
                 exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=1 - beta3_ema)
                 if beta1 > 0:
-                    update = torch.add(exp_avg, exp_avg_slow, alpha=alpha_t)
+                    update = torch.add(update_mt, exp_avg_slow, alpha=alpha_t)
                 else:
                     update = torch.add(grad, exp_avg_slow, alpha=alpha_t)
             else:
-                update = exp_avg.clone() if beta1 > 0 else grad.clone()
+                update = update_mt if beta1 > 0 else grad.clone()
 
             exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
 

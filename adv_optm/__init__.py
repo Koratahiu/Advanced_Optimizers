@@ -16,4 +16,4 @@ __all__ = [
     "Lion_Prodigy_adv",
 ]
 
-__version__ = "1.1.3"
+__version__ = "1.1.4"
