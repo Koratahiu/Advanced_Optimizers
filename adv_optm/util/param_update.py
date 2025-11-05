@@ -54,7 +54,7 @@ def apply_parameter_update(
     group: Dict[str, Any],
     update: torch.Tensor,
     lr: float,
-    wd:float | None,
+    wd: float | None = None,
 ) -> None:
     """
     Applies decoupled weight decay (standard or cautious) and the final
