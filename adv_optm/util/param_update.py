@@ -3,6 +3,70 @@ from torch import Tensor
 
 from typing import Dict, Any
 
+
+def apply_parameter_update(
+    self,
+    p: torch.Tensor,
+    group: Dict[str, Any],
+    update: torch.Tensor,
+    lr: float,
+    wd: float | None = None,
+) -> None:
+    """
+    Applies decoupled weight decay (standard or cautious) and the final
+    parameter update to p.data in-place.
+
+    Args:
+        p: The parameter tensor whose data (p.data) will be updated.
+        group: The parameter group dictionary (must contain "weight_decay").
+        update: The pre-calculated update tensor (e.g., scaled gradient or momentum term).
+        lr: The current learning rate.
+        wd: Optional float value for weight decay, if another value other than group["weight_decay"] is needed.
+    """
+    wd = group["weight_decay"] if wd is None else wd
+    cautious = group.get('cautious_wd', False)
+
+    # Compute full update in float32 if using bfloat16 with stochastic rounding
+    if p.dtype == torch.bfloat16 and self.stochastic_rounding:
+        p_fp32 = p.data.float()
+        update_fp32 = update.float()
+
+        # Apply weight decay if needed
+        if wd != 0:
+            if cautious:
+                # Cautious Weight Decay
+                mask = (update_fp32 * p_fp32 > 0).float()
+                p_fp32.addcmul_(p_fp32, mask, value=-wd * lr)
+                del mask
+            else:
+                # Standard decoupled weight decay
+                p_fp32.add_(p_fp32, alpha=-wd * lr)
+
+        # Apply main update
+        p_fp32.add_(-update_fp32)
+
+        # Single stochastic rounding at the end
+        copy_stochastic_(p.data, p_fp32)
+        del p_fp32, update_fp32
+
+    else:
+        # Standard path for non-bfloat16 or without stochastic rounding
+        if wd != 0:
+            if cautious:
+                # Cautious Weight Decay
+                mask = (update * p.data > 0).to(p.dtype)
+                p.data.addcmul_(p.data, mask, value=-wd * lr)
+                del mask
+            else:
+                # Standard decoupled weight decay
+                p.data.add_(p.data, alpha=-wd * lr)
+        
+        # Apply main update
+        p.data.add_(-update)
+    
+    del update
+
+
 def copy_stochastic_(target: Tensor, source: Tensor):
     """
     Nerogar's implementation of stochastic rounding in the paper "Revisiting BFloat16 Training"
@@ -47,46 +111,3 @@ def add_stochastic_(input: Tensor, other: Tensor, alpha: float = 1.0):
 
     result.add_(input, alpha=alpha)
     copy_stochastic_(input, result)
-
-def apply_parameter_update(
-    self,
-    p: torch.Tensor,
-    group: Dict[str, Any],
-    update: torch.Tensor,
-    lr: float,
-    wd: float | None = None,
-) -> None:
-    """
-    Applies decoupled weight decay (standard or cautious) and the final
-    parameter update to p.data in-place.
-
-    Args:
-        p: The parameter tensor whose data (p.data) will be updated.
-        group: The parameter group dictionary (must contain "weight_decay").
-        update: The pre-calculated update tensor (e.g., scaled gradient or momentum term).
-        lr: The current learning rate.
-    """
-    wd = group["weight_decay"] if wd is None else wd
-    if wd != 0:
-        if group.get('cautious_wd', False):
-            # Cautious Weight Decay applies decay only where update and parameter signs align
-            mask = (update * p.data > 0).to(p.dtype)
-            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                decay_amount = p.data.clone().mul_(-wd * lr)
-                decay_amount.mul_(mask)
-                add_stochastic_(p.data, decay_amount)
-                del decay_amount, mask
-            else:
-                p.data.addcmul_(p.data, mask, value=-wd * lr)
-        else:
-            # Standard decoupled weight decay
-            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data, alpha=-wd * lr)
-            else:
-                p.data.add_(p.data, alpha=-wd * lr)
-
-    if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-        add_stochastic_(p.data, -update)
-    else:
-        p.data.add_(-update)
-    del update
