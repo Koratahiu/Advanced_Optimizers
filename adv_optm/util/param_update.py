@@ -6,10 +6,10 @@ from typing import Dict, Any
 
 def apply_parameter_update(
     self,
-    p: torch.Tensor,
+    p: Tensor,
     group: Dict[str, Any],
-    update: torch.Tensor,
-    lr: float,
+    update: Tensor,
+    lr: float | Tensor,
     wd: float | None = None,
 ) -> None:
     """

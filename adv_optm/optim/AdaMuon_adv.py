@@ -358,9 +358,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 update.div_(v_t.sqrt().unsqueeze(1).add_(group['eps']))
                 # Scale learning rate
                 update_norm = torch.linalg.vector_norm(update)
-                scaled_lr = group['rms_target'] * lr * (p.numel()**0.5) / update_norm.add_(group['eps'])
-                update = update.view(p.shape).mul_(scaled_lr)
-                del mean_squared_update, update_norm, scaled_lr
+                update = update.view(p.shape).mul_(group['rms_target'] * lr * (p.numel()**0.5) / update_norm.add_(group['eps']))
+                del mean_squared_update, update_norm
             else:
                 # Reconstruct second momentum from previous step's factors
                 vt_buf = _unnmf((state['mu_vbuf_nmf'], state['mv_vbuf_nmf']))
@@ -380,12 +379,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
                 # RMS-aligned rescaling
                 rms_target = group['rms_target']
-                num_elements = update.numel()
                 # Add eps to prevent division by zero
-                update.mul_(rms_target * (num_elements ** 0.5) / (update.norm().add_(group['eps'])))
-
-                update = update.view(p.shape).mul_(lr)
-                del num_elements
+                update = update.view(p.shape).mul_(rms_target * lr * (update.numel() ** 0.5) / (update.norm().add_(group['eps'])))
 
             # Compress updated moments and store new factors
             state['sign_buf'] = _pack_bools(mt_buf > 0)
