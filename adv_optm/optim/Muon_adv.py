@@ -1,5 +1,7 @@
 import torch
 
+import math
+
 from ..util.param_update import apply_parameter_update
 from ..util.Newton_Schulz import _newton_schulz_iteration
 from ..util.Effective_Shape import _get_effective_shape
@@ -370,9 +372,13 @@ class Muon_adv(torch.optim.Optimizer):
                 # RMS-aligned rescaling
                 if group['rms_rescaling']:
                     rms_target = 0.2 # default (Adam) value for RMS
-                    update_norm = torch.linalg.vector_norm(update)
-                    update = update.view(p.shape).mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
-                    del update_norm
+                    if not Simplified_AdEMAMix:
+                        update_norm = torch.linalg.vector_norm(update)
+                        update = update.view(p.shape).mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
+                        del update_norm
+                    else:
+                        A, B = update.shape 
+                        update = update.view(p.shape).mul_(rms_target * lr * math.sqrt(max(A, B)))
                 else:
                     update = update.view(p.shape).mul_(lr)
 
