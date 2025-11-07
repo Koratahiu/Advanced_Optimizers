@@ -110,7 +110,6 @@ This library integrates multiple state-of-the-art optimization techniques valida
 
 - Adds a **slow-decaying second EMA** (`beta3`) that retains gradient memory over tens of thousands of steps.
 - Particularly effective for **small batch sizes**, where Adam’s standard first moment is nearly useless.
-- **Reference**: [AdaMeM: Memory Efficient Momentum for Adafactor](https://openreview.net/forum?id=fZqMVTz7K5)
 
 #### Tunable Hyperparameters
 | Parameter | Default | Tuning Guide |
@@ -125,7 +124,7 @@ This library integrates multiple state-of-the-art optimization techniques valida
 ### Simplified_AdEMAMix
 
 - Introduced in [Connections between Schedule-Free Optimizers, AdEMAMix, and Accelerated SGD Variants (arXiv:2502.02431)](https://arxiv.org/abs/2502.02431).
-- Replaces Adam’s first moment with a **gradient accumulator**, combining the stability of long memory with responsiveness to recent gradients.
+- Replaces Adam’s first moment with a **theory-based momentum** with emphasize on raw gradient, combining the stability of long memory with responsiveness to recent gradients.
 - **Key insight**: Classical momentum **does not accelerate** in noisy (small-batch) regimes; this accumulator do.
 
 #### Tunable Hyperparameters
@@ -140,20 +139,7 @@ This library integrates multiple state-of-the-art optimization techniques valida
 > - **Full FT**: `1e-10`
 > - **Embedding**: `1e-7`
 
-> ⚠️ **Incompatible** with: **Cautious**, **Grams**, **atan2**, and standard gradient clipping.
-
-#### Performance Validation
-
-**Small Batch Training (SDXL, BS=2, 1.8K steps)**
-![Training Comparison](https://github.com/user-attachments/assets/7eff0671-cc59-47fc-8b63-d5205456d649)
-
-- **🟢 Prodigy_Adv** (beta1=0.9, d0=1e-5): Final LR = 2.9e-4
-- **🔵 Prodigy_Adv + Simplified_AdEMAMix** (beta1=0.99, α=100, d0=1e-7): Final LR = 5.8e-6
-
-**Results**:
-- Faster convergence and higher final performance with Simplified_AdEMAMix
-- D-Adaptation automatically compensates for aggressive updates
-- Generated samples show **significantly better quality**
+> ⚠️ **Incompatible** with: **Cautious**, **Grams**, **atan2**, and standard update clipping.
 
 ---
 
@@ -162,6 +148,10 @@ This library integrates multiple state-of-the-art optimization techniques valida
 - Replaces `eps` in Adam-family optimizers with a **scale-invariant**, bounded update rule.
 - Automatically clips updates to **[-2, 2]**, preventing destabilizing jumps.
 - **Highly recommended** for `Adopt_Adv`, which is prone to instability without clipping.
+
+> 📚 **Reference**:  
+> - Paper: https://arxiv.org/abs/2407.05872
+> - Code: https://github.com/lucidrains/adam-atan2-pytorch
 
 ---
 
@@ -185,60 +175,17 @@ This is especially effective for **noisy training, small batch sizes, and high l
 
 > 💡 **Best Practice**: Set `K_warmup_steps` equal to your standard LR warmup steps. During warmup, the optimizer uses the static `beta2`; adaptation begins only after warmup ends.
 
-> 🔍 **Debugging Aid**: Enable `K_Logging` to monitor (min, max, mean) of dynamic β₂ values across layers every *N* steps.
-
-#### 📊 Performance Validation
-
-**ADAMW_ADV - full SDXL finetuning (aggressive LR: 3e-5) (BS=4, 2.5K steps)**
-<img width="1460" height="382" alt="image" src="https://github.com/user-attachments/assets/007f278a-fbac-4f3d-9cc7-274c3b959cdd" />
-
-- 🟣 Fixed `beta2=0.999`
-- 🟠 Auto K-beta
-
-**Observations:**
-- K-beta is clearly better and more robust/stable for high LRs.
-
 > 📚 **Reference**:
 > - Paper: [Kourkoutas-β: A Sunspike-Driven Adam Optimizer with Desert Flair](https://arxiv.org/abs/2508.12996)
 > - Code: [kbeta](https://github.com/sck-at-ucy/kbeta)
 
 ---
 
-## Recommended Preset (Tested on LoRA/FT/Embedding)
-
-```yaml
-Learning Rate: 1
-optimizer: PRODIGY_Adv
-settings:
-  - beta1: 0.99 # Controls momentum decay, ~100-step effective memory. Adjust to 0.999 (1000 steps) or 0.9999 (10000 steps) based on training length and stability needs.
-  - beta2: 0.999
-  - kourkoutas_beta: True   # For Kourkoutas-β
-  - K-β Warmup Steps: 50    # Or 100, 200, depending on your run
-  - Simplified_AdEMAMix: True
-  - Grad α: 100
-  - OrthoGrad: True
-  - weight_decay: 0.0
-  - initial_d:
-      • LoRA: 1e-8
-      • Full fine-tune: 1e-10
-      • Embedding: 1e-7
-  - d_coef: 1
-  - d_limiter: True # To stablizie Prodigy with Simplified_AdEMAMix
-  - factored: False  # Can be true or false, quality should not degrade due to Simplified_AdEMAMix’s high tolerance to 1-bit factorization.
-```
-
-> ✅ **Why it works**:
-> - `Kourkoutas-β` handles beta2 values
-> - `Simplified_AdEMAMix` ensures responsiveness in small-batch noise
-> - `OrthoGrad` prevents overfitting without weight decay
-
----
-
 ## 📚 References
 
-1. [Revisiting BFloat16 Training](https://arxiv.org/abs/2010.06192)
-2. [SMMF: Square-Matricized Momentum Factorization](https://arxiv.org/abs/2412.08894)
-3. [The AdEMAMix Optimizer](https://arxiv.org/abs/2409.03137)
-4. [Connections between Schedule-Free Optimizers, AdEMAMix, and Accelerated SGD](https://arxiv.org/abs/2502.02431)
-5. [AdaMeM: Memory Efficient Momentum for Adafactor](https://openreview.net/forum?id=fZqMVTz7K5)
+1. [Revisiting BFloat16 Training](https://arxiv.org/abs/2010.06192)  
+2. [SMMF: Square-Matricized Momentum Factorization](https://arxiv.org/abs/2412.08894)  
+3. [The AdEMAMix Optimizer](https://arxiv.org/abs/2409.03137)  
+4. [Connections between Schedule-Free Optimizers, AdEMAMix, and Accelerated SGD](https://arxiv.org/abs/2502.02431)  
 6. [Kourkoutas-β: A Sunspike-Driven Adam Optimizer with Desert Flair](https://arxiv.org/abs/2508.12996)
+7. [Scaling Exponents Across Parameterizations and Optimizers](https://arxiv.org/abs/2407.05872)
