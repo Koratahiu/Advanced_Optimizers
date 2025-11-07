@@ -1,6 +1,6 @@
 import torch
 
-from ..util.BF16_Stochastic_Rounding import add_stochastic_
+from ..util.BF16_Stochastic_Rounding import add_stochastic_, set_seed as set_stochastic_rounding_seed
 from ..util.Newton_Schulz import _newton_schulz_iteration
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
@@ -186,6 +186,13 @@ class Muon_adv(torch.optim.Optimizer):
             torch._dynamo.config.cache_size_limit = 8192
             self.compile(fullgraph=True)
 
+        if self.stochastic_rounding:
+            # For deterministic stochastic rounding, we need to seed the generator
+            # for each device used by the parameters.
+            devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
+            for device in devices:
+                set_stochastic_rounding_seed(device)
+
     @property
     def supports_fused_back_pass(self):
         return True
@@ -363,14 +370,14 @@ class Muon_adv(torch.optim.Optimizer):
                 update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
                 del mean_squared_update
 
-                # RMS-aligned rescaling
-                if group['rms_rescaling']:
-                    rms_target = 0.2 # default (Adam) value for RMS
-                    update_norm = torch.linalg.vector_norm(update)
-                    update = update.view(p.shape).mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
-                    del update_norm
-                else:
-                    update = update.view(p.shape).mul_(lr)
+            # RMS-aligned rescaling
+            if group['rms_rescaling']:
+                rms_target = 0.2 # default (Adam) value for RMS
+                update_norm = torch.linalg.vector_norm(update)
+                update = update.view(p.shape).mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
+                del update_norm
+            else:
+                update = update.view(p.shape).mul_(lr)
 
             state['sign_buf'] = _pack_bools(mt_buf > 0)
             _nnmf(mt_buf.abs(), out=(state['mu_mbuf_nmf'], state['mv_mbuf_nmf']))

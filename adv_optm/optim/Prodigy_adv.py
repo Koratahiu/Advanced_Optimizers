@@ -5,7 +5,7 @@ import math
 
 from typing import Optional, Callable
 
-from ..util.BF16_Stochastic_Rounding import add_stochastic_
+from ..util.BF16_Stochastic_Rounding import add_stochastic_, set_seed as set_stochastic_rounding_seed
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -212,6 +212,13 @@ class Prodigy_adv(torch.optim.Optimizer):
             self.kourkoutas_helper = KourkoutasHelper(self)
         self.init_step()
 
+        if self.stochastic_rounding:
+            # For deterministic stochastic rounding, we need to seed the generator
+            # for each device used by the parameters.
+            devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
+            for device in devices:
+                set_stochastic_rounding_seed(device)
+
     @property
     def supports_fused_back_pass(self):
         return True
@@ -310,7 +317,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
             # Get the dynamic beta2 calculated in prepare_step()
-            beta2 = self.kourkoutas_helper.get_beta2(p, group, current_step)
+            beta2 = self.kourkoutas_helper.get_beta2(p, group)
         else:
             beta2 = self.beta2_default
 

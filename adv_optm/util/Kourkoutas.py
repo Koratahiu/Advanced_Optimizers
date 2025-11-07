@@ -155,7 +155,7 @@ class KourkoutasHelper:
             # Accumulate for the *next* step's prepare_step call
             self.layer_state[layer_key]['sum_sq_accumulator'] += torch.sum(grad.detach().pow(2)).float()
 
-    def get_beta2(self, p: torch.Tensor, group: dict, current_step: int) -> float:
+    def get_beta2(self, p: torch.Tensor, group: dict) -> float:
         """
         Gets the appropriate beta2 for the current parameter, handling warmup and dynamic value fetching.
         """
