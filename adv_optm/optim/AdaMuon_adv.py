@@ -89,7 +89,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         params,
         lr: float = 1e-3,
         betas: tuple[float, float] = (0.95, 0.95),
-        weight_decay: float = 0.1,
+        weight_decay: float = 0,
         eps: float = 1e-8,
         rms_rescaling: bool = True,
         ns_steps: int = 5,

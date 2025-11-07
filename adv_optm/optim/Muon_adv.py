@@ -677,11 +677,12 @@ class Muon_adv(torch.optim.Optimizer):
 
             # Dispatch to compiled or uncompiled Adam step
             if is_compiled and self._compiled_adam_step is not None:
-                # Tensors must be used for compiled functions
-                lr_tensor = torch.tensor(lr, device=p.device)
-                bc1_tensor = torch.tensor(bias_correction1, device=p.device)
-                bc2_tensor = torch.tensor(bias_correction2, device=p.device)
-                self._compiled_adam_step(p, grad, state, group, lr_tensor, bc1_tensor, bc2_tensor)
+                # convert to tensors for compiled path once a step
+                if not hasattr(self, 'lr_adam_tensor') or self.lr_adam_tensor is None:
+                    self.lr_adam_tensor = torch.tensor(group['lr'])
+                    self.bc1 = torch.tensor(bias_correction1)
+                    self.bc2 = torch.tensor(bias_correction2)
+                self._compiled_adam_step(p, grad, state, group, self.lr_adam_tensor, self.bc1, self.bc2)
             else:
                 self._adam_step_parameter(p, grad, state, group, lr, bias_correction1, bias_correction2)
         else: # Muon path
@@ -689,6 +690,10 @@ class Muon_adv(torch.optim.Optimizer):
             if is_compiled and self._compiled_muon_step is not None:
                 lr_tensor = torch.tensor(lr, device=p.device)
                 self._compiled_muon_step(p, grad, state, group, lr_tensor)
+                # convert to tensors for compiled path once a step
+                if not hasattr(self, 'lr_tensor') or self.lr_tensor is None:
+                    self.lr_tensor = torch.tensor(group['lr'])
+                self._compiled_muon_step(p, grad, state, group, self.lr_tensor)
             else:
                 self._muon_step_parameter(p, grad, state, group, lr)
 
@@ -711,4 +716,8 @@ class Muon_adv(torch.optim.Optimizer):
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
 
+        if self.param_groups[0].get('compiled_optimizer', False):
+            # Reset compile tensors once a step
+            self.lr_tensor = None
+            self.lr_adam_tensor = None
         return loss
