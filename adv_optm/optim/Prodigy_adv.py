@@ -520,7 +520,10 @@ class Prodigy_adv(torch.optim.Optimizer):
             if global_d_denom > 0:
                 d_hat = d_coef * global_d_numerator / global_d_denom
                 if g_group.get('d_limiter', False):
-                    d_hat = min(self.d * (2 ** 0.25), d_hat)
+                    if g_group.get('Simplified_AdEMAMix', False):
+                        d_hat = min(self.d * (2 ** 0.1), d_hat)
+                    else:
+                        d_hat = min(self.d * (2 ** 0.25), d_hat)
                 if self.d == g_group['d0']:
                     self.d = max(self.d, d_hat)
                 d_max = max(d_max, d_hat)

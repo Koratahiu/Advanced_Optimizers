@@ -5,6 +5,8 @@ from .optim import (
     Simplified_AdEMAMix,
     Lion_adv,
     Lion_Prodigy_adv,
+    Muon_adv,
+    AdaMuon_adv,
 )
 
 __all__ = [
@@ -14,6 +16,8 @@ __all__ = [
     "Simplified_AdEMAMix",
     "Lion_adv",
     "Lion_Prodigy_adv",
+    "Muon_adv",
+    "AdaMuon_adv",
 ]
 
-__version__ = "1.1.4"
+__version__ = "1.2.0"
