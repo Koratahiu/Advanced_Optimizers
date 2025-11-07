@@ -41,7 +41,7 @@ class KourkoutasHelper:
             # TODO find a better way to safeguard the embeddings
 
         for group in self.optimizer.param_groups:
-            if not group.get('kourkoutas_beta', False):
+            if not group.get('kourkoutas_beta', False) and not group.get('adam_kourkoutas_beta', False):
                 continue
 
             for p in group['params']:
