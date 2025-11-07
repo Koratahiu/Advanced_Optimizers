@@ -241,6 +241,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 elif len(p.shape) >= 2:
                     state['normuon_v'] = torch.zeros(p.shape[0], device=p.device, dtype=torch.float32)
 
+            group['adam_kourkoutas_beta'] = False
+
         elif optim_type == 'adam':
 
             state['step'] = 0
