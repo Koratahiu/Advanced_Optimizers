@@ -361,7 +361,7 @@ class Muon_adv(torch.optim.Optimizer):
                 v_t.mul_(beta2_normuon).add_(mean_squared_update, alpha=1 - beta2_normuon)
                 # Normalize update
                 update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
-                del update_norm
+                del mean_squared_update
 
                 # RMS-aligned rescaling
                 if group['rms_rescaling']:
