@@ -3,7 +3,7 @@ from typing import Optional, Callable
 
 import math
 
-from ..util.param_update import apply_parameter_update
+from ..util.param_update import apply_parameter_update, set_seed as set_stochastic_rounding_seed
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -155,6 +155,13 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         if compiled_optimizer:
             torch._dynamo.config.cache_size_limit = 8192
             self.compile(fullgraph=True)
+
+        if self.stochastic_rounding:
+            # For deterministic stochastic rounding, we need to seed the generator
+            # for each device used by the parameters.
+            devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
+            for device in devices:
+                set_stochastic_rounding_seed(device)
 
     @property
     def supports_fused_back_pass(self):
