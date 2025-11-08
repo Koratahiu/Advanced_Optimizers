@@ -1,6 +1,6 @@
 import torch
 
-from ..util.param_update import apply_parameter_update, set_seed as set_stochastic_rounding_seed
+from ..util import param_update
 from ..util.Newton_Schulz import _newton_schulz_iteration
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
@@ -193,7 +193,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             # for each device used by the parameters.
             devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
             for device in devices:
-                set_stochastic_rounding_seed(device)
+                param_update.set_seed(device)
 
     @property
     def supports_fused_back_pass(self):
@@ -291,7 +291,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
     @torch.no_grad()
-    def _muon_step_parameter(self, p, grad, state, group, lr):
+    def _muon_step_parameter(self, p, grad, state, group, lr, random_int_tensor: torch.Tensor | None = None):
         # Retrieve hyperparameters
         beta1, beta2 = group['betas']
         nesterov = group['nesterov']
@@ -454,8 +454,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     )
                 del signed_m_buf
 
-                update = update.view(original_shape)
-
                 if group['normuon_variant']:
                     # NorMuon Logic
                     v_t = state['normuon_v']
@@ -465,7 +463,9 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     # Normalize update
                     update.div_(v_t.sqrt().unsqueeze(1).add_(group['eps']))
                     del mean_squared_update
+                    update = update.view(original_shape)
                 else:
+                    update = update.view(original_shape)
                     # Original AdaMuon Logic
                     vt_buf = state['second_momentum_buffer']
                     vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
@@ -483,10 +483,10 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 if group['rms_rescaling']:
                     rms_target = 0.2 # default (Adam) value for RMS
                     update_norm = torch.linalg.vector_norm(update)
-                    update = update.view(p.shape).mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
+                    update.mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
                     del update_norm
                 else:
-                    update = update.view(p.shape).mul_(lr)
+                    update.mul_(lr)
 
             else: # Fallback to standard SGD with momentum for 1D params (biases, etc.)
                 # Momentum update
@@ -502,10 +502,10 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 update.mul_(lr)
 
         # Param Update
-        apply_parameter_update(self, p, group, update, lr)
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 
     @torch.no_grad()
-    def _adam_step_parameter(self, p, grad, state, group, lr, bias_correction1, bias_correction2):
+    def _adam_step_parameter(self, p, grad, state, group, lr, bias_correction1, bias_correction2, random_int_tensor: torch.Tensor | None = None):
         if grad.dtype != torch.float32 and state.get('factored', False):
             grad = grad.float()
         if group.get("adam_orthogonal_gradient"):
@@ -628,7 +628,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             update.mul_(step_size)
 
         # Param Update
-        apply_parameter_update(self, p, group, update, lr, group["adam_weight_decay"])
+        param_update.apply_parameter_update(self, p, group, update, lr, group["adam_weight_decay"], random_int_tensor=random_int_tensor)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
@@ -647,6 +647,12 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
         lr = group['lr']
         is_compiled = group.get('compiled_optimizer', False)
+
+        # Pre-generate random tensor for stochastic rounding if needed.
+        # This is done outside the compiled function path.
+        random_int_tensor = None
+        if p.dtype == torch.bfloat16 and self.stochastic_rounding and is_compiled:
+            random_int_tensor = param_update._get_random_int_for_sr(p)
 
         if use_adam:
             step = state['step']
@@ -674,7 +680,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     self.lr_adam_tensor = torch.tensor(group['lr'])
                     self.bc1 = torch.tensor(bias_correction1)
                     self.bc2 = torch.tensor(bias_correction2)
-                self._compiled_adam_step(p, grad, state, group, self.lr_adam_tensor, self.bc1, self.bc2)
+                self._compiled_adam_step(p, grad, state, group, self.lr_adam_tensor, self.bc1, self.bc2, random_int_tensor)
             else:
                 self._adam_step_parameter(p, grad, state, group, lr, bias_correction1, bias_correction2)
         else: # Muon path
@@ -683,7 +689,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 # convert to tensors for compiled path once a step
                 if not hasattr(self, 'lr_tensor') or self.lr_tensor is None:
                     self.lr_tensor = torch.tensor(group['lr'])
-                self._compiled_muon_step(p, grad, state, group, self.lr_tensor)
+                self._compiled_muon_step(p, grad, state, group, self.lr_tensor, random_int_tensor)
             else:
                 self._muon_step_parameter(p, grad, state, group, lr)
 
