@@ -450,8 +450,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     )
                 del signed_m_buf
 
-                update = update.view(original_shape)
-
                 if group['normuon_variant']:
                     # NorMuon Logic
                     v_t = state['normuon_v']
@@ -461,7 +459,9 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     # Normalize update
                     update.div_(v_t.sqrt().unsqueeze(1).add_(group['eps']))
                     del mean_squared_update
+                    update = update.view(original_shape)
                 else:
+                    update = update.view(original_shape)
                     # Original AdaMuon Logic
                     vt_buf = state['second_momentum_buffer']
                     vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
@@ -479,10 +479,10 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 if group['rms_rescaling']:
                     rms_target = 0.2 # default (Adam) value for RMS
                     update_norm = torch.linalg.vector_norm(update)
-                    update = update.view(p.shape).mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
+                    update.mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
                     del update_norm
                 else:
-                    update = update.view(p.shape).mul_(lr)
+                    update.mul_(lr)
 
             else: # Fallback to standard SGD with momentum for 1D params (biases, etc.)
                 # Momentum update
