@@ -1,9 +1,8 @@
 import torch
 from torch import Tensor
-
 from typing import Dict, Any
 
-generator = None
+_generators: Dict[torch.device, torch.Generator] = {}
 
 def apply_parameter_update(
     self,
@@ -73,10 +72,10 @@ def set_seed(device: torch.device):
     This ensures that the sequence of random numbers used for stochastic
     rounding is reproducible.
     """
-    global generator
-    if generator is None or generator.device != device:
-        generator = torch.Generator(device=device)
-    generator.manual_seed(42)
+    global _generators
+    if device not in _generators:
+        _generators[device] = torch.Generator(device=device)
+    _generators[device].manual_seed(42)
 
 def copy_stochastic_(target: Tensor, source: Tensor):
     """
@@ -90,7 +89,13 @@ def copy_stochastic_(target: Tensor, source: Tensor):
         target: the target tensor with dtype=bfloat16
         source: the target tensor with dtype=float32
     """
-    global generator
+    global _generators
+    device = source.device
+
+    if device not in _generators:
+        set_seed(device)
+    
+    generator = _generators[device]
 
     # create a random 16 bit integer
     result = torch.randint(
