@@ -39,7 +39,7 @@ def apply_parameter_update(
         if wd != 0:
             if cautious:
                 # Cautious Weight Decay
-                mask = (update_fp32 * p_fp32 > 0).float()
+                mask = (update_fp32 * p_fp32 >= 0).float()
                 p_fp32.addcmul_(p_fp32, mask, value=-wd * lr)
                 del mask
             else:
@@ -63,7 +63,7 @@ def apply_parameter_update(
         if wd != 0:
             if cautious:
                 # Cautious Weight Decay
-                mask = (update * p.data > 0).to(p.dtype)
+                mask = (update * p.data >= 0).to(p.dtype)
                 p.data.addcmul_(p.data, mask, value=-wd * lr)
                 del mask
             else:
