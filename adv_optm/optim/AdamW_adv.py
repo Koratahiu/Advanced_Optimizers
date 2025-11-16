@@ -1,7 +1,7 @@
 import torch
 from typing import Optional, Callable
 
-from ..util.param_update import apply_parameter_update, set_seed as set_stochastic_rounding_seed
+from ..util import param_update
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -155,7 +155,7 @@ class AdamW_adv(torch.optim.Optimizer):
             # for each device used by the parameters.
             devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
             for device in devices:
-                set_stochastic_rounding_seed(device)
+                param_update.set_seed(device)
 
     @property
     def supports_fused_back_pass(self):
@@ -217,7 +217,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
     @torch.no_grad()
-    def __step_parameter(self, p: torch.Tensor, group: dict, lr: torch.Tensor | float, bias_correction1: torch.Tensor | float, bias_correction2: torch.Tensor | float):
+    def __step_parameter(self, p: torch.Tensor, group: dict, lr: torch.Tensor | float, bias_correction1: torch.Tensor | float, bias_correction2: torch.Tensor | float, random_int_tensor: torch.Tensor | None = None):
         if p.grad is None:
             return
 
@@ -350,7 +350,7 @@ class AdamW_adv(torch.optim.Optimizer):
             update.mul_(step_size)
 
         # Param Update
-        apply_parameter_update(self, p, group, update, lr)
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
@@ -358,6 +358,11 @@ class AdamW_adv(torch.optim.Optimizer):
         state = self.state[p]
 
         step = state['step']
+
+        # Pre-generate random tensor for stochastic rounding if needed.
+        random_int_tensor = None
+        if p.dtype == torch.bfloat16 and self.stochastic_rounding and group.get('compiled_optimizer', False):
+            random_int_tensor = param_update._get_random_int_for_sr(p)
 
         if group['use_bias_correction']:
             current_step = step + 1
@@ -382,7 +387,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 self.lr_tensor = torch.tensor(group['lr'], device=p.device)
                 self.bc1_tensor = torch.tensor(bias_correction1, device=p.device)
                 self.bc2_tensor = torch.tensor(bias_correction2, device=p.device)
-            self._compiled_step_parameter(p, group, self.lr_tensor, self.bc1_tensor, self.bc2_tensor)
+            self._compiled_step_parameter(p, group, self.lr_tensor, self.bc1_tensor, self.bc2_tensor, random_int_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)

@@ -1,7 +1,7 @@
 import torch
 from typing import Callable, Optional
 
-from ..util.param_update import apply_parameter_update, set_seed as set_stochastic_rounding_seed
+from ..util import param_update
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf, _unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -183,7 +183,7 @@ class Adopt_adv(torch.optim.Optimizer):
             # for each device used by the parameters.
             devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
             for device in devices:
-                set_stochastic_rounding_seed(device)
+                param_update.set_seed(device)
 
     @property
     def supports_fused_back_pass(self): return True
@@ -262,7 +262,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
 
     @torch.no_grad()
-    def __step_parameter(self, p: torch.Tensor, group: dict, lr: torch.Tensor | float):
+    def __step_parameter(self, p: torch.Tensor, group: dict, lr: torch.Tensor | float, random_int_tensor: torch.Tensor | None = None):
         if p.grad is None:
             return
 
@@ -435,7 +435,7 @@ class Adopt_adv(torch.optim.Optimizer):
             vt.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
 
         # Param Update
-        apply_parameter_update(self, p, group, update, lr)
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
@@ -451,6 +451,11 @@ class Adopt_adv(torch.optim.Optimizer):
             state['step'] += 1
             return
 
+        # Pre-generate random tensor for stochastic rounding if needed.
+        random_int_tensor = None
+        if p.dtype == torch.bfloat16 and self.stochastic_rounding and group.get('compiled_optimizer', False):
+            random_int_tensor = param_update._get_random_int_for_sr(p)
+
         if group.get('kourkoutas_beta', False):
             # Prepare Kourkoutas-β once per step using the global step counter.
             self.kourkoutas_helper.maybe_prepare_step(step)
@@ -463,7 +468,7 @@ class Adopt_adv(torch.optim.Optimizer):
             if not hasattr(self, 'lr_tensor') or self.lr_tensor is None:
                 # convert to tensors for compiled path once a step
                 self.lr_tensor = torch.tensor(group['lr'], device=p.device)
-            self._compiled_step_parameter(p, group, self.lr_tensor)
+            self._compiled_step_parameter(p, group, self.lr_tensor, random_int_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)

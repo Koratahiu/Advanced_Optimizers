@@ -2,7 +2,7 @@ import torch
 
 import math
 
-from ..util.param_update import apply_parameter_update, set_seed as set_stochastic_rounding_seed
+from ..util import param_update
 from ..util.Newton_Schulz import _newton_schulz_iteration
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
@@ -197,7 +197,7 @@ class Muon_adv(torch.optim.Optimizer):
             # for each device used by the parameters.
             devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
             for device in devices:
-                set_stochastic_rounding_seed(device)
+                param_update.set_seed(device)
 
     @property
     def supports_fused_back_pass(self):
@@ -298,7 +298,7 @@ class Muon_adv(torch.optim.Optimizer):
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
     @torch.no_grad()
-    def _muon_step_parameter(self, p, grad, state, group, lr):
+    def _muon_step_parameter(self, p, grad, state, group, lr, random_int_tensor: torch.Tensor | None = None):
         beta1 = group['beta1']
         nesterov = group['nesterov']
         Simplified_AdEMAMix = group['Simplified_AdEMAMix']
@@ -507,10 +507,10 @@ class Muon_adv(torch.optim.Optimizer):
                 update.mul_(lr)
 
         # Param Update
-        apply_parameter_update(self, p, group, update, lr)
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 
     @torch.no_grad()
-    def _adam_step_parameter(self, p, grad, state, group, lr, bias_correction1, bias_correction2):
+    def _adam_step_parameter(self, p, grad, state, group, lr, bias_correction1, bias_correction2, random_int_tensor: torch.Tensor | None = None):
         if grad.dtype != torch.float32 and state.get('factored', False):
             grad = grad.float()
         if group.get("adam_orthogonal_gradient"):
@@ -633,7 +633,7 @@ class Muon_adv(torch.optim.Optimizer):
             update.mul_(step_size)
 
         # Param Update
-        apply_parameter_update(self, p, group, update, lr, group["adam_weight_decay"])
+        param_update.apply_parameter_update(self, p, group, update, lr, group["adam_weight_decay"], random_int_tensor=random_int_tensor)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
@@ -652,6 +652,11 @@ class Muon_adv(torch.optim.Optimizer):
 
         lr = group['lr']
         is_compiled = group.get('compiled_optimizer', False)
+
+        # Pre-generate random tensor for stochastic rounding if needed.
+        random_int_tensor = None
+        if p.dtype == torch.bfloat16 and self.stochastic_rounding and is_compiled:
+            random_int_tensor = param_update._get_random_int_for_sr(p)
 
         if use_adam:
             step = state['step']
@@ -679,7 +684,7 @@ class Muon_adv(torch.optim.Optimizer):
                     self.lr_adam_tensor = torch.tensor(group['lr'])
                     self.bc1 = torch.tensor(bias_correction1)
                     self.bc2 = torch.tensor(bias_correction2)
-                self._compiled_adam_step(p, grad, state, group, self.lr_adam_tensor, self.bc1, self.bc2)
+                self._compiled_adam_step(p, grad, state, group, self.lr_adam_tensor, self.bc1, self.bc2, random_int_tensor)
             else:
                 self._adam_step_parameter(p, grad, state, group, lr, bias_correction1, bias_correction2)
         else: # Muon path
@@ -688,7 +693,7 @@ class Muon_adv(torch.optim.Optimizer):
                 # convert to tensors for compiled path once a step
                 if not hasattr(self, 'lr_tensor') or self.lr_tensor is None:
                     self.lr_tensor = torch.tensor(group['lr'])
-                self._compiled_muon_step(p, grad, state, group, self.lr_tensor)
+                self._compiled_muon_step(p, grad, state, group, self.lr_tensor, random_int_tensor)
             else:
                 self._muon_step_parameter(p, grad, state, group, lr)
 

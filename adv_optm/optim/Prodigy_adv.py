@@ -5,7 +5,7 @@ import math
 
 from typing import Optional, Callable
 
-from ..util.param_update import apply_parameter_update, set_seed as set_stochastic_rounding_seed
+from ..util import param_update
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -226,7 +226,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             # for each device used by the parameters.
             devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
             for device in devices:
-                set_stochastic_rounding_seed(device)
+                param_update.set_seed(device)
 
     @property
     def supports_fused_back_pass(self):
@@ -309,7 +309,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 state['p0'] = torch.tensor(0, device=device, dtype=p.dtype)
 
 
-    def __step_parameter(self, p: torch.Tensor, group: dict, d: torch.Tensor | float, dlr: torch.Tensor | float):
+    def __step_parameter(self, p: torch.Tensor, group: dict, d: torch.Tensor | float, dlr: torch.Tensor | float, random_int_tensor: torch.Tensor | None = None):
         if p.grad is None:
             return
 
@@ -475,12 +475,18 @@ class Prodigy_adv(torch.optim.Optimizer):
                 del state['p0']
 
         # Param Update
-        apply_parameter_update(self, p, group, update, dlr)
+        param_update.apply_parameter_update(self, p, group, update, dlr, random_int_tensor=random_int_tensor)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
         if hasattr(p, "_fsdp_flattened"):
             self.fsdp_in_use = True
+
+        # Pre-generate random tensor for stochastic rounding if needed.
+        random_int_tensor = None
+        if p.dtype == torch.bfloat16 and self.stochastic_rounding and group.get('compiled_optimizer', False):
+            random_int_tensor = param_update._get_random_int_for_sr(p)
+
 
         if self.kourkoutas_beta:
             self.kourkoutas_helper.maybe_prepare_step(group['k'])
@@ -496,7 +502,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 self.d_denom = torch.tensor(self.d_denom, device=p.device)
                 self.d_tensor = torch.tensor(self.d, device=p.device)
                 self.dlr_tensor = torch.tensor(self.dlr, device=p.device)
-            self._compiled_step_parameter(p, group, self.d_tensor, self.dlr_tensor)
+            self._compiled_step_parameter(p, group, self.d_tensor, self.dlr_tensor, random_int_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)

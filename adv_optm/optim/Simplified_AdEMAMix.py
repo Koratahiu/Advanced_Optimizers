@@ -3,7 +3,7 @@ from typing import Optional, Callable
 
 import math
 
-from ..util.param_update import apply_parameter_update, set_seed as set_stochastic_rounding_seed
+from ..util import param_update
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -161,7 +161,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             # for each device used by the parameters.
             devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
             for device in devices:
-                set_stochastic_rounding_seed(device)
+                param_update.set_seed(device)
 
     @property
     def supports_fused_back_pass(self):
@@ -213,7 +213,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
 
     @torch.no_grad()
-    def __step_parameter(self, p: torch.Tensor, group: dict, lr: torch.Tensor | float, beta1, num_sum, den_sum):
+    def __step_parameter(self, p: torch.Tensor, group: dict, lr: torch.Tensor | float, beta1, num_sum, den_sum, random_int_tensor: torch.Tensor | None = None):
         if p.grad is None:
             return
 
@@ -290,7 +290,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             update.mul_(group['lr'])
 
         # Param Update
-        apply_parameter_update(self, p, group, update, lr)
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
@@ -303,7 +303,16 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             # Prepare Kourkoutas-β once per step using the global step counter.
             self.kourkoutas_helper.maybe_prepare_step(step)
 
+        # TODO, remove
+        if not hasattr(self, 'beta1'):
+            self.beta1 = group["betas"][0]
+
         self.state[p]['step'] += 1
+
+        # Pre-generate random tensor for stochastic rounding if needed.
+        random_int_tensor = None
+        if p.dtype == torch.bfloat16 and self.stochastic_rounding and group.get('compiled_optimizer', False):
+            random_int_tensor = param_update._get_random_int_for_sr(p)
 
         if not group.get('compiled_optimizer', False):
             self.__step_parameter(p, group, group['lr'], self.beta1, self.num_sum, self.den_sum)
@@ -312,7 +321,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
                 self.lr_tensor = torch.tensor(group['lr'], device=p.device)
                 self.num_sum_tesnor = torch.tensor(self.num_sum, device=p.device)
                 self.den_sum_tesnor = torch.tensor(self.den_sum, device=p.device)
-            self._compiled_step_parameter(p, group, self.lr_tensor, self.beta1, self.num_sum_tesnor, self.den_sum_tesnor)
+            self._compiled_step_parameter(p, group, self.lr_tensor, self.beta1, self.num_sum_tesnor, self.den_sum_tesnor, random_int_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)

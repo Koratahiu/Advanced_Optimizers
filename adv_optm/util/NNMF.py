@@ -10,7 +10,7 @@ def _nnmf(matrix: torch.Tensor, out: tuple):
     torch.sum(matrix, dim=1, out=out[0])
     torch.sum(matrix, dim=0, out=out[1])
 
-    # Add a small epsilon for numerical stability and to remove
+    # A small epsilon for numerical stability and to remove
     # data-dependent branching, making it compatible with torch.dynamo.
     epsilon = 1e-12
 

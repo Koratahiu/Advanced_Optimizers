@@ -90,14 +90,16 @@ def set_seed(device: torch.device):
 def _get_random_int_for_sr(source: Tensor) -> Tensor:
     """
     Generates a random int32 tensor for stochastic rounding.
-    This function is NOT torch.compile-friendly due to its use of torch.Generator.
+    This function is not torch.compile-path friendly due to its use of torch.Generator.
     """
     global _generators
     device = source.device
 
     if device not in _generators:
         set_seed(device)
-    
+
+    # TODO, this is a workaround until torch compile error 
+    # NotImplementedError: UserDefinedObjectVariable is fixed
     generator = _generators[device]
 
     # create a random 16 bit integer
