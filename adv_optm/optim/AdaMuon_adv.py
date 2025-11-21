@@ -309,10 +309,13 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             # Update momentum in full-size
             grad_reshaped = grad.view(d1, d2)
-            mt_buf.mul_(beta1).add_(grad_reshaped)
+            if not Simplified_AdEMAMix:
+                mt_buf.lerp_(grad_reshaped, 1 - beta1)
+            else:
+                mt_buf.mul_(beta1).add_(grad_reshaped)
 
             if nesterov:
-                signed_m_buf = torch.sign(grad_reshaped.add(mt_buf, alpha=beta1))
+                signed_m_buf = torch.sign(grad_reshaped.lerp(mt_buf, beta1))
             elif Simplified_AdEMAMix:
                 signed_m_buf = torch.sign(mt_buf.add(grad_reshaped, alpha=alpha_grad))
             else:
@@ -384,7 +387,11 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 update = update.view(p.shape).mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
                 del update_norm
             else:
-                update = update.view(p.shape).mul_(lr)
+                # Matches original Muon scaling: update *= max(1, rows/cols)**0.5
+                update = update.view(p.shape)
+                r, c = update.size(-2), update.size(-1)
+                scaling_factor = max(1, r / c) ** 0.5
+                update.mul_(scaling_factor * lr)
 
             # Compress updated moments and store new factors
             state['sign_buf'] = _pack_bools(mt_buf > 0)
@@ -403,17 +410,21 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
                 # Momentum update
                 mt_buf = state['momentum_buffer']
-                mt_buf.mul_(beta1).add_(grad)
+                if not Simplified_AdEMAMix:
+                    mt_buf.lerp_(grad, 1 - beta1)
+                else:
+                    mt_buf.mul_(beta1).add_(grad)
 
                 if nesterov:
-                    signed_m_buf = torch.sign(grad.add(mt_buf, alpha=beta1))
+                    signed_m_buf = torch.sign(grad.lerp(mt_buf, beta1))
                 elif Simplified_AdEMAMix:
                     signed_m_buf = torch.sign(mt_buf.add(grad, alpha=alpha_grad))
                 else:
                     signed_m_buf = torch.sign(mt_buf)
 
                 # Flatten if necessary (e.g., for Conv layers)
-                signed_m_buf = signed_m_buf.view(original_shape[0], -1)
+                if signed_m_buf.ndim == 4:
+                    signed_m_buf = signed_m_buf.view(len(signed_m_buf), -1)
 
                 # Orthogonalization step
                 if group['low_rank_ortho']:
@@ -461,8 +472,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     del mean_squared_update
                     update = update.view(original_shape)
                 else:
-                    update = update.view(original_shape)
                     # Original AdaMuon Logic
+                    update = update.view(original_shape)
                     vt_buf = state['second_momentum_buffer']
                     vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
                     # Apply second momentum update (adaptive scaling)
@@ -482,6 +493,10 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     update.mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
                     del update_norm
                 else:
+                    # Matches original Muon scaling: update *= max(1, rows/cols)**0.5
+                    r, c = update.size(-2), update.size(-1)
+                    scaling_factor = max(1, r / c) ** 0.5
+                    update.mul_(scaling_factor)
                     update.mul_(lr)
 
             else: # Fallback to standard SGD with momentum for 1D params (biases, etc.)
