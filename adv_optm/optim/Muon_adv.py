@@ -319,11 +319,14 @@ class Muon_adv(torch.optim.Optimizer):
 
             # Update momentum in full-size
             grad_reshaped = grad.view(d1, d2)
-            mt_buf.mul_(beta1).add_(grad_reshaped)
+            if not Simplified_AdEMAMix:
+                mt_buf.lerp_(grad_reshaped, 1 - beta1)
+            else:
+                mt_buf.mul_(beta1).add_(grad_reshaped)
 
             if nesterov:
                 # Nesterov momentum
-                update = grad_reshaped.add(mt_buf, alpha=beta1)
+                update = grad.lerp_(mt_buf, beta1)
             elif Simplified_AdEMAMix:
                 update = torch.add(mt_buf, grad_reshaped, alpha=alpha_grad)
             else:
@@ -376,18 +379,20 @@ class Muon_adv(torch.optim.Optimizer):
                 update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
                 del mean_squared_update
 
-                # RMS-aligned rescaling
-                if group['rms_rescaling']:
-                    rms_target = 0.2 # default (Adam) value for RMS
-                    if not Simplified_AdEMAMix:
-                        update_norm = torch.linalg.vector_norm(update)
-                        update = update.view(p.shape).mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
-                        del update_norm
-                    else:
-                        A, B = update.shape 
-                        update = update.view(p.shape).mul_(rms_target * lr * math.sqrt(max(A, B)))
-                else:
-                    update = update.view(p.shape).mul_(lr)
+            # RMS-aligned rescaling
+            if group['rms_rescaling']:
+                rms_target = 0.2 # default (Adam) value for RMS
+                update_norm = torch.linalg.vector_norm(update)
+                update = update.view(p.shape).mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
+                del update_norm
+            else:
+                # Matches original Muon scaling: update *= max(1, rows/cols)**0.5
+                # update is currently shape (rows, cols)
+                update = update.view(p.shape)
+                r, c = update.size(-2), update.size(-1)
+                scaling_factor = max(1, r / c) ** 0.5
+                update.mul_(scaling_factor * lr)
+                del scaling_factor
 
             state['sign_buf'] = _pack_bools(mt_buf > 0)
             _nnmf(mt_buf.abs(), out=(state['mu_mbuf_nmf'], state['mv_mbuf_nmf']))
@@ -401,21 +406,22 @@ class Muon_adv(torch.optim.Optimizer):
 
                 # Momentum update
                 mt_buf = state['momentum_buffer']
-                mt_buf.mul_(beta1).add_(grad)
+                if not Simplified_AdEMAMix:
+                    mt_buf.lerp_(grad, 1 - beta1)
+                else:
+                    mt_buf.mul_(beta1).add_(grad)
 
                 if nesterov:
                     # Nesterov momentum
-                    update = grad.add(mt_buf, alpha=beta1)
+                    update = grad.lerp(mt_buf, beta1)
                 elif Simplified_AdEMAMix:
                     update = torch.add(mt_buf, grad, alpha=alpha_grad)
                 else:
                     # Standard momentum
                     update = mt_buf.clone()
 
-                # flatten to 2D for orthogonalization.
-                # This is a no-op for 2D tensors and correctly flattens 4D+ tensors.
-                # This removes the dynamic control flow that breaks torch.compile.
-                update = update.view(original_shape[0], -1)
+                if update.ndim == 4:
+                    update = update.view(len(update), -1)
 
                 # Orthogonalization step
                 if group['low_rank_ortho']:
@@ -488,7 +494,12 @@ class Muon_adv(torch.optim.Optimizer):
                     update = update.view(original_shape).mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
                     del update_norm
                 else:
-                    update = update.view(original_shape).mul_(lr)
+                    # Matches original Muon scaling: update *= max(1, rows/cols)**0.5
+                    # update is currently shape (rows, cols)
+                    update = update.view(p.shape)
+                    r, c = update.size(-2), update.size(-1)
+                    scaling_factor = max(1, r / c) ** 0.5
+                    update.mul_(scaling_factor * lr)
 
 
             else: # Fallback to standard SGD with momentum for 1D params (biases, etc.)
