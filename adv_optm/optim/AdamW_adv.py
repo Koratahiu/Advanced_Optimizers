@@ -3,7 +3,7 @@ from typing import Optional, Callable
 
 from ..util.BF16_Stochastic_Rounding import add_stochastic_, set_seed as set_stochastic_rounding_seed
 from ..util.Effective_Shape import _get_effective_shape
-from ..util.NNMF import _nnmf,_unnmf
+from ..util.NNMF import _nnmf, _unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
 from ..util.Kourkoutas import KourkoutasHelper
@@ -49,12 +49,6 @@ class AdamW_adv(torch.optim.Optimizer):
             before it is added to the fast momentum term (`update = mt + alpha * mt_slow`).
             A higher value increases the stabilizing influence of the slow
             momentum. (default: 5.0)
-        t_alpha (Optional[int]): The number of steps for a linear warmup of the
-            `alpha` parameter (only used when `use_AdEMAMix` is `True`). This is
-            highly recommended to prevent instability at the beginning of training,
-            as it gradually introduces the stabilizing slow momentum term. During
-            the warmup, `alpha` ramps from 0 to its target value. If `None`,
-            the scheduler is disabled. (default: None)
         kourkoutas_beta (bool): whether to enable the layer-wise dynamic β₂ logic.
             If `False`, the optimizer behaves as standard AdamW. (default: False)
         beta2_min (float): The minimum value for dynamic β₂, used during periods of
@@ -98,7 +92,6 @@ class AdamW_adv(torch.optim.Optimizer):
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
-        t_alpha: int | None = None,
         kourkoutas_beta: bool = False,
         beta2_min: float = 0.9,
         ema_alpha: float = 0.95,
@@ -126,7 +119,7 @@ class AdamW_adv(torch.optim.Optimizer):
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "vector_reshape": vector_reshape, "use_atan2": use_atan2,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
-            "beta3_ema": beta3_ema, "alpha": alpha, "t_alpha": t_alpha,
+            "beta3_ema": beta3_ema, "alpha": alpha,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
         }
@@ -240,10 +233,6 @@ class AdamW_adv(torch.optim.Optimizer):
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
             alpha = group['alpha']
-            t_alpha = group['t_alpha']
-            alpha_t = alpha
-            if t_alpha is not None and t_alpha > 0 and step < t_alpha:
-                alpha_t = min(step * alpha / t_alpha, alpha)
 
         if state['factored']:
             d1, d2 = state['effective_shape']
@@ -256,8 +245,10 @@ class AdamW_adv(torch.optim.Optimizer):
                     unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
                     torch.where(unpacked_sign, mt, -mt, out=mt)
                     del unpacked_sign
+
                 # Update momentum in full-size
-                mt.mul_(beta1).add_(grad_reshaped, alpha=1.0 - beta1)
+                mt.lerp_(grad_reshaped, 1.0 - beta1)
+
                 if self.grams_moment:
                     update_mt = (grad_reshaped.sign().mul_(mt.abs()))
                 elif self.cautious_mask:
@@ -279,14 +270,18 @@ class AdamW_adv(torch.optim.Optimizer):
                 torch.where(unpacked_sign_slow, mt_slow, -mt_slow, out=mt_slow)
                 del unpacked_sign_slow
 
-                mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=1.0 - beta3_ema)
+                mt_slow.lerp_(grad_reshaped, 1.0 - beta3_ema)
+
                 if beta1 > 0:
-                    update = torch.add(update_mt, mt_slow, alpha=alpha_t)
+                    update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
-                    update = torch.add(grad_reshaped, mt_slow, alpha=alpha_t)
+                    update = grad_reshaped.add_(mt_slow, alpha=alpha)
             else:
-                update = update_mt if beta1 > 0 else grad_reshaped.clone()
-            del grad_reshaped
+                if beta1 > 0:
+                    update = update_mt
+                    del grad_reshaped
+                else:
+                    update = grad_reshaped
 
             if group['use_atan2']:
                 a = 1.2732395
@@ -317,7 +312,8 @@ class AdamW_adv(torch.optim.Optimizer):
 
             if beta1 > 0:
                 exp_avg = state['exp_avg']
-                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg.lerp_(grad, 1.0 - beta1)
+
                 if self.grams_moment:
                     update_mt = grad.sign().mul_(exp_avg.abs())
                 elif self.cautious_mask:
@@ -330,11 +326,12 @@ class AdamW_adv(torch.optim.Optimizer):
 
             if self.use_AdEMAMix:
                 exp_avg_slow = state['exp_avg_slow']
-                exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=1 - beta3_ema)
+                exp_avg_slow.lerp_(grad, 1.0 - beta3_ema)
+
                 if beta1 > 0:
-                    update = torch.add(update_mt, exp_avg_slow, alpha=alpha_t)
+                    update = update_mt.add_(exp_avg_slow, alpha=alpha)
                 else:
-                    update = torch.add(grad, exp_avg_slow, alpha=alpha_t)
+                    update = torch.add(grad, exp_avg_slow, alpha=alpha)
             else:
                 update = update_mt if beta1 > 0 else grad.clone()
 

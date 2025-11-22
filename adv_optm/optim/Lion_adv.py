@@ -136,6 +136,7 @@ class Lion_adv(torch.optim.Optimizer):
             # Factored Path
             d1, d2 = state['effective_shape']
             grad_reshaped = grad.view(d1, d2)
+
             # Reconstruct momentum m_{t-1}
             exp_avg = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
             unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
@@ -145,19 +146,20 @@ class Lion_adv(torch.optim.Optimizer):
                 exp_avg = exp_avg.float()
 
             # Compute update term c_t
-            signed_update = exp_avg.clone().mul_(beta1).add_(grad_reshaped, alpha=(1-beta1)).sign_()
+            update = torch.lerp(grad_reshaped, exp_avg, beta1).sign_()
 
             if self.cautious_mask:
-                mask = (signed_update * grad_reshaped > 0).to(grad_reshaped.dtype)
+                mask = (update * grad_reshaped > 0).to(grad_reshaped.dtype)
                 mask.div_(mask.mean().clamp_(min=1e-3))
-                signed_update.mul_(mask)
+                update.mul_(mask)
                 del mask
 
             # Parameter update
-            update_for_param = signed_update.view(p.shape).mul_(lr)
+            update = update.view(p.shape).mul_(lr)
 
             # Standard Lion momentum update
-            exp_avg.mul_(beta2).add_(grad_reshaped, alpha=1-beta2)
+            # m_t = beta2 * m_{t-1} + (1-beta2) * g_t
+            exp_avg.lerp_(grad_reshaped, 1 - beta2)
             del grad_reshaped
 
             # Compress new momentum m_t and store factors
@@ -172,18 +174,19 @@ class Lion_adv(torch.optim.Optimizer):
             # Compute update term and sign for the update
             if exp_avg.dtype != torch.float32 and self.factored:
                 exp_avg = exp_avg.float()
-            signed_update = exp_avg.clone().mul_(beta1).add_(grad, alpha=(1-beta1)).sign_()
+
+            update = torch.lerp(grad, exp_avg, beta1).sign_()
 
             if self.cautious_mask:
-                mask = (signed_update * grad > 0).to(grad.dtype)
+                mask = (update * grad > 0).to(grad.dtype)
                 mask.div_(mask.mean().clamp_(min=1e-3))
-                signed_update.mul_(mask)
+                update.mul_(mask)
                 del mask
 
-            update_for_param = signed_update.mul_(lr)
+            update.mul_(lr)
 
             # Standard Lion momentum update
-            exp_avg.mul_(beta2).add_(grad, alpha=1-beta2)
+            exp_avg.lerp_(grad, 1 - beta2)
 
         if group["weight_decay"] != 0:
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
@@ -195,11 +198,11 @@ class Lion_adv(torch.optim.Optimizer):
                 )
 
         if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-            add_stochastic_(p.data, -update_for_param)
+            add_stochastic_(p.data, -update)
         else:
-            p.data.add_(-update_for_param)
+            p.data.add_(-update)
 
-        del update_for_param
+        del update
 
     @torch.no_grad()
     def step(self, closure: Optional[callable] = None):
