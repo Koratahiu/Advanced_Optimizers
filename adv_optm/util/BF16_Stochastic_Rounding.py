@@ -1,25 +1,10 @@
 import torch
 from torch import Tensor
 
-from typing import Dict, Any
-
-_generators: Dict[torch.device, torch.Generator] = {}
-
-def set_seed(device: torch.device):
-    """
-    Initializes or resets the deterministic generator for a specific device.
-    This ensures that the sequence of random numbers used for stochastic
-    rounding is reproducible.
-    """
-    global _generators
-    if device not in _generators:
-        _generators[device] = torch.Generator(device=device)
-    _generators[device].manual_seed(42)
-
 def copy_stochastic_(target: Tensor, source: Tensor):
     """
     Nerogar's implementation of stochastic rounding in the paper "Revisiting BFloat16 Training"
-    (https://arxiv.org/abs/2010.06192). Made deterministic.
+    (https://arxiv.org/abs/2010.06192).
     see:
     https://github.com/pytorch/pytorch/issues/120376
     https://github.com/Nerogar/OneTrainer/blob/daae18eaed8c0fa39289b2ff79cc2c1e08577fcb/modules/util/bf16_stochastic_rounding.py
@@ -28,21 +13,12 @@ def copy_stochastic_(target: Tensor, source: Tensor):
         target: the target tensor with dtype=bfloat16
         source: the target tensor with dtype=float32
     """
-    global _generators
-    device = source.device
-    if device not in _generators:
-        set_seed(device)
-    
-    generator = _generators[device]
-
     # create a random 16 bit integer
-    result = torch.randint(
-        size=source.shape,
-        device=source.device,
+    result = torch.randint_like(
+        source,
         dtype=torch.int32,
         low=0,
         high=(1 << 16),
-        generator=generator,
     )
 
     # add the random number to the lower 16 bit of the mantissa
@@ -55,7 +31,6 @@ def copy_stochastic_(target: Tensor, source: Tensor):
     target.copy_(result.view(dtype=torch.float32))
 
     del result
-
 
 def add_stochastic_(input: Tensor, other: Tensor, alpha: float = 1.0):
     """

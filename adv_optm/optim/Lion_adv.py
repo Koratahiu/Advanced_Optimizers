@@ -2,7 +2,7 @@ import torch
 
 from typing import Tuple, Optional
 
-from ..util.BF16_Stochastic_Rounding import add_stochastic_, set_seed as set_stochastic_rounding_seed
+from ..util import param_update
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -22,15 +22,14 @@ class Lion_adv(torch.optim.Optimizer):
         betas (Tuple[float, float], optional): coefficients for computing
             running averages of the update (default: (0.9, 0.99)).
         weight_decay (float, optional): weight decay (L2 penalty) (default: 0.0).
+        cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
+            applied only to parameter coordinates where the sign of the parameter
+            and the sign of the optimizer update align (default: False).
         vector_reshape (bool, optional): whether to reshape 1D vectors into 2D
             matrices to apply low-rank compression (default: True).
         stochastic_rounding (bool, optional): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
         cautious_mask (bool): whether to use the cautious masking technique. (default: False).
-        clip_threshold (float, optional): whether to clip the gradients norm
-            per-parameter as proposed in the paper `Lions and Muons: Optimization via
-            Stochastic Frank-Wolfe` (https://arxiv.org/abs/2506.04192) to make Lion more stable
-            (default: 0.0).
         nnmf_factor (bool): whether to use the factorization or use the
             uncompressed optimizer. (default: True)
     """
@@ -41,12 +40,14 @@ class Lion_adv(torch.optim.Optimizer):
         lr: float = 1e-4,
         betas: Tuple[float, float] = (0.9, 0.99),
         weight_decay: float = 0.0,
-        vector_reshape: bool = True,
+        cautious_wd: bool = False,
+        vector_reshape: bool = False,
         stochastic_rounding: bool = True,
         orthogonal_gradient: bool = False,
         cautious_mask: bool = False,
-        clip_threshold: float = 0.0,
         nnmf_factor: bool = True,
+        # Compiled
+        compiled_optimizer: bool = False,
     ):
         if not lr > 0.0:
             raise ValueError(f"Learning rate must be > 0.0, but got {lr}")
@@ -59,21 +60,28 @@ class Lion_adv(torch.optim.Optimizer):
             lr=lr,
             betas=betas,
             weight_decay=weight_decay,
+            cautious_wd=cautious_wd,
             vector_reshape=vector_reshape,
             orthogonal_gradient=orthogonal_gradient,
-            clip_threshold=clip_threshold,
+            compiled_optimizer=compiled_optimizer,
         )
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
         self.factored = nnmf_factor
         super().__init__(params, defaults)
 
+        self.init_step()
+
+        if compiled_optimizer:
+            torch._dynamo.config.cache_size_limit = 8192
+            self.compile(fullgraph=True)
+
         if self.stochastic_rounding:
             # For deterministic stochastic rounding, we need to seed the generator
             # for each device used by the parameters.
             devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
             for device in devices:
-                set_stochastic_rounding_seed(device)
+                param_update.set_seed(device)
 
     @property
     def supports_fused_back_pass(self) -> bool:
@@ -87,8 +95,36 @@ class Lion_adv(torch.optim.Optimizer):
     def supports_flat_params(self) -> bool:
         return False
 
+    def init_step(self):
+        for group in self.param_groups:
+            for i, p in enumerate(group['params']):
+                self.__init_state(p, group)
+
     @torch.no_grad()
-    def step_parameter(self, p: torch.Tensor, group: dict, i: Optional[int] = None):
+    def __init_state(self, p, group):
+        state = self.state[p]
+
+        if len(state) == 0:
+
+            state['factored'] = (
+                self.factored and
+                not (len(p.shape) == 1 and not group['vector_reshape'])
+            )
+
+            dtype = torch.float32 if self.factored else p.dtype
+
+            if state['factored']:
+                state['effective_shape'] = _get_effective_shape(p.numel())
+                d1, d2 = state['effective_shape']
+                state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
+                state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
+                packed_d2 = (d2 + 7) // 8
+                state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+            else: # Fallback to standard Lion
+                state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
+
+    @torch.no_grad()
+    def __step_parameter(self, p: torch.Tensor, group: dict, lr: torch.Tensor | float, random_int_tensor: torch.Tensor | None = None):
         """Performs a single optimization step on a single parameter."""
         if p.grad is None:
             return
@@ -96,41 +132,13 @@ class Lion_adv(torch.optim.Optimizer):
         grad = p.grad
         if grad.dtype != torch.float32 and self.factored:
             grad = grad.float()
-        if group["clip_threshold"] > 0.0:
-            grad_norm = torch.norm(grad.detach())
-            if grad_norm > group["clip_threshold"]:
-                clip_coef = group["clip_threshold"] / grad_norm
-                grad.mul_(clip_coef)
         if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)
+
         state = self.state[p]
 
-        # State Initialization
-        if 'step' not in state:
-            state['step'] = 0
 
-            should_factor = (
-                self.factored and
-                not (len(p.shape) == 1 and not group['vector_reshape'])
-            )
-
-            state['factored'] = should_factor
-
-            dtype = torch.float32 if self.factored else p.dtype
-
-            if state['factored']:
-                state['effective_shape'] = _get_effective_shape(p.numel())
-                d1, d2 = state['effective_shape']
-                state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
-                state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                packed_d2 = (d2 + 7) // 8
-                state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
-            else: # Fallback to standard Lion
-                state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
-
-        state['step'] += 1
         beta1, beta2 = group["betas"]
-        lr = group["lr"]
 
         if state['factored']:
             # Factored Path
@@ -145,19 +153,20 @@ class Lion_adv(torch.optim.Optimizer):
                 exp_avg = exp_avg.float()
 
             # Compute update term c_t
-            signed_update = exp_avg.clone().mul_(beta1).add_(grad_reshaped, alpha=(1-beta1)).sign_()
+            update = torch.lerp(grad_reshaped, exp_avg, beta1).sign_()
 
             if self.cautious_mask:
-                mask = (signed_update * grad_reshaped > 0).to(grad_reshaped.dtype)
+                mask = (update * grad_reshaped > 0).to(grad_reshaped.dtype)
                 mask.div_(mask.mean().clamp_(min=1e-3))
-                signed_update.mul_(mask)
+                update.mul_(mask)
                 del mask
 
             # Parameter update
-            update_for_param = signed_update.view(p.shape).mul_(lr)
+            update = update.view(p.shape).mul_(lr)
 
             # Standard Lion momentum update
-            exp_avg.mul_(beta2).add_(grad_reshaped, alpha=1-beta2)
+            # m_t = beta2 * m_{t-1} + (1-beta2) * g_t
+            exp_avg.lerp_(grad_reshaped, 1 - beta2)
             del grad_reshaped
 
             # Compress new momentum m_t and store factors
@@ -172,34 +181,41 @@ class Lion_adv(torch.optim.Optimizer):
             # Compute update term and sign for the update
             if exp_avg.dtype != torch.float32 and self.factored:
                 exp_avg = exp_avg.float()
-            signed_update = exp_avg.clone().mul_(beta1).add_(grad, alpha=(1-beta1)).sign_()
+
+            update = torch.lerp(grad, exp_avg, beta1).sign_()
 
             if self.cautious_mask:
-                mask = (signed_update * grad > 0).to(grad.dtype)
+                mask = (update * grad > 0).to(grad.dtype)
                 mask.div_(mask.mean().clamp_(min=1e-3))
-                signed_update.mul_(mask)
+                update.mul_(mask)
                 del mask
 
-            update_for_param = signed_update.mul_(lr)
+            update.mul_(lr)
 
             # Standard Lion momentum update
-            exp_avg.mul_(beta2).add_(grad, alpha=1-beta2)
+            exp_avg.lerp_(grad, 1 - beta2)
 
-        if group["weight_decay"] != 0:
-            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data,
-                                alpha=-group["weight_decay"] * lr)
-            else:
-                p.data.add_(
-                    p.data, alpha=-group["weight_decay"] * lr
-                )
+        # Param Update
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 
-        if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-            add_stochastic_(p.data, -update_for_param)
+    @torch.no_grad()
+    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+
+        # Pre-generate random tensor for stochastic rounding if needed.
+        random_int_tensor = None
+        if p.dtype == torch.bfloat16 and self.stochastic_rounding and group.get('compiled_optimizer', False):
+            random_int_tensor = param_update._get_random_int_for_sr(p)
+
+        if not group.get('compiled_optimizer', False):
+            self.__step_parameter(p, group, group["lr"])
         else:
-            p.data.add_(-update_for_param)
+            if not hasattr(self, 'lr_tensor') or self.lr_tensor is None:
+                # convert to tensors for compiled path once a step
+                self.lr_tensor = torch.tensor(group['lr'], device=p.device)
+            self._compiled_step_parameter(p, group, self.lr_tensor, random_int_tensor)
 
-        del update_for_param
+    def compile(self, *args, **kwargs):
+        self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def step(self, closure: Optional[callable] = None):
@@ -214,4 +230,7 @@ class Lion_adv(torch.optim.Optimizer):
                 if p.grad is not None:
                     self.step_parameter(p, group, i)
 
+        if self.param_groups[0].get('compiled_optimizer', False):
+            # Reset compile tensors once a step
+            self.lr_tensor = None
         return loss

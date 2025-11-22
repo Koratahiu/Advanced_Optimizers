@@ -21,7 +21,7 @@ This library integrates multiple state-of-the-art optimization techniques valida
 ### **Memory-Efficient Optimization (SMMF-inspired)**
 - **Paper**: [SMMF: Square-Matricized Momentum Factorization](https://arxiv.org/abs/2412.08894)
 - **Approach**: Uses rank-1 non-negative matrix factorization with reconstruction cycle (factor → reconstruct → update → factor)
-- **Innovation**: 
+- **Innovation**:
   - First moment split into **1-bit sign + absolute value**
   - Final storage: **four factored vectors + one 1-bit sign state**
   - Preserves Adam-like update quality with drastically reduced memory
@@ -79,7 +79,7 @@ This library integrates multiple state-of-the-art optimization techniques valida
 
 ## 🛠️ Comprehensive Feature Guide
 
-### A. Universal Safe Features  
+### A. Universal Safe Features
 *These features work with all optimizers and are generally safe to enable.*
 
 | Feature | Description | Recommended Usage | Performance Impact | Theoretical Basis | Compatibility |
@@ -133,7 +133,7 @@ This library integrates multiple state-of-the-art optimization techniques valida
 | `beta1` | 0.99 | Controls accumulator memory length:<br>• Small BS: **0.99–0.9999**<br>• Large BS: **0.9** |
 | `Grad α` | 100 | Most critical parameter:<br>• Inversely scales with batch size<br>• **100–10** for small BS (≤32)<br>• **1–0.1** for large BS (≥512) |
 
-> ⚠️ **Critical**: Requires **~100x smaller learning rate** than AdamW (e.g., 1e-6 vs 1e-4).  
+> ⚠️ **Critical**: Requires **~100x smaller learning rate** than AdamW (e.g., 1e-6 vs 1e-4).
 > For `Prodigy_Adv`, set `initial_d` to:
 > - **LoRA**: `1e-8`
 > - **Full FT**: `1e-10`
@@ -161,8 +161,8 @@ This library integrates multiple state-of-the-art optimization techniques valida
 
 Instead of using a fixed β₂ (e.g., 0.999 or 0.95), it **dynamically modulates β₂ per layer** based on a bounded *sunspike ratio*:
 
-- **During gradient bursts** → β₂ ↓ toward `Lower β₂` → faster reaction  
-- **During calm phases** → β₂ ↑ toward `The Selected β₂` → stronger smoothing  
+- **During gradient bursts** → β₂ ↓ toward `Lower β₂` → faster reaction
+- **During calm phases** → β₂ ↑ toward `The Selected β₂` → stronger smoothing
 
 This is especially effective for **noisy training, small batch sizes, and high learning rates**, where gradient norms shift abruptly due to noise or aggressive LR schedules.
 
@@ -175,8 +175,8 @@ This is especially effective for **noisy training, small batch sizes, and high l
 
 > 💡 **Best Practice**: Set `K_warmup_steps` equal to your standard LR warmup steps. During warmup, the optimizer uses the static `beta2`; adaptation begins only after warmup ends.
 
-> 📚 **Reference**:  
-> - Paper: [Kourkoutas-β: A Sunspike-Driven Adam Optimizer with Desert Flair](https://arxiv.org/abs/2508.12996)  
+> 📚 **Reference**:
+> - Paper: [Kourkoutas-β: A Sunspike-Driven Adam Optimizer with Desert Flair](https://arxiv.org/abs/2508.12996)
 > - Code: [kbeta](https://github.com/sck-at-ucy/kbeta)
 
 ---

@@ -1,7 +1,7 @@
 import torch
 from typing import Callable, Optional
 
-from ..util.BF16_Stochastic_Rounding import add_stochastic_, set_seed as set_stochastic_rounding_seed
+from ..util import param_update
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf, _unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -27,7 +27,10 @@ class Adopt_adv(torch.optim.Optimizer):
             averages of momentum and variance (default: (0.9, 0.9999))
         eps (float): term added to the denominator to improve
             numerical stability (default: 1e-6)
-        weight_decay (float): weight decay (L2 penalty) (default: 0)
+        weight_decay (float): weight decay (L2 penalty) (default: 0).
+        cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
+            applied only to parameter coordinates where the sign of the parameter
+            and the sign of the optimizer update align (default: False).
         clip_lambda (Callable, optional): A function that takes the current step
             and returns a value to clip the normalized gradient. Only used when
             `use_atan2` is False. (default: `lambda step: step**0.25`)
@@ -56,13 +59,6 @@ class Adopt_adv(torch.optim.Optimizer):
             before it is added to the fast momentum term (`update = mt + alpha * mt_slow`).
             A higher value increases the stabilizing influence of the slow
             momentum. (default: 5.0)
-        t_alpha (Optional[int]): The number of steps for a linear warmup of the
-            `alpha` parameter (only used when `use_AdEMAMix` is `True`). This is
-            highly recommended to prevent instability at the beginning of training,
-            as it gradually introduces the stabilizing slow momentum term. During
-            the warmup, `alpha` ramps from 0 to its target value. If `None`,
-            the scheduler is disabled and the full `alpha` value is used from
-            the start. (default: None)
         Simplified_AdEMAMix (bool): whether to use the Simplified AdEMAMix update rule.
             This changes the EMA to accumulator and the update numerator to `alpha_grad * grad + mt`, which can be
             more responsive, especially for small batch sizes. Enabling this will
@@ -90,10 +86,10 @@ class Adopt_adv(torch.optim.Optimizer):
         k_logging (int): if > 0 and kourkoutas_beta=True, enables periodic console
             logging of Kourkoutas-β statistics (min, max, mean of `β₂` across layers)
             every logging steps. Useful for debugging and tuning. Set to 0 to disable
-            logging (default: 0). 
+            logging (default: 0).
         layer_key_fn (Optional[Callable]): A function that takes a parameter `p`
             and returns a unique, hashable key representing its "layer" or "bucket".
-            If `None`, parameters are bucketed by their memory ID (tensor-wise).
+            If `None`, parameters are bucketed by their shape.
             (default: None)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
@@ -106,8 +102,9 @@ class Adopt_adv(torch.optim.Optimizer):
         betas: tuple[float, float] = (0.9, 0.9999),
         eps: float = 1e-6,
         weight_decay: float = 0.0,
+        cautious_wd: bool = False,
         clip_lambda: Optional[Callable[[int], float]] = lambda step: step**0.25,
-        vector_reshape: bool = True,
+        vector_reshape: bool = False,
         stochastic_rounding: bool = True,
         use_atan2: bool = False,
         cautious_mask: bool = False,
@@ -116,7 +113,6 @@ class Adopt_adv(torch.optim.Optimizer):
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
-        t_alpha: int | None = None,
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
         kourkoutas_beta: bool = False,
@@ -127,6 +123,8 @@ class Adopt_adv(torch.optim.Optimizer):
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
         nnmf_factor: bool = False,
+        # Compiled
+        compiled_optimizer: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -141,7 +139,8 @@ class Adopt_adv(torch.optim.Optimizer):
             cautious_mask = False
         if betas[0] == 0.0 and Simplified_AdEMAMix:
             raise ValueError(f"Beta1 cannot be 0.0 when using Simplified_AdEMAMix. Got {betas[0]}")
-        if kourkoutas_beta and not (betas[1] > beta2_min): raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
+        if kourkoutas_beta and not (betas[1] > beta2_min):
+            raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
         if use_AdEMAMix and Simplified_AdEMAMix:
             print("Warning: use_AdEMAMix is incompatible with Simplified_AdEMAMix, Disabling use_AdEMAMix.")
         if grams_moment and Simplified_AdEMAMix:
@@ -152,9 +151,10 @@ class Adopt_adv(torch.optim.Optimizer):
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "vector_reshape": vector_reshape, "beta3_ema": beta3_ema, "alpha": alpha,
-            "t_alpha": t_alpha, "alpha_grad": alpha_grad, 
+            "alpha_grad": alpha_grad, "cautious_wd": cautious_wd,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
+            "compiled_optimizer": compiled_optimizer,
         }
         self.clip_lambda = clip_lambda
         self.stochastic_rounding = stochastic_rounding
@@ -169,15 +169,21 @@ class Adopt_adv(torch.optim.Optimizer):
         self.layer_key_fn = layer_key_fn
         super().__init__(params, defaults)
 
+        self.init_step()
+
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
+
+        if compiled_optimizer:
+            torch._dynamo.config.cache_size_limit = 8192
+            self.compile(fullgraph=True)
 
         if self.stochastic_rounding:
             # For deterministic stochastic rounding, we need to seed the generator
             # for each device used by the parameters.
             devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
             for device in devices:
-                set_stochastic_rounding_seed(device)
+                param_update.set_seed(device)
 
     @property
     def supports_fused_back_pass(self): return True
@@ -186,8 +192,77 @@ class Adopt_adv(torch.optim.Optimizer):
     @property
     def supports_flat_params(self): return False
 
+    def init_step(self):
+        for group in self.param_groups:
+            for p in group['params']:
+                self.__init_state(p, group)
+
     @torch.no_grad()
-    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+    def __init_state(self, p, group):
+        state = self.state[p]
+
+        if len(state) == 0:
+
+            state['step'] = 0
+
+            state['factored'] = (
+                self.factored and
+                not (len(p.shape) == 1 and not group['vector_reshape'])
+            )
+
+            dtype = torch.float32 if self.factored else p.dtype
+
+            if state['factored']:
+                state['effective_shape'] = _get_effective_shape(p.numel())
+                d1, d2 = state['effective_shape']
+
+                # m_0 = 0
+                if group['betas'][0] > 0:
+                    state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
+                    state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
+                    if not self.grams_moment:
+                        packed_d2 = (d2 + 7) // 8
+                        state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+                if self.use_AdEMAMix:
+                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
+                    state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
+                    packed_d2 = (d2 + 7) // 8
+                    state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+            else: # Fallback for non-factored tensors
+                if group['betas'][0] > 0:
+                    state['exp_avg'] = torch.zeros_like(p, dtype=dtype) # m_0
+                if self.use_AdEMAMix:
+                    state['exp_avg_slow'] = torch.zeros_like(p, dtype=dtype)
+
+    @torch.no_grad()
+    def __init_step(self, p, group):
+        if p.grad is None:
+            return
+
+        state = self.state[p]
+
+        if 'exp_avg_sq' in state or 'mu_v_nmf' in state:
+            return
+
+        grad = p.grad
+        dtype = torch.float32 if self.factored else p.dtype
+
+        if state['factored']:
+            d1, d2 = state['effective_shape']
+            # v_0 = g_0^2 (SMMF_ADOPT NMF storage)
+            vt_init = grad.square().view(d1, d2)
+            # Allocate NMF factors for v
+            state['mu_v_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
+            state['mv_v_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
+            # Initialize v_0 using NMF
+            _nnmf(vt_init, out=(state['mu_v_nmf'], state['mv_v_nmf']))
+            del vt_init
+        else:
+            state['exp_avg_sq'] = grad.square()   # v_0
+
+
+    @torch.no_grad()
+    def __step_parameter(self, p: torch.Tensor, group: dict, lr: torch.Tensor | float, random_int_tensor: torch.Tensor | None = None):
         if p.grad is None:
             return
 
@@ -198,74 +273,19 @@ class Adopt_adv(torch.optim.Optimizer):
             grad = _orthogonalize_gradient(p, grad)
         state = self.state[p]
 
-        # State Initialization
-        if 'step' not in state:
-            state['step'] = 0
-
-            should_factor = (
-                self.factored and
-                not (len(p.shape) == 1 and not group['vector_reshape'])
-            )
-
-            state['factored'] = should_factor
-
-            dtype = torch.float32 if self.factored else p.dtype
-
-            if state['factored']:
-                state['effective_shape'] = _get_effective_shape(p.numel())
-                d1, d2 = state['effective_shape']
-
-                # m_0 = 0
-                if group['betas'][0] > 0:
-                    state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
-                    state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                    if not self.grams_moment:
-                        packed_d2 = (d2 + 7) // 8
-                        state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
-                if self.use_AdEMAMix:
-                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
-                    state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                    packed_d2 = (d2 + 7) // 8
-                    state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
-                # v_0 = g_0^2 (SMMF_ADOPT NMF storage)
-                vt_init = grad.view(d1, d2).square_()
-                # Allocate NMF factors for vt
-                state['mu_v_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
-                state['mv_v_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                # Initialize v_0 using NMF
-                _nnmf(vt_init, out=(state['mu_v_nmf'], state['mv_v_nmf']))
-            else: # Fallback for non-factored tensors
-                if group['betas'][0] > 0:
-                    state['exp_avg'] = torch.zeros_like(p, dtype=dtype) # m_0
-                if self.use_AdEMAMix:
-                    state['exp_avg_slow'] = torch.zeros_like(p, dtype=dtype)
-                state['exp_avg_sq'] = grad.square()   # v_0
 
         beta1, beta2 = group['betas']
 
-        current_step = state['step']
         if group.get('kourkoutas_beta', False):
-            # Call prepare_step() once at the beginning of the step for all params
-            self.kourkoutas_helper.maybe_prepare_step(current_step)
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
             # Get the dynamic beta2 calculated in prepare_step()
             beta2 = self.kourkoutas_helper.get_beta2(p, group)
 
-        # The first step is for initialization only (skip when use_atan2 as it's scale invariant).
-        if state['step'] == 0 and not self.use_atan2:
-            state['step'] += 1
-            return
-
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
             alpha = group['alpha']
-            t_alpha = group['t_alpha']
-            # Use step+1 for 1-based step count in scheduler
-            alpha_step = state['step'] + 1
-            alpha_t = alpha
-            if t_alpha is not None and t_alpha > 0 and alpha_step < t_alpha:
-                alpha_t = min(alpha_step * alpha / t_alpha, alpha)
+
         if self.Simplified_AdEMAMix:
             alpha_grad = group["alpha_grad"]
 
@@ -303,7 +323,7 @@ class Adopt_adv(torch.optim.Optimizer):
             else:
                 normalized_grad = grad_reshaped / denom.add_(group['eps'])
                 if self.clip_lambda is not None:
-                    clip_val = self.clip_lambda(state['step'])
+                    clip_val = self.clip_lambda(state['step'] - 1)
                     normalized_grad.clamp_(-clip_val, clip_val)
             del denom
 
@@ -312,23 +332,24 @@ class Adopt_adv(torch.optim.Optimizer):
                 if self.Simplified_AdEMAMix:
                     mt.mul_(beta1).add_(normalized_grad, alpha=1.0)
                 else:
-                    mt.mul_(beta1).add_(normalized_grad, alpha=1.0 - beta1)
+                    mt.lerp_(normalized_grad, 1.0 - beta1)
+
                 if self.grams_moment:
                     update_mt = grad_reshaped.sign().mul_(mt.abs())
                 elif self.cautious_mask:
                     mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
-                    update_mt= mt.mul(mask)
+                    update_mt = mt.mul(mask)
                     del mask
                 else:
                     update_mt = mt.clone()
 
             if self.use_AdEMAMix:
-                mt_slow.mul_(beta3_ema).add_(normalized_grad, alpha=1.0 - beta3_ema)
+                mt_slow.lerp_(normalized_grad, 1.0 - beta3_ema)
                 if beta1 > 0:
-                    update = torch.add(update_mt, mt_slow, alpha=alpha_t)
+                    update = update_mt.add(mt_slow, alpha=alpha)
                 else:
-                    update = torch.add(normalized_grad, mt_slow, alpha=alpha_t)
+                    update = torch.add(normalized_grad, mt_slow, alpha=alpha)
             elif self.Simplified_AdEMAMix:
                 update = torch.add(update_mt, normalized_grad, alpha=alpha_grad)
             else:
@@ -337,9 +358,9 @@ class Adopt_adv(torch.optim.Optimizer):
             update = update.view(p.shape)
 
             if self.use_atan2:
-                update.mul_(group['lr'] * 1.2732395447351628)
+                update.mul_(lr * 1.2732395447351628)
             else:
-                update.mul_(group['lr']) 
+                update.mul_(lr)
 
             # Update second moment v_t for the *next* step using raw g_t
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
@@ -362,7 +383,7 @@ class Adopt_adv(torch.optim.Optimizer):
             del vt
 
         else: # Standard ADOPT logic for non-factored tensors
-            vt = state['exp_avg_sq'] # v_{t-1}                
+            vt = state['exp_avg_sq'] # v_{t-1}
 
             # ADOPT Step A: Decorrelate g_t using v_{t-1}
             denom = vt.sqrt()
@@ -372,17 +393,17 @@ class Adopt_adv(torch.optim.Optimizer):
             else:
                 normalized_grad = grad / denom.add_(group['eps'])
                 if self.clip_lambda is not None:
-                    clip_val = self.clip_lambda(state['step'])
+                    clip_val = self.clip_lambda(state['step'] - 1)
                     normalized_grad.clamp_(-clip_val, clip_val)
             del denom
 
             # ADOPT Step B: Update momentum m_t
             if beta1 > 0:
-                mt = state['exp_avg'] # m_{t-1},
+                mt = state['exp_avg'] # m_{t-1}
                 if self.Simplified_AdEMAMix:
                     mt.mul_(beta1).add_(normalized_grad, alpha=1.0)
                 else:
-                    mt.mul_(beta1).add_(normalized_grad, alpha=1.0 - beta1)
+                    mt.lerp_(normalized_grad, 1.0 - beta1)
 
             if self.grams_moment:
                 update_mt = grad.sign().mul_(mt.abs())
@@ -396,38 +417,63 @@ class Adopt_adv(torch.optim.Optimizer):
 
             if self.use_AdEMAMix:
                 m_slow = state['exp_avg_slow']
-                m_slow.mul_(beta3_ema).add_(normalized_grad, alpha=1.0 - beta3_ema)
+                m_slow.lerp_(normalized_grad, 1.0 - beta3_ema)
                 if beta1 > 0:
-                    update = torch.add(update_mt, m_slow, alpha=alpha_t)
+                    update = torch.add(update_mt, m_slow, alpha=alpha)
                 else:
-                    update = torch.add(normalized_grad, m_slow, alpha=alpha_t)
+                    update = torch.add(normalized_grad, m_slow, alpha=alpha)
             elif self.Simplified_AdEMAMix:
                 update = torch.add(update_mt, normalized_grad, alpha=alpha_grad)
             else:
                 update = update_mt if beta1 > 0 else normalized_grad
 
             if self.use_atan2:
-                update.mul_(group['lr'] * 1.2732395447351628)
+                update.mul_(lr * 1.2732395447351628)
             else:
-                update.mul_(group['lr']) 
+                update.mul_(lr)
 
             # Update second moment v_t for the next step using raw g_t
             vt.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
 
-        # Parameter Update
-        if group["weight_decay"] != 0:
-            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * group["lr"])
-            else:
-                p.data.add_(p.data, alpha=-group["weight_decay"] * group["lr"])
+        # Param Update
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 
-        if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-            add_stochastic_(p.data, -update)
+    @torch.no_grad()
+    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        state = self.state[p]
+
+        step = state['step']
+
+        if step == 0:
+            self.__init_step(p, group)
+
+        # The first step is for initialization only (skip when use_atan2 as it's scale invariant).
+        if step == 0 and not self.use_atan2:
+            state['step'] += 1
+            return
+
+        # Pre-generate random tensor for stochastic rounding if needed.
+        random_int_tensor = None
+        if p.dtype == torch.bfloat16 and self.stochastic_rounding and group.get('compiled_optimizer', False):
+            random_int_tensor = param_update._get_random_int_for_sr(p)
+
+        if group.get('kourkoutas_beta', False):
+            # Prepare Kourkoutas-β once per step using the global step counter.
+            self.kourkoutas_helper.maybe_prepare_step(step)
+
+        self.state[p]['step'] += 1
+
+        if not group.get('compiled_optimizer', False):
+            self.__step_parameter(p, group, group['lr'])
         else:
-            p.data.add_(-update)
-        del update
+            if not hasattr(self, 'lr_tensor') or self.lr_tensor is None:
+                # convert to tensors for compiled path once a step
+                self.lr_tensor = torch.tensor(group['lr'], device=p.device)
+            self._compiled_step_parameter(p, group, self.lr_tensor, random_int_tensor)
 
-        state['step'] += 1
+    def compile(self, *args, **kwargs):
+        self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
+
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -441,4 +487,7 @@ class Adopt_adv(torch.optim.Optimizer):
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
 
+        if self.param_groups[0].get('compiled_optimizer', False):
+            # Reset compile tensors once a step
+            self.lr_tensor = None
         return loss
