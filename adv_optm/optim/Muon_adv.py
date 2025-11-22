@@ -46,6 +46,8 @@ class Muon_adv(torch.optim.Optimizer):
             matrices to apply low-rank compression (default: True).
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
+        use_muon (bool | None): whether to use Muon or AuxAdamW. MUST be provided
+            either here or via `optim_type` in parameter groups. (default: None)
         low_rank_ortho (bool): If True, enables low-rank orthogonalization, which
             projects the update to a lower rank before orthogonalization.
             (default: False)
@@ -95,6 +97,7 @@ class Muon_adv(torch.optim.Optimizer):
         rms_rescaling: bool = True,
         vector_reshape: bool = False,
         nnmf_factor: bool = False,
+        use_muon: bool | None = None,
         # Low-rank Muon
         low_rank_ortho: bool = False,
         ortho_rank: int = 128,
@@ -148,6 +151,7 @@ class Muon_adv(torch.optim.Optimizer):
             "Simplified_AdEMAMix": Simplified_AdEMAMix, "alpha_grad": alpha_grad,
             "orthogonal_gradient": orthogonal_gradient,
             'compiled_optimizer': compiled_optimizer,
+            "use_muon": use_muon,
             # Low-rank Ortho
             "low_rank_ortho": low_rank_ortho, "ortho_rank": ortho_rank,
             # NorMuon
@@ -170,6 +174,14 @@ class Muon_adv(torch.optim.Optimizer):
         self.compiled_optimizer = compiled_optimizer
 
         super().__init__(params, defaults)
+
+        # Validate that every group has a determined optimizer type
+        for i, group in enumerate(self.param_groups):
+            if group.get('use_muon') is None and group.get('optim_type') is None:
+                raise ValueError(
+                    f"Parameter group {i} is missing configuration. "
+                    "You must provide either 'use_muon' (bool) or 'optim_type' (str)."
+                )
 
         self.kourkoutas_helper = None
         if any(group.get('adam_kourkoutas_beta', False) for group in self.param_groups):
@@ -217,17 +229,26 @@ class Muon_adv(torch.optim.Optimizer):
         if len(state) > 0:
             return
 
-        optim_type = group.get('optim_type', 'muon')
+        # Determine optimizer type for this group
+        optim_type = group.get('optim_type')
+        use_muon = group.get('use_muon')
 
-        state['factored'] = (
-            group['nnmf_factor'] and
-            not (len(p.shape) == 1 and not group['vector_reshape'])
-        )
-        dtype = torch.float32 if state['factored'] else p.dtype
-        device = p.device
-
+        # Priority: optim_type > use_muon flag
+        is_muon = False
         if optim_type == 'muon':
+            is_muon = True
+        elif optim_type == 'adam':
+            is_muon = False
+        elif use_muon is not None:
+            is_muon = use_muon
+        else:
+            # This branch should theoretically be unreachable due to __init__ validation
+            raise ValueError("Optimizer configuration missing: neither optim_type nor use_muon defined.")
 
+        # Enforce the decision back to the group for the step function
+        group['use_muon'] = is_muon
+
+        if is_muon:
 
             state['factored'] = (
                 group['nnmf_factor'] and
@@ -255,7 +276,7 @@ class Muon_adv(torch.optim.Optimizer):
 
             group['adam_kourkoutas_beta'] = False
 
-        elif optim_type == 'adam':
+        else: # AdamW
 
             state['step'] = 0
 
@@ -667,17 +688,11 @@ class Muon_adv(torch.optim.Optimizer):
 
         state = self.state[p]
 
-        # Determine if using Adam or Muon based on state keys
-        # We can use optm_type but I see this as a safer way.
-        if 'momentum_buffer' in state or 'mu_mbuf_nmf' in state:
-            use_adam = False
-        else:
-            use_adam = True
 
         lr = group['lr']
         is_compiled = group.get('compiled_optimizer', False)
 
-        if use_adam:
+        if not group['use_muon']: # AdamW path
             step = state['step']
 
             if self.kourkoutas_helper:

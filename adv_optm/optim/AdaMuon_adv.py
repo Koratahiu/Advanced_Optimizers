@@ -10,7 +10,7 @@ from ..util.Kourkoutas import KourkoutasHelper
 
 class AdaMuon_adv(torch.optim.Optimizer):
     """
-    IImplements an advanced AdaMuon optimizer algorithm.
+    Implements an advanced AdaMuon optimizer algorithm.
 
     AdaMuon combines the geometry-aware updates of Muon with the element-wise
     adaptivity of Adam. It is designed for 2D parameters (e.g., linear layers)
@@ -69,6 +69,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
         cns_a_bound (float): Initial lower bound for singular values for CANS. (default: 1e-4)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
+        use_muon (bool | None): whether to use Muon or AuxAdamW. MUST be provided
+            either here or via `optim_type` in parameter groups. (default: None)
         --- Auxiliary AdamW_adv Parameters (used for 'adam' groups) ---
         adam_betas (tuple[float, float]): Betas for the AdamW optimizer part.
         adam_eps (float): Epsilon for the AdamW optimizer part.
@@ -102,6 +104,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
         normuon_variant: bool = False,
+        use_muon: bool | None = None,
         # Low-rank Muon
         low_rank_ortho: bool = False,
         ortho_rank: int = 128,
@@ -150,6 +153,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             "nesterov":nesterov, "use_atan2":use_atan2,
             "Simplified_AdEMAMix": Simplified_AdEMAMix, "alpha_grad": alpha_grad,
             "normuon_variant": normuon_variant, "orthogonal_gradient": orthogonal_gradient,
+            "use_muon": use_muon,
             # Low-rank Ortho
             "low_rank_ortho": low_rank_ortho, "ortho_rank": ortho_rank,
             "compiled_optimizer":compiled_optimizer,
@@ -168,6 +172,14 @@ class AdaMuon_adv(torch.optim.Optimizer):
         self.stochastic_rounding = stochastic_rounding
 
         super().__init__(params, defaults)
+
+        # Validate that every group has a determined optimizer type
+        for i, group in enumerate(self.param_groups):
+            if group.get('use_muon') is None and group.get('optim_type') is None:
+                raise ValueError(
+                    f"Parameter group {i} is missing configuration. "
+                    "You must provide either 'use_muon' (bool) or 'optim_type' (str)."
+                )
 
         self.kourkoutas_helper = None
         if any(group.get('adam_kourkoutas_beta', False) for group in self.param_groups):
@@ -215,9 +227,26 @@ class AdaMuon_adv(torch.optim.Optimizer):
         if len(state) > 0:
             return
 
-        optim_type = group.get('optim_type', 'muon')
+        # Determine optimizer type for this group
+        optim_type = group.get('optim_type')
+        use_muon = group.get('use_muon')
 
+        # Priority: optim_type > use_muon flag
+        is_muon = False
         if optim_type == 'muon':
+            is_muon = True
+        elif optim_type == 'adam':
+            is_muon = False
+        elif use_muon is not None:
+            is_muon = use_muon
+        else:
+            # This branch should theoretically be unreachable due to __init__ validation
+            raise ValueError("Optimizer configuration missing: neither optim_type nor use_muon defined.")
+
+        # Enforce the decision back to the group for the step function
+        group['use_muon'] = is_muon
+
+        if is_muon:
 
             state['factored'] = (
                 group['nnmf_factor'] and
@@ -250,7 +279,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             group['adam_kourkoutas_beta'] = False
 
-        elif optim_type == 'adam':
+        else: # AdamW
 
             state['step'] = 0
 
@@ -668,18 +697,10 @@ class AdaMuon_adv(torch.optim.Optimizer):
             return
         state = self.state[p]
 
-
-        # Determine if using Adam or Muon based on state keys
-        # We can use optm_type but I see this as a safer way.
-        if 'momentum_buffer' in state or 'mu_mbuf_nmf' in state:
-            use_adam = False
-        else:
-            use_adam = True
-
         lr = group['lr']
         is_compiled = group.get('compiled_optimizer', False)
 
-        if use_adam:
+        if not group['use_muon']: # AdamW path
             step = state['step']
 
             if self.kourkoutas_helper:
