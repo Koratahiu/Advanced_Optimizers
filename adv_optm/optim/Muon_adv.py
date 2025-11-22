@@ -576,15 +576,19 @@ class Muon_adv(torch.optim.Optimizer):
                     unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
                     torch.where(unpacked_sign, mt, -mt, out=mt)
                     del unpacked_sign
+
                 # Update momentum in full-size
-                mt.mul_(beta1_adam).add_(grad_reshaped, alpha=1.0 - beta1_adam)
+                mt.lerp_(grad_reshaped, 1.0 - beta1_adam)
+
                 if group.get('adam_grams_moment'):
-                    mt = (grad_reshaped.sign().mul_(mt.abs()))
+                    update_mt = (grad_reshaped.sign().mul_(mt.abs()))
                 elif group.get('adam_cautious_mask'):
                     mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
-                    mt.mul_(mask)
+                    update_mt = mt.mul(mask)
                     del mask
+                else:
+                    update_mt = mt.clone()
 
             vt = _unnmf((state['mu_v_nmf'], state['mv_v_nmf']))
             vt.mul_(beta2_adam).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2_adam)
@@ -597,13 +601,14 @@ class Muon_adv(torch.optim.Optimizer):
                 torch.where(unpacked_sign_slow, mt_slow, -mt_slow, out=mt_slow)
                 del unpacked_sign_slow
 
-                mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=1.0 - beta3_ema)
+                mt_slow.lerp_(grad_reshaped, 1.0 - beta3_ema)
+
                 if beta1_adam > 0:
-                    update = torch.add(mt, mt_slow, alpha=alpha)
+                    update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
                     update = torch.add(grad_reshaped, mt_slow, alpha=alpha)
             else:
-                update = mt.clone() if beta1_adam > 0 else grad_reshaped.clone()
+                update = update_mt if beta1_adam > 0 else grad_reshaped.clone()
             del grad_reshaped
 
             if group['adam_use_atan2']:
@@ -635,24 +640,28 @@ class Muon_adv(torch.optim.Optimizer):
 
             if beta1_adam > 0:
                 exp_avg = state['exp_avg']
-                exp_avg.mul_(beta1_adam).add_(grad, alpha=1 - beta1_adam)
+                exp_avg.lerp_(grad, 1.0 - beta1_adam)
+
                 if group.get('adam_grams_moment'):
-                    exp_avg = grad.sign().mul_(exp_avg.abs())
+                    update_mt = grad.sign().mul_(exp_avg.abs())
                 elif group.get('adam_cautious_mask'):
                     mask = (exp_avg * grad > 0).to(grad.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
-                    exp_avg.mul_(mask)
+                    update_mt = exp_avg.mul(mask)
                     del mask
+                else:
+                    update_mt = exp_avg.clone()
 
             if group.get('adam_use_AdEMAMix'):
                 exp_avg_slow = state['exp_avg_slow']
-                exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=1 - beta3_ema)
+                exp_avg_slow.lerp_(grad, 1.0 - beta3_ema)
+
                 if beta1_adam > 0:
-                    update = torch.add(exp_avg, exp_avg_slow, alpha=alpha)
+                    update = update_mt.add_(exp_avg_slow, alpha=alpha)
                 else:
                     update = torch.add(grad, exp_avg_slow, alpha=alpha)
             else:
-                update = exp_avg.clone() if beta1_adam > 0 else grad.clone()
+                update = update_mt if beta1_adam > 0 else grad.clone()
 
             exp_avg_sq.mul_(beta2_adam).addcmul_(grad, grad.conj(), value=1 - beta2_adam)
 
