@@ -66,7 +66,8 @@ def _newton_schulz_iteration(
 
             # Apply the 3rd-order Newton-Schulz update
             A = X @ X.mT
-            X = c1 * X + c3 * (A @ X)
+            # X = c1 * X + c3 * (A @ X)
+            X = torch.addmm(X, A, X, beta=c1, alpha=c3)
 
             # Update the singular value bounds for the next iteration based on the error
             eps_num = common_den_part - ab_part
@@ -77,8 +78,10 @@ def _newton_schulz_iteration(
         # Perform the iterative updates
         for _ in range(steps):
             A = X @ X.mT
-            B = b * A + c * (A @ A)
-            X = a * X + B @ X
+            # B = b * A + c * (A @ A)
+            B = torch.addmm(A, A, A, beta=b, alpha=c)
+            # X = a * X + B @ X
+            X = torch.addmm(X, B, X, beta=a)
 
     # Transpose back if necessary
     if transposed:
