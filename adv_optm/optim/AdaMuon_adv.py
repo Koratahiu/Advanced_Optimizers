@@ -608,7 +608,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 mt_slow.lerp_(grad_reshaped, 1.0 - beta3_ema)
 
                 if beta1_adam > 0:
-                    update = torch.add(mt, mt_slow, alpha=alpha)
+                    update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
                     update = torch.add(grad_reshaped, mt_slow, alpha=alpha)
             else:
