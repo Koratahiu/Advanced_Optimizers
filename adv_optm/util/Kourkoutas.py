@@ -40,7 +40,7 @@ class KourkoutasHelper:
             # TODO find a better way to safeguard the embeddings
 
         for group in self.optimizer.param_groups:
-            if not group.get('kourkoutas_beta', False):
+            if not group.get('kourkoutas_beta', False) and not group.get('adam_kourkoutas_beta', False):
                 continue
 
             for p in group['params']:
@@ -87,11 +87,17 @@ class KourkoutasHelper:
             # Use group-specific K-b settings, falling back to the optimizer's master defaults.
             # This makes the helper robust against param groups that enable kourkoutas_beta
             # but are missing the other required hyperparameters.
-            ema_alpha = group.get('ema_alpha', master_defaults['ema_alpha'])
-            beta2_max = group.get('betas', master_defaults['betas'])[1]
-            beta2_min = group.get('beta2_min', master_defaults['beta2_min'])
-            tiny_spike = group.get('tiny_spike', master_defaults['tiny_spike'])
-            k_warmup_steps = group.get('k_warmup_steps', master_defaults['k_warmup_steps'])
+            # In hybrid optimizers like Muon_adv, the Kourkoutas-related keys in the
+            # defaults and param_groups are prefixed with 'adam_' to avoid conflicts.
+            # We must detect this case and use the correct key names.
+            prefix = 'adam_' if group.get('adam_kourkoutas_beta', False) else ''
+
+            ema_alpha = group.get(f'{prefix}ema_alpha', master_defaults[f'{prefix}ema_alpha'])
+            betas_tuple = group.get(f'{prefix}betas', master_defaults[f'{prefix}betas'])
+            beta2_max = betas_tuple[1]
+            beta2_min = group.get(f'{prefix}beta2_min', master_defaults[f'{prefix}beta2_min'])
+            tiny_spike = group.get(f'{prefix}tiny_spike', master_defaults[f'{prefix}tiny_spike'])
+            k_warmup_steps = group.get(f'{prefix}k_warmup_steps', master_defaults[f'{prefix}k_warmup_steps'])
 
             r_ema_tensor = param_state['kourkoutas_r_ema']
             accumulator = self.layer_state[layer_key]['sum_sq_accumulator']
@@ -154,4 +160,5 @@ class KourkoutasHelper:
         """
         layer_key = self.optimizer.layer_key_fn(p)
         # The default is the max value, which is correct for unmapped params or edge cases
-        return self.layer_state.get(layer_key, {}).get('dynamic_beta2', group['betas'][1])
+        beta2_default = group.get('betas', group.get('adam_betas'))[1] if group.get('betas', group.get('adam_betas')) else 0.999
+        return self.layer_state.get(layer_key, {}).get('dynamic_beta2', beta2_default)

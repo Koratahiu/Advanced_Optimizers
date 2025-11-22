@@ -3,7 +3,7 @@ from typing import Optional, Callable
 
 import math
 
-from ..util.BF16_Stochastic_Rounding import add_stochastic_
+from ..util import param_update
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -39,6 +39,9 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         eps (float): term added to the denominator to improve
             numerical stability (default: 1e-8)
         weight_decay (float): weight decay (L2 penalty) (default: 0).
+        cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
+            applied only to parameter coordinates where the sign of the parameter
+            and the sign of the optimizer update align (default: False).
         alpha_grad (float): Coeficient for mixing the current gradient and EMA. for small batch
             sizes set it to high values, up to 100. And for large batch sized set it to small
             value, down to 0. (default: 100)
@@ -82,6 +85,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         betas: tuple[float, float] = (0.99, 0.999),
         eps: float = 1e-8,
         weight_decay: float = 0.0,
+        cautious_wd: bool = False,
         alpha_grad: float = 100.0,
         beta1_warmup: int | None = None,
         min_beta1: float | None = 0.9,
@@ -116,7 +120,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "alpha_grad": alpha_grad, "beta1_warmup": beta1_warmup, "min_beta1": min_beta1,
-            "vector_reshape": vector_reshape,
+            "vector_reshape": vector_reshape, "cautious_wd": cautious_wd,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
@@ -136,16 +140,26 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
         super().__init__(params, defaults)
 
+        if beta1_warmup is not None:
+            self.beta1 = linear_hl_warmup_scheduler(1, beta_end=betas[0], beta_start=min_beta1, warmup=beta1_warmup)
+        else:
+            self.beta1 = betas[0]
+
         self.init_step()
 
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
 
-        self.global_step = 0
-
         if compiled_optimizer:
             torch._dynamo.config.cache_size_limit = 8192
             self.compile(fullgraph=True)
+
+        if self.stochastic_rounding:
+            # For deterministic stochastic rounding, we need to seed the generator
+            # for each device used by the parameters.
+            devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
+            for device in devices:
+                param_update.set_seed(device)
 
     @property
     def supports_fused_back_pass(self):
@@ -197,7 +211,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
 
     @torch.no_grad()
-    def __step_parameter(self, p: torch.Tensor, group: dict, lr: torch.Tensor | float, beta1, num_sum, den_sum):
+    def __step_parameter(self, p: torch.Tensor, group: dict, step_size: torch.Tensor | float, beta1, denom_eps_val, random_int_tensor: torch.Tensor | None = None):
         if p.grad is None:
             return
 
@@ -235,17 +249,17 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             vt = _unnmf((state['mu_v_nmf'], state['mv_v_nmf']))
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
 
+            # Compute Update
             update = torch.add(mt, grad_reshaped, alpha=alpha_grad)
             del grad_reshaped
 
-            denom = vt.sqrt().add_(group['eps'] * math.sqrt(den_sum))
-            update.div_(denom)
+            # denom = sqrt(vt) + eps * sqrt(den_sum)
+            denom = vt.sqrt_().add_(denom_eps_val)
+
+            update.div_(denom).mul_(step_size)
             del denom
 
-            if group['use_bias_correction']:
-                update = (update / num_sum) * math.sqrt(den_sum)
-
-            update = update.view(p.shape).mul_(group['lr'])
+            update = update.view(p.shape)
 
             # Compress updated moments and store new factors
             state['sign'] = _pack_bools(mt > 0)
@@ -258,61 +272,68 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             exp_avg_sq = state['exp_avg_sq']
 
             exp_avg = state['exp_avg']
+
+            # In-place momentum update
             exp_avg.mul_(beta1).add_(grad, alpha=1.0)
 
+            # Update accumulation
             update = torch.add(exp_avg, grad, alpha=alpha_grad)
 
-            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+            # Variance update
+            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
 
-            denom = exp_avg_sq.sqrt().add_(group['eps'] * math.sqrt(den_sum))
-            update.div_(denom)
+            # Denom calculation (uses buffer)
+            denom = exp_avg_sq.sqrt().add_(denom_eps_val)
+
+            update.div_(denom).mul_(step_size)
             del denom
 
-            if group['use_bias_correction']:
-                update = (update / num_sum) * math.sqrt(den_sum)
-
-            update.mul_(group['lr'])
-
-        # Decoupled weight decay
-        if group["weight_decay"] != 0:
-            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * group["lr"])
-            else:
-                p.data.add_(p.data, alpha=-group["weight_decay"] * group["lr"])
-
-        if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-            add_stochastic_(p.data, -update)
-        else:
-            p.data.add_(-update)
-        del update
-
+        # Param Update
+        param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-        if self.global_step is None and 'step' in self.state[p]:
-            # For backward compatibility
-            g_state = self.state[p]
-            self.global_step = g_state['step']
-            self.num_sum = group["betas"][0] * g_state['num_sum'] + 1.0
-            self.den_sum = group['betas'][1] * g_state['den_sum'] + (1.0 - group['betas'][1])
 
-        if group["beta1_warmup"] is not None:
-            step = self.global_step + 1
-            beta1 = linear_hl_warmup_scheduler(step, beta_end=group["betas"][0], beta_start=group['min_beta1'], warmup=group["beta1_warmup"])
-        else:
-            beta1 = group["betas"][0]
+        state = self.state[p]
+
+        step = state['step']
 
         if group.get('kourkoutas_beta', False):
             # Prepare Kourkoutas-β once per step using the global step counter.
-            self.kourkoutas_helper.maybe_prepare_step(self.global_step)
+            self.kourkoutas_helper.maybe_prepare_step(step)
+
+        # TODO, remove
+        if not hasattr(self, 'beta1'):
+            self.beta1 = group["betas"][0]
+
+        self.state[p]['step'] += 1
+
+        # Pre-generate random tensor for stochastic rounding if needed.
+        random_int_tensor = None
+        if p.dtype == torch.bfloat16 and self.stochastic_rounding and group.get('compiled_optimizer', False):
+            random_int_tensor = param_update._get_random_int_for_sr(p)
+
+        if not hasattr(self, 'step_size') or self.step_size is None:
+            sqrt_den_sum = math.sqrt(self.den_sum)
+            self.denom_eps_val = group['eps'] * sqrt_den_sum
+
+            # Calculate consolidated step_size
+            if group['use_bias_correction']:
+                step_val = group['lr'] * (sqrt_den_sum / self.num_sum)
+            else:
+                step_val = group['lr']
+
+            # Store as tensor for compiled, scalar for eager
+            if group.get('compiled_optimizer', False):
+                self.step_size = torch.tensor(step_val, device=p.device)
+                self.denom_eps_val = torch.tensor(self.denom_eps_val, device=p.device)
+            else:
+                self.step_size = step_val
 
         if not group.get('compiled_optimizer', False):
-            self.__step_parameter(p, group, group['lr'], beta1, self.num_sum, self.den_sum)
+            self.__step_parameter(p, group, self.step_size, self.beta1, self.denom_eps_val)
         else:
-            lr_tensor = torch.tensor(group['lr'], device=p.device)
-            num_sum_tesnor = torch.tensor(self.num_sum, device=p.device)
-            den_sum_tesnor = torch.tensor(self.den_sum, device=p.device)
-            self._compiled_step_parameter(p, group, lr_tensor, beta1, self.num_sum, self.den_sum)
+            self._compiled_step_parameter(p, group, self.step_size, self.beta1, self.denom_eps_val, random_int_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
@@ -328,12 +349,17 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
-        
+
         g_group = self.param_groups[0]
         if g_group['use_bias_correction']:
             self.num_sum = g_group["betas"][0] * self.num_sum + 1.0
             self.den_sum = g_group['betas'][1] * self.den_sum + (1.0 - g_group['betas'][1])
 
-        self.global_step += 1
+        if group["beta1_warmup"] is not None:
+            current_step = self.state[p]['step'] + 1
+            self.beta1 = linear_hl_warmup_scheduler(current_step, beta_end=group["betas"][0], beta_start=group['min_beta1'], warmup=group["beta1_warmup"])
+        else:
+            self.beta1 = group["betas"][0]
 
+        self.step_size = None
         return loss
