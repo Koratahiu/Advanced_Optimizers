@@ -153,7 +153,7 @@ class Lion_adv(torch.optim.Optimizer):
                 exp_avg = exp_avg.float()
 
             # Compute update term c_t
-            update = exp_avg.clone().mul_(beta1).add_(grad_reshaped, alpha=(1-beta1)).sign_()
+            update = torch.lerp(grad_reshaped, exp_avg, beta1).sign_()
 
             if self.cautious_mask:
                 mask = (update * grad_reshaped > 0).to(grad_reshaped.dtype)
@@ -165,7 +165,8 @@ class Lion_adv(torch.optim.Optimizer):
             update = update.view(p.shape).mul_(lr)
 
             # Standard Lion momentum update
-            exp_avg.mul_(beta2).add_(grad_reshaped, alpha=1-beta2)
+            # m_t = beta2 * m_{t-1} + (1-beta2) * g_t
+            exp_avg.lerp_(grad_reshaped, 1 - beta2)
             del grad_reshaped
 
             # Compress new momentum m_t and store factors
@@ -180,7 +181,8 @@ class Lion_adv(torch.optim.Optimizer):
             # Compute update term and sign for the update
             if exp_avg.dtype != torch.float32 and self.factored:
                 exp_avg = exp_avg.float()
-            update = exp_avg.clone().mul_(beta1).add_(grad, alpha=(1-beta1)).sign_()
+
+            update = torch.lerp(grad, exp_avg, beta1).sign_()
 
             if self.cautious_mask:
                 mask = (update * grad > 0).to(grad.dtype)
@@ -191,7 +193,7 @@ class Lion_adv(torch.optim.Optimizer):
             update.mul_(lr)
 
             # Standard Lion momentum update
-            exp_avg.mul_(beta2).add_(grad, alpha=1-beta2)
+            exp_avg.lerp_(grad, 1 - beta2)
 
         # Param Update
         param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)

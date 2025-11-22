@@ -340,6 +340,9 @@ class Prodigy_adv(torch.optim.Optimizer):
 
             grad_reshaped = grad.view(d1, d2)
 
+            # Calculate scaled gradient for Prodigy step (g_t * d)
+            grad_scaled_reshaped = grad_reshaped * d
+
             # Reconstruct momentum from previous step's factors
             if self.beta1 > 0:
                 mt = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
@@ -349,9 +352,9 @@ class Prodigy_adv(torch.optim.Optimizer):
                     del unpacked_sign
                 # Update momentum in full-size
                 if self.Simplified_AdEMAMix:
-                    mt.mul_(self.beta1).add_(grad_reshaped, alpha=d)
+                    mt.mul_(self.beta1).add_(grad_scaled_reshaped)
                 else:
-                    mt.mul_(self.beta1).add_(grad_reshaped, alpha=d * (1.0 - self.beta1))
+                    mt.lerp_(grad_scaled_reshaped, 1 - self.beta1)
                 if self.grams_moment:
                     update_mt = (grad_reshaped.sign().mul_(mt.abs()))
                 elif self.cautious_mask:
@@ -363,7 +366,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                     update_mt = mt.clone()
 
             vt = _unnmf((state['mu_v_nmf'], state['mv_v_nmf']))
-            vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=d * d * (1.0 - beta2))
+            vt.mul_(beta2).addcmul_(grad_scaled_reshaped, grad_scaled_reshaped, value=1.0 - beta2)
 
             if self.use_AdEMAMix:
                 mt_slow = _unnmf((state['mu_m_slow_nmf'], state['mv_m_slow_nmf']))
@@ -372,15 +375,19 @@ class Prodigy_adv(torch.optim.Optimizer):
                 unpacked_sign_slow = _unpack_bools(state['sign_slow'], original_m=d2)
                 torch.where(unpacked_sign_slow, mt_slow, -mt_slow, out=mt_slow)
                 del unpacked_sign_slow
-                mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=d * (1.0 - beta3_ema))
+                mt_slow.lerp_(grad_scaled_reshaped, 1 - beta3_ema)
                 if self.beta1 > 0:
-                    update = torch.add(update_mt, mt_slow, alpha=alpha)
+                    update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
-                    update = torch.add(grad_reshaped.mul(d), mt_slow, alpha=alpha)
+                    update = grad_scaled_reshaped.add_(mt_slow, alpha=alpha)
             elif self.Simplified_AdEMAMix:
-                update = torch.add(update_mt, grad_reshaped, alpha=alpha_grad * d)
+                update = update_mt.add_(grad_scaled_reshaped, alpha=alpha_grad)
             else:
-                update = update_mt if self.beta1 > 0 else grad_reshaped.mul(d)
+                if self.beta1 > 0:
+                    update = update_mt
+                    del grad_scaled_reshaped
+                else:
+                    update = grad_scaled_reshaped
             del grad_reshaped
 
             if group['use_atan2']:
@@ -410,12 +417,15 @@ class Prodigy_adv(torch.optim.Optimizer):
         else:  # Standard AdamW logic for non-factored tensors
             exp_avg_sq = state['exp_avg_sq']
 
+            # Calculate scaled gradient for Prodigy step (g_t * d)
+            grad_scaled = grad * d
+
             if self.beta1 > 0:
                 exp_avg = state['exp_avg']
                 if self.Simplified_AdEMAMix:
-                    exp_avg.mul_(self.beta1).add_(grad, alpha=d)
+                    exp_avg.mul_(self.beta1).add_(grad_scaled)
                 else:
-                    exp_avg.mul_(self.beta1).add_(grad, alpha=d * (1.0 - self.beta1))
+                    exp_avg.lerp_(grad_scaled, 1 - self.beta1)
                 if self.grams_moment:
                     update_mt = grad.sign().mul_(exp_avg.abs())
                 elif self.cautious_mask:
@@ -428,17 +438,21 @@ class Prodigy_adv(torch.optim.Optimizer):
 
             if self.use_AdEMAMix:
                 exp_avg_slow = state['exp_avg_slow']
-                exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=d * (1.0 - beta3_ema))
+                exp_avg_slow.lerp_(grad_scaled, 1 - beta3_ema)
                 if self.beta1 > 0:
-                    update = torch.add(update_mt, exp_avg_slow, alpha=alpha)
+                    update = update_mt.add_(exp_avg_slow, alpha=alpha)
                 else:
-                    update = torch.add(grad.mul(d), exp_avg_slow, alpha=alpha)
+                    update = grad_scaled.add_(exp_avg_slow, alpha=alpha)
             elif self.Simplified_AdEMAMix:
-                update = torch.add(update_mt, grad, alpha=alpha_grad * d)
+                update = update_mt.add_(grad_scaled, alpha=alpha_grad)
             else:
-                update = update_mt if self.beta1 > 0 else grad.mul(d)
+                if self.beta1 > 0:
+                    update = update_mt
+                    del grad_scaled
+                else:
+                    update = grad_scaled
 
-            exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=d * d * (1.0 - beta2))
+            exp_avg_sq.mul_(beta2).addcmul_(grad_scaled, grad_scaled, value=1.0 - beta2)
 
             if group['use_atan2']:
                 a = 1.2732395
@@ -456,17 +470,18 @@ class Prodigy_adv(torch.optim.Optimizer):
         if prodigy_steps <= 0 or group['k'] < prodigy_steps:
             d0, safeguard_warmup, slice_p = group['d0'], group['safeguard_warmup'], group['slice_p']
             s, p0 = state['s'], state['p0']
-            grad_flat = grad.flatten().float()
-            p_flat = p.data.flatten().float()
+
+            grad_slice = grad.flatten()[::slice_p].float()
+            p_slice = p.flatten()[::slice_p].float()
             p0 = p0.float()
 
-            self.d_numerator.add_((d / d0) * dlr * torch.dot(grad_flat[::slice_p], p0.data - p_flat[::slice_p]))
+            self.d_numerator.add_((d / d0) * dlr * torch.dot(grad_slice, p0 - p_slice))
 
             alpha = ((d / d0) * d) if safeguard_warmup else ((d / d0) * dlr)
-            s.mul_(self.beta3).add_(grad_flat[::slice_p], alpha=alpha)
+            s.mul_(self.beta3).add_(grad_slice, alpha=alpha)
             self.d_denom.add_(s.abs().sum())
 
-            del s, p0, grad_flat, p_flat, alpha
+            del s, p0, grad_slice, p_slice, alpha
         else:
             # Free memory if prodigy_steps is reached
             if 's' in state:

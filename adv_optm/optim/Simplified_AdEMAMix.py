@@ -213,7 +213,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
 
     @torch.no_grad()
-    def __step_parameter(self, p: torch.Tensor, group: dict, lr: torch.Tensor | float, beta1, num_sum, den_sum, random_int_tensor: torch.Tensor | None = None):
+    def __step_parameter(self, p: torch.Tensor, group: dict, step_size: torch.Tensor | float, beta1, denom_eps_val, random_int_tensor: torch.Tensor | None = None):
         if p.grad is None:
             return
 
@@ -251,17 +251,17 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             vt = _unnmf((state['mu_v_nmf'], state['mv_v_nmf']))
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
 
+            # Compute Update
             update = torch.add(mt, grad_reshaped, alpha=alpha_grad)
             del grad_reshaped
 
-            denom = vt.sqrt().add_(group['eps'] * math.sqrt(den_sum))
-            update.div_(denom)
+            # denom = sqrt(vt) + eps * sqrt(den_sum)
+            denom = vt.sqrt_().add_(denom_eps_val)
+
+            update.div_(denom).mul_(step_size)
             del denom
 
-            if group['use_bias_correction']:
-                update = (update / num_sum) * math.sqrt(den_sum)
-
-            update = update.view(p.shape).mul_(group['lr'])
+            update = update.view(p.shape)
 
             # Compress updated moments and store new factors
             state['sign'] = _pack_bools(mt > 0)
@@ -274,23 +274,24 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             exp_avg_sq = state['exp_avg_sq']
 
             exp_avg = state['exp_avg']
+
+            # In-place momentum update
             exp_avg.mul_(beta1).add_(grad, alpha=1.0)
 
+            # Update accumulation
             update = torch.add(exp_avg, grad, alpha=alpha_grad)
 
-            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+            # Variance update
+            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
 
-            denom = exp_avg_sq.sqrt().add_(group['eps'] * math.sqrt(den_sum))
-            update.div_(denom)
+            # Denom calculation (uses buffer)
+            denom = exp_avg_sq.sqrt().add_(denom_eps_val)
+
+            update.div_(denom).mul_(step_size)
             del denom
 
-            if group['use_bias_correction']:
-                update = (update / num_sum) * math.sqrt(den_sum)
-
-            update.mul_(group['lr'])
-
         # Param Update
-        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
+        param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
@@ -314,14 +315,27 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         if p.dtype == torch.bfloat16 and self.stochastic_rounding and group.get('compiled_optimizer', False):
             random_int_tensor = param_update._get_random_int_for_sr(p)
 
+        if not hasattr(self, 'step_size') or self.step_size is None:
+            sqrt_den_sum = math.sqrt(self.den_sum)
+            self.denom_eps_val = group['eps'] * sqrt_den_sum
+
+            # Calculate consolidated step_size
+            if group['use_bias_correction']:
+                step_val = group['lr'] * (sqrt_den_sum / self.num_sum)
+            else:
+                step_val = group['lr']
+
+            # Store as tensor for compiled, scalar for eager
+            if group.get('compiled_optimizer', False):
+                self.step_size = torch.tensor(step_val, device=p.device)
+                self.denom_eps_val = torch.tensor(self.denom_eps_val, device=p.device)
+            else:
+                self.step_size = step_val
+
         if not group.get('compiled_optimizer', False):
-            self.__step_parameter(p, group, group['lr'], self.beta1, self.num_sum, self.den_sum)
+            self.__step_parameter(p, group, self.step_size, self.beta1, self.denom_eps_val)
         else:
-            if not hasattr(self, 'lr_tensor') or self.lr_tensor is None:
-                self.lr_tensor = torch.tensor(group['lr'], device=p.device)
-                self.num_sum_tesnor = torch.tensor(self.num_sum, device=p.device)
-                self.den_sum_tesnor = torch.tensor(self.den_sum, device=p.device)
-            self._compiled_step_parameter(p, group, self.lr_tensor, self.beta1, self.num_sum_tesnor, self.den_sum_tesnor, random_int_tensor)
+            self._compiled_step_parameter(p, group, self.step_size, self.beta1, self.denom_eps_val, random_int_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
@@ -344,12 +358,10 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             self.den_sum = g_group['betas'][1] * self.den_sum + (1.0 - g_group['betas'][1])
 
         if group["beta1_warmup"] is not None:
-            current_step = self.state[p][0]['step'] + 1
+            current_step = self.state[p]['step'] + 1
             self.beta1 = linear_hl_warmup_scheduler(current_step, beta_end=group["betas"][0], beta_start=group['min_beta1'], warmup=group["beta1_warmup"])
         else:
             self.beta1 = group["betas"][0]
 
-        if self.param_groups[0].get('compiled_optimizer', False):
-            # Reset compile tensors once a step
-            self.lr_tensor = None
+        self.step_size = None
         return loss

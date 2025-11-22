@@ -250,7 +250,7 @@ class Adopt_adv(torch.optim.Optimizer):
         if state['factored']:
             d1, d2 = state['effective_shape']
             # v_0 = g_0^2 (SMMF_ADOPT NMF storage)
-            vt_init = grad.view(d1, d2).square_()
+            vt_init = grad.square().view(d1, d2)
             # Allocate NMF factors for v
             state['mu_v_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
             state['mv_v_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
@@ -332,21 +332,22 @@ class Adopt_adv(torch.optim.Optimizer):
                 if self.Simplified_AdEMAMix:
                     mt.mul_(beta1).add_(normalized_grad, alpha=1.0)
                 else:
-                    mt.mul_(beta1).add_(normalized_grad, alpha=1.0 - beta1)
+                    mt.lerp_(normalized_grad, 1.0 - beta1)
+
                 if self.grams_moment:
                     update_mt = grad_reshaped.sign().mul_(mt.abs())
                 elif self.cautious_mask:
                     mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
-                    update_mt= mt.mul(mask)
+                    update_mt = mt.mul(mask)
                     del mask
                 else:
                     update_mt = mt.clone()
 
             if self.use_AdEMAMix:
-                mt_slow.mul_(beta3_ema).add_(normalized_grad, alpha=1.0 - beta3_ema)
+                mt_slow.lerp_(normalized_grad, 1.0 - beta3_ema)
                 if beta1 > 0:
-                    update = torch.add(update_mt, mt_slow, alpha=alpha)
+                    update = update_mt.add(mt_slow, alpha=alpha)
                 else:
                     update = torch.add(normalized_grad, mt_slow, alpha=alpha)
             elif self.Simplified_AdEMAMix:
@@ -398,11 +399,11 @@ class Adopt_adv(torch.optim.Optimizer):
 
             # ADOPT Step B: Update momentum m_t
             if beta1 > 0:
-                mt = state['exp_avg'] # m_{t-1},
+                mt = state['exp_avg'] # m_{t-1}
                 if self.Simplified_AdEMAMix:
                     mt.mul_(beta1).add_(normalized_grad, alpha=1.0)
                 else:
-                    mt.mul_(beta1).add_(normalized_grad, alpha=1.0 - beta1)
+                    mt.lerp_(normalized_grad, 1.0 - beta1)
 
             if self.grams_moment:
                 update_mt = grad.sign().mul_(mt.abs())
@@ -416,7 +417,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
             if self.use_AdEMAMix:
                 m_slow = state['exp_avg_slow']
-                m_slow.mul_(beta3_ema).add_(normalized_grad, alpha=1.0 - beta3_ema)
+                m_slow.lerp_(normalized_grad, 1.0 - beta3_ema)
                 if beta1 > 0:
                     update = torch.add(update_mt, m_slow, alpha=alpha)
                 else:

@@ -3,7 +3,7 @@ from typing import Optional, Callable
 
 from ..util import param_update
 from ..util.Effective_Shape import _get_effective_shape
-from ..util.NNMF import _nnmf,_unnmf
+from ..util.NNMF import _nnmf, _unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
 from ..util.Kourkoutas import KourkoutasHelper
@@ -254,8 +254,10 @@ class AdamW_adv(torch.optim.Optimizer):
                     unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
                     torch.where(unpacked_sign, mt, -mt, out=mt)
                     del unpacked_sign
+
                 # Update momentum in full-size
-                mt.mul_(beta1).add_(grad_reshaped, alpha=1.0 - beta1)
+                mt.lerp_(grad_reshaped, 1.0 - beta1)
+
                 if self.grams_moment:
                     update_mt = (grad_reshaped.sign().mul_(mt.abs()))
                 elif self.cautious_mask:
@@ -277,9 +279,10 @@ class AdamW_adv(torch.optim.Optimizer):
                 torch.where(unpacked_sign_slow, mt_slow, -mt_slow, out=mt_slow)
                 del unpacked_sign_slow
 
-                mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=1.0 - beta3_ema)
+                mt_slow.lerp_(grad_reshaped, 1.0 - beta3_ema)
+
                 if beta1 > 0:
-                    update = torch.add(update_mt, mt_slow, alpha=alpha)
+                    update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
                     update = torch.add(grad_reshaped, mt_slow, alpha=alpha)
             else:
@@ -315,7 +318,8 @@ class AdamW_adv(torch.optim.Optimizer):
 
             if beta1 > 0:
                 exp_avg = state['exp_avg']
-                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg.lerp_(grad, 1.0 - beta1)
+
                 if self.grams_moment:
                     update_mt = grad.sign().mul_(exp_avg.abs())
                 elif self.cautious_mask:
@@ -328,9 +332,10 @@ class AdamW_adv(torch.optim.Optimizer):
 
             if self.use_AdEMAMix:
                 exp_avg_slow = state['exp_avg_slow']
-                exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=1 - beta3_ema)
+                exp_avg_slow.lerp_(grad, 1.0 - beta3_ema)
+
                 if beta1 > 0:
-                    update = torch.add(update_mt, exp_avg_slow, alpha=alpha)
+                    update = update_mt.add_(exp_avg_slow, alpha=alpha)
                 else:
                     update = torch.add(grad, exp_avg_slow, alpha=alpha)
             else:
