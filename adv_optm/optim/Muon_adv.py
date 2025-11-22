@@ -683,9 +683,13 @@ class Muon_adv(torch.optim.Optimizer):
 
         state = self.state[p]
 
-
         lr = group['lr']
         is_compiled = group.get('compiled_optimizer', False)
+
+        # Pre-generate random tensor for stochastic rounding if needed.
+        random_int_tensor = None
+        if p.dtype == torch.bfloat16 and self.stochastic_rounding and is_compiled:
+            random_int_tensor = param_update._get_random_int_for_sr(p)
 
         if not group['use_muon']: # AdamW path
             step = state['step']
