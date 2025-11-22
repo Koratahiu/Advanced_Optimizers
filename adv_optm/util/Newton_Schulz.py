@@ -88,3 +88,74 @@ def _newton_schulz_iteration(
         X = X.mT
 
     return X.to(G.dtype)
+
+
+@torch.no_grad()
+def newton_schulz(
+    G: torch.Tensor,
+    steps: int = 5,
+    eps: float = 1e-7,
+    coeffs: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
+    cns: bool = False,
+    cns_a_bound: float = 1e-4,
+    low_rank_ortho: bool = False,
+    ortho_rank: int = 128,
+) -> torch.Tensor:
+    """
+    Public entry point for Muon orthogonalization.
+    Handles either full Newton-Schulz or Low-Rank Orthogonalization via Gaussian Sketching.
+
+    Args:
+        G (torch.Tensor): Input matrix (gradient/update).
+        steps (int): NS iterations.
+        eps (float): Numerical stability epsilon.
+        coeffs (tuple): Polynomial coefficients.
+        cns (bool): Use Chebyshev-accelerated Newton-Schulz.
+        cns_a_bound (float): CANS lower bound.
+        low_rank_ortho (bool): Whether to project to low rank before orthogonalizing.
+        ortho_rank (int): Rank for low-rank projection.
+    """
+    if low_rank_ortho:
+        # Low-Rank Orthogonalization based on Gaussian Sketching
+        M = G
+        r = min(ortho_rank, M.shape[0], M.shape[1])
+
+        if r > 0:
+            # 1. Sketch the matrix
+            G_sketch = torch.randn(M.shape[1], r, device=M.device, dtype=M.dtype)
+            MG = M @ G_sketch
+
+            # 2. QR decomposition to get orthogonal basis Q
+            # Handle dtype mismatch for QR if necessary
+            if MG.dtype != torch.float32:
+                MG_dtype = M.dtype
+                Q, _ = torch.linalg.qr(MG.float())
+                Q = Q.to(MG_dtype)
+            else:
+                Q, _ = torch.linalg.qr(MG)
+
+            # 3. Project M onto the basis
+            projected_M = Q.T @ M
+
+            # 4. Orthogonalize the smaller projected matrix
+            ortho_projected_M = _newton_schulz_iteration(
+                projected_M,
+                steps=steps,
+                eps=eps,
+                coeffs=coeffs,
+                cns=cns,
+                cns_a_bound=cns_a_bound
+            )
+
+            # 5. Project back to the original space
+            return Q @ ortho_projected_M
+
+    # Fallback (if rank invalid) or Standard Path
+    return _newton_schulz_iteration(
+        G,
+        steps=steps,
+        eps=eps,
+        coeffs=coeffs,
+        cns=cns,
+        cns_a_bound=cns_a_bound
+    )

@@ -1,7 +1,7 @@
 import torch
 
 from ..util.BF16_Stochastic_Rounding import add_stochastic_, set_seed as set_stochastic_rounding_seed
-from ..util.Newton_Schulz import _newton_schulz_iteration
+from ..util.Newton_Schulz import newton_schulz
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
@@ -320,38 +320,16 @@ class AdaMuon_adv(torch.optim.Optimizer):
             del grad_reshaped
 
             # Orthogonalization step
-            if group['low_rank_ortho']:
-                # Low-Rank Orthogonalization on the reconstructed matrix
-                M = signed_m_buf
-                r = min(group['ortho_rank'], M.shape[0], M.shape[1])
-                if r > 0:
-                    G_sketch = torch.randn(M.shape[1], r, device=M.device, dtype=M.dtype)
-                    MG = M @ G_sketch
-                    if MG.dtype != torch.float32:
-                        MG_dtype = M.dtype
-                        Q, _ = torch.linalg.qr(MG.float())
-                        Q = Q.to(MG_dtype)
-                    else:
-                        Q, _ = torch.linalg.qr(MG)
-                    projected_M = Q.T @ M
-                    ortho_projected_M = _newton_schulz_iteration(
-                        projected_M, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs'], cns=group['accelerated_ns'], cns_a_bound=group['cns_a_bound']
-                    )
-                    update = Q @ ortho_projected_M
-                else: # Fallback for invalid rank
-                    update = _newton_schulz_iteration(
-                        signed_m_buf, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs'], cns=group['accelerated_ns'], cns_a_bound=group['cns_a_bound']
-                    )
-            else:
-                # Original full Newton-Schulz
-                update = _newton_schulz_iteration(
-                    signed_m_buf,
-                    steps=group['ns_steps'],
-                    eps=group['ns_eps'],
-                    coeffs=group['ns_coeffs'],
-                    cns=group['accelerated_ns'],
-                    cns_a_bound=group['cns_a_bound'],
-                )
+            update = newton_schulz(
+                signed_m_buf,
+                steps=group['ns_steps'],
+                eps=group['ns_eps'],
+                coeffs=group['ns_coeffs'],
+                cns=group['accelerated_ns'],
+                cns_a_bound=group['cns_a_bound'],
+                low_rank_ortho=group['low_rank_ortho'],
+                ortho_rank=group['ortho_rank']
+            )
             del signed_m_buf
 
             if group['normuon_variant']:
@@ -424,38 +402,16 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     signed_m_buf = signed_m_buf.view(len(signed_m_buf), -1)
 
                 # Orthogonalization step
-                if group['low_rank_ortho']:
-                    # Low-Rank Orthogonalization on the reconstructed matrix
-                    M = signed_m_buf
-                    r = min(group['ortho_rank'], M.shape[0], M.shape[1])
-                    if r > 0:
-                        G_sketch = torch.randn(M.shape[1], r, device=M.device, dtype=M.dtype)
-                        MG = M @ G_sketch
-                        if MG.dtype != torch.float32:
-                            MG_dtype = M.dtype
-                            Q, _ = torch.linalg.qr(MG.float())
-                            Q = Q.to(MG_dtype)
-                        else:
-                            Q, _ = torch.linalg.qr(MG)
-                        projected_M = Q.T @ M
-                        ortho_projected_M = _newton_schulz_iteration(
-                            projected_M, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs'], cns=group['accelerated_ns'], cns_a_bound=group['cns_a_bound']
-                        )
-                        update = Q @ ortho_projected_M
-                    else: # Fallback for invalid rank
-                        update = _newton_schulz_iteration(
-                            signed_m_buf, steps=group['ns_steps'], eps=group['ns_eps'], coeffs=group['ns_coeffs'], cns=group['accelerated_ns'], cns_a_bound=group['cns_a_bound']
-                        )
-                else:
-                    # Original full Newton-Schulz
-                    update = _newton_schulz_iteration(
-                        signed_m_buf,
-                        steps=group['ns_steps'],
-                        eps=group['ns_eps'],
-                        coeffs=group['ns_coeffs'],
-                        cns=group['accelerated_ns'],
-                        cns_a_bound=group['cns_a_bound'],
-                    )
+                update = newton_schulz(
+                    signed_m_buf,
+                    steps=group['ns_steps'],
+                    eps=group['ns_eps'],
+                    coeffs=group['ns_coeffs'],
+                    cns=group['accelerated_ns'],
+                    cns_a_bound=group['cns_a_bound'],
+                    low_rank_ortho=group['low_rank_ortho'],
+                    ortho_rank=group['ortho_rank']
+                )
                 del signed_m_buf
 
                 if group['normuon_variant']:
