@@ -489,7 +489,6 @@ class Muon_adv(torch.optim.Optimizer):
                     del update_norm
                 else:
                     # Matches original Muon scaling: update *= max(1, rows/cols)**0.5
-                    # update is currently shape (rows, cols)
                     update = update.view(p.shape)
                     r, c = update.size(-2), update.size(-1)
                     scaling_factor = max(1, r / c) ** 0.5
