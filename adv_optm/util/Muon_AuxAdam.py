@@ -6,7 +6,7 @@ from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
 from ..util.OrthoGrad import _orthogonalize_gradient
 
 @torch.no_grad()
-def __init__auxadam_state(self, p, group):
+def _init_auxadam_state(self, p, group):
     state = self.state[p]
 
     state['step'] = 0

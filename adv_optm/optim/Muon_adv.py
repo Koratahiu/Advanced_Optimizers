@@ -278,7 +278,7 @@ class Muon_adv(torch.optim.Optimizer):
             group['adam_kourkoutas_beta'] = False
 
         else: # AdamW
-            Muon_AuxAdam.__init__auxadam_state(self, p, group)
+            Muon_AuxAdam._init_auxadam_state(self, p, group)
 
     @torch.no_grad()
     def _muon_step_parameter(self, p, grad, state, group, lr):
