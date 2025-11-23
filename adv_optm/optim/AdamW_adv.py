@@ -369,30 +369,35 @@ class AdamW_adv(torch.optim.Optimizer):
         if p.dtype == torch.bfloat16 and self.stochastic_rounding and group.get('compiled_optimizer', False):
             random_int_tensor = param_update._get_random_int_for_sr(p)
 
-        if group['use_bias_correction']:
-            current_step = step + 1
-            beta1, beta2 = group['betas']
-            bias_correction1 = 1.0 - beta1 ** current_step
-            bias_correction2 = 1.0 - beta2 ** current_step
-        else:
-            bias_correction1 = 1.0
-            bias_correction2 = 1.0
-
         if group.get('kourkoutas_beta', False):
             # Prepare Kourkoutas-β once per step using the global step counter.
             self.kourkoutas_helper.maybe_prepare_step(step)
 
+        if not hasattr(self, 'bias_correction1') or self.bias_correction1 is None:
+            if group['use_bias_correction']:
+                current_step = step + 1
+                beta1, beta2 = group['betas']
+                bias_correction1 = 1.0 - beta1 ** current_step
+                bias_correction2 = 1.0 - beta2 ** current_step
+            else:
+                bias_correction1 = 1.0
+                bias_correction2 = 1.0
+
+            if group.get('compiled_optimizer', False):
+                self.bias_correction1 = torch.tensor(bias_correction1, device=p.device)
+                self.bias_correction2 = torch.tensor(bias_correction2, device=p.device)
+                self.lr_tensor = torch.tensor(group['lr'], device=p.device)
+            else:
+                self.bias_correction1 = bias_correction1
+                self.bias_correction2 = bias_correction2
+
+
         self.state[p]['step'] += 1
 
         if not group.get('compiled_optimizer', False):
-            self.__step_parameter(p, group, group['lr'], bias_correction1, bias_correction2)
+            self.__step_parameter(p, group, group['lr'], self.bias_correction1, self.bias_correction2)
         else:
-            if not hasattr(self, 'lr_tensor') or self.lr_tensor is None:
-                # convert to tensors for compiled path once a step
-                self.lr_tensor = torch.tensor(group['lr'], device=p.device)
-                self.bc1_tensor = torch.tensor(bias_correction1, device=p.device)
-                self.bc2_tensor = torch.tensor(bias_correction2, device=p.device)
-            self._compiled_step_parameter(p, group, self.lr_tensor, self.bc1_tensor, self.bc2_tensor, random_int_tensor)
+            self._compiled_step_parameter(p, group, self.lr_tensor, self.bias_correction1, self.bias_correction2, random_int_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self.__step_parameter, *args, **kwargs)
@@ -409,7 +414,5 @@ class AdamW_adv(torch.optim.Optimizer):
             for i, p in enumerate(group['params']):
                 self.step_parameter(p, group, i)
 
-        if self.param_groups[0].get('compiled_optimizer', False):
-            # Reset compile tensors once a step
-            self.lr_tensor = None
+        self.bias_correction1 = None
         return loss
