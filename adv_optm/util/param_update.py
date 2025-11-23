@@ -69,10 +69,10 @@ def apply_parameter_update(
             else:
                 # Standard decoupled weight decay
                 p.data.add_(p.data, alpha=-wd * lr)
-        
+
         # Apply main update
         p.data.add_(-update)
-    
+
     del update
 
 def set_seed(device: torch.device):
@@ -98,7 +98,7 @@ def _get_random_int_for_sr(source: Tensor) -> Tensor:
     if device not in _generators:
         set_seed(device)
 
-    # TODO, this is a workaround until torch compile error 
+    # TODO, this is a workaround until torch compile error
     # NotImplementedError: UserDefinedObjectVariable is fixed
     generator = _generators[device]
 

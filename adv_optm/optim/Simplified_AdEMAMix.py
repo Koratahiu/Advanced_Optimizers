@@ -150,8 +150,6 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
 
-        self.global_step = 0
-
         if compiled_optimizer:
             torch._dynamo.config.cache_size_limit = 8192
             self.compile(fullgraph=True)
