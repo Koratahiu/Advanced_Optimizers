@@ -284,10 +284,13 @@ class AdamW_adv(torch.optim.Optimizer):
                 if beta1 > 0:
                     update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
-                    update = torch.add(grad_reshaped, mt_slow, alpha=alpha)
+                    update = grad_reshaped.add_(mt_slow, alpha=alpha)
             else:
-                update = update_mt if beta1 > 0 else grad_reshaped.clone()
-            del grad_reshaped
+                if beta1 > 0:
+                    update = update_mt
+                    del grad_reshaped
+                else:
+                    update = grad_reshaped
 
             if group['use_atan2']:
                 a = 1.2732395
