@@ -201,6 +201,10 @@ class Prodigy_adv(torch.optim.Optimizer):
         self.layer_key_fn = layer_key_fn
 
         super().__init__(params, defaults)
+
+        # Use the device of the first parameter to avoid hardcoding '.cuda()'
+        self.device = self.param_groups[0]['params'][0].device
+
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
         self.init_step()
@@ -226,7 +230,7 @@ class Prodigy_adv(torch.optim.Optimizer):
 
     def init_step(self):
         """Resets accumulators and calculates dlr for the upcoming step."""
-        self.d_denom = 0.0
+        self.d_denom = torch.tensor(0.0, device=self.device)
 
         g_group = self.param_groups[0]
         self.beta1, self.beta2_default = g_group['betas']
@@ -238,7 +242,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         lr = g_group['lr']
 
         self.dlr = self.d * lr
-        self.d_numerator = g_group.get('d_numerator', 0.0) * self.beta3
+        self.d_numerator = torch.tensor(g_group.get('d_numerator', 0.0) * self.beta3, device=self.device)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
@@ -511,26 +515,21 @@ class Prodigy_adv(torch.optim.Optimizer):
 
         if prodigy_active:
             d_max, d_coef, growth_rate = g_group['d_max'], g_group['d_coef'], g_group['growth_rate']
-            
+
             if self.fsdp_in_use and dist.is_available() and dist.is_initialized():
-                # Use the device of the first parameter to avoid hardcoding '.cuda()'
-                device = self.param_groups[0]['params'][0].device
-                dist_tensor = torch.tensor([self.d_numerator, self.d_denom], device=device)
+                dist_tensor = torch.stack([self.d_numerator, self.d_denom])
                 dist.all_reduce(dist_tensor, op=dist.ReduceOp.SUM)
                 global_d_numerator = dist_tensor[0].item()
                 global_d_denom = dist_tensor[1].item()
             else:
-                global_d_numerator = self.d_numerator
-                global_d_denom = self.d_denom
+                global_d_numerator = self.d_numerator.item()
+                global_d_denom = self.d_denom.item()
 
             d_hat = self.d
             if global_d_denom > 0:
                 d_hat = d_coef * global_d_numerator / global_d_denom
                 if g_group.get('d_limiter', False):
-                    if g_group.get('Simplified_AdEMAMix', False):
-                        d_hat = min(self.d * (2 ** 0.1), d_hat)
-                    else:
-                        d_hat = min(self.d * (2 ** 0.25), d_hat)
+                    d_hat = min(self.d * (2 ** 0.25), d_hat)
                 if self.d == g_group['d0']:
                     self.d = max(self.d, d_hat)
                 d_max = max(d_max, d_hat)
@@ -540,7 +539,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 group['d_numerator'] = global_d_numerator
                 group['d'] = self.d
                 group['d_max'] = d_max
-        
+
         # Increment step counter for all groups, regardless of whether d was updated
         for group in self.param_groups:
             group['k'] += 1
