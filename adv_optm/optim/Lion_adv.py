@@ -2,7 +2,7 @@ import torch
 
 from typing import Tuple, Optional
 
-from ..util.BF16_Stochastic_Rounding import add_stochastic_, set_seed as set_stochastic_rounding_seed
+from ..util import param_update
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -22,6 +22,9 @@ class Lion_adv(torch.optim.Optimizer):
         betas (Tuple[float, float], optional): coefficients for computing
             running averages of the update (default: (0.9, 0.99)).
         weight_decay (float, optional): weight decay (L2 penalty) (default: 0.0).
+        cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
+            applied only to parameter coordinates where the sign of the parameter
+            and the sign of the optimizer update align (default: False).
         vector_reshape (bool, optional): whether to reshape 1D vectors into 2D
             matrices to apply low-rank compression (default: True).
         stochastic_rounding (bool, optional): whether to use stochastic
@@ -41,6 +44,7 @@ class Lion_adv(torch.optim.Optimizer):
         lr: float = 1e-4,
         betas: Tuple[float, float] = (0.9, 0.99),
         weight_decay: float = 0.0,
+        cautious_wd: bool = False,
         vector_reshape: bool = True,
         stochastic_rounding: bool = True,
         orthogonal_gradient: bool = False,
@@ -59,6 +63,7 @@ class Lion_adv(torch.optim.Optimizer):
             lr=lr,
             betas=betas,
             weight_decay=weight_decay,
+            cautious_wd=cautious_wd,
             vector_reshape=vector_reshape,
             orthogonal_gradient=orthogonal_gradient,
             clip_threshold=clip_threshold,
@@ -73,7 +78,7 @@ class Lion_adv(torch.optim.Optimizer):
             # for each device used by the parameters.
             devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
             for device in devices:
-                set_stochastic_rounding_seed(device)
+                param_update.set_seed(device)
 
     @property
     def supports_fused_back_pass(self) -> bool:
@@ -188,21 +193,7 @@ class Lion_adv(torch.optim.Optimizer):
             # Standard Lion momentum update
             exp_avg.lerp_(grad, 1 - beta2)
 
-        if group["weight_decay"] != 0:
-            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data,
-                                alpha=-group["weight_decay"] * lr)
-            else:
-                p.data.add_(
-                    p.data, alpha=-group["weight_decay"] * lr
-                )
-
-        if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-            add_stochastic_(p.data, -update)
-        else:
-            p.data.add_(-update)
-
-        del update
+        param_update.apply_parameter_update(self, p, group, update, lr)
 
     @torch.no_grad()
     def step(self, closure: Optional[callable] = None):

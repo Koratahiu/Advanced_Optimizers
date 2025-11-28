@@ -5,7 +5,7 @@ import math
 
 from typing import Optional, Callable
 
-from ..util.BF16_Stochastic_Rounding import add_stochastic_, set_seed as set_stochastic_rounding_seed
+from ..util import param_update
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -27,6 +27,9 @@ class Prodigy_adv(torch.optim.Optimizer):
         eps (float): term added to the denominator to improve
             numerical stability (default: 1e-8)
         weight_decay (float): weight decay (L2 penalty) (default: 0)
+        cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
+            applied only to parameter coordinates where the sign of the parameter
+            and the sign of the optimizer update align (default: False).
         vector_reshape (bool): whether to reshape 1D vectors into 2D
             matrices to apply low-rank compression (default: True).
         stochastic_rounding (bool): whether to use stochastic
@@ -116,6 +119,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         betas: tuple[float, float] = (0.9, 0.999),
         eps: float = 1e-8,
         weight_decay: float = 0.0,
+        cautious_wd: bool = False,
         vector_reshape: bool = True,
         stochastic_rounding: bool = True,
         use_atan2: bool = False,
@@ -178,7 +182,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             d_coef = d_coef/alpha_grad
 
         defaults = {
-            "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
+            "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
             "vector_reshape": vector_reshape, "use_atan2": use_atan2,
             "orthogonal_gradient": orthogonal_gradient,
             "beta3_ema": beta3_ema, "alpha": alpha,
@@ -214,7 +218,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             # for each device used by the parameters.
             devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
             for device in devices:
-                set_stochastic_rounding_seed(device)
+                param_update.set_seed(device)
 
     @property
     def supports_fused_back_pass(self):
@@ -475,18 +479,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             if 'p0' in state:
                 del state['p0']
 
-        # Decoupled weight decay
-        if group["weight_decay"] != 0:
-            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * self.dlr)
-            else:
-                p.data.add_(p.data, alpha=-group["weight_decay"] * self.dlr)
-
-        if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-            add_stochastic_(p.data, -update)
-        else:
-            p.data.add_(-update)
-        del update
+        param_update.apply_parameter_update(self, p, group, update, self.dlr)
 
         state['step'] += 1
 

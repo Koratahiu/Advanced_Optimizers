@@ -1,7 +1,7 @@
 import torch
 from typing import Callable, Optional
 
-from ..util.BF16_Stochastic_Rounding import add_stochastic_, set_seed as set_stochastic_rounding_seed
+from ..util import param_update
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf, _unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -28,6 +28,9 @@ class Adopt_adv(torch.optim.Optimizer):
         eps (float): term added to the denominator to improve
             numerical stability (default: 1e-6)
         weight_decay (float): weight decay (L2 penalty) (default: 0)
+        cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
+            applied only to parameter coordinates where the sign of the parameter
+            and the sign of the optimizer update align (default: False).
         clip_lambda (Callable, optional): A function that takes the current step
             and returns a value to clip the normalized gradient. Only used when
             `use_atan2` is False. (default: `lambda step: step**0.25`)
@@ -99,6 +102,7 @@ class Adopt_adv(torch.optim.Optimizer):
         betas: tuple[float, float] = (0.9, 0.9999),
         eps: float = 1e-6,
         weight_decay: float = 0.0,
+        cautious_wd: bool = False,
         clip_lambda: Optional[Callable[[int], float]] = lambda step: step**0.25,
         vector_reshape: bool = True,
         stochastic_rounding: bool = True,
@@ -142,7 +146,7 @@ class Adopt_adv(torch.optim.Optimizer):
             print("Warning: cautious is incompatible with Simplified_AdEMAMix, Disabling cautious.")
 
         defaults = {
-            "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
+            "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
             "vector_reshape": vector_reshape, "beta3_ema": beta3_ema, "alpha": alpha,
             "alpha_grad": alpha_grad, 
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
@@ -169,7 +173,7 @@ class Adopt_adv(torch.optim.Optimizer):
             # for each device used by the parameters.
             devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
             for device in devices:
-                set_stochastic_rounding_seed(device)
+                param_update.set_seed(device)
 
     @property
     def supports_fused_back_pass(self): return True
@@ -410,17 +414,7 @@ class Adopt_adv(torch.optim.Optimizer):
             vt.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
 
         # Parameter Update
-        if group["weight_decay"] != 0:
-            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * group["lr"])
-            else:
-                p.data.add_(p.data, alpha=-group["weight_decay"] * group["lr"])
-
-        if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-            add_stochastic_(p.data, -update)
-        else:
-            p.data.add_(-update)
-        del update
+        param_update.apply_parameter_update(self, p, group, update, group['lr'])
 
         state['step'] += 1
 

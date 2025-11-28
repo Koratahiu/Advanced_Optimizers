@@ -5,6 +5,69 @@ from typing import Dict, Any
 
 _generators: Dict[torch.device, torch.Generator] = {}
 
+
+def apply_parameter_update(
+    self,
+    p: Tensor,
+    group: Dict[str, Any],
+    update: Tensor,
+    lr: float | Tensor,
+    wd: float | None = None,
+) -> None:
+    """
+    Applies decoupled weight decay (standard or cautious) and the final
+    parameter update to p.data in-place.
+
+    Args:
+        p: The parameter tensor whose data (p.data) will be updated.
+        group: The parameter group dictionary (must contain "weight_decay").
+        update: The pre-calculated update tensor (e.g., scaled gradient or momentum term).
+        lr: The current learning rate.
+        wd: Optional float value for weight decay, if another value other than group["weight_decay"] is needed.
+    """
+    wd = group["weight_decay"] if wd is None else wd
+    cautious = group.get('cautious_wd', False)
+
+    # Compute full update in float32 if using bfloat16 with stochastic rounding
+    if p.dtype == torch.bfloat16 and self.stochastic_rounding:
+        p_fp32 = p.data.float()
+        update_fp32 = update.float()
+
+        # Apply weight decay if needed
+        if wd != 0:
+            if cautious:
+                # Cautious Weight Decay
+                mask = (update_fp32 * p_fp32 >= 0).float()
+                p_fp32.addcmul_(p_fp32, mask, value=-wd * lr)
+                del mask
+            else:
+                # Standard decoupled weight decay
+                p_fp32.add_(p_fp32, alpha=-wd * lr)
+
+        # Apply main update
+        p_fp32.add_(-update_fp32)
+
+        # Single stochastic rounding at the end
+        copy_stochastic_(p.data, p_fp32)
+        del p_fp32, update_fp32
+
+    else:
+        # Standard path for non-bfloat16 or without stochastic rounding
+        if wd != 0:
+            if cautious:
+                # Cautious Weight Decay
+                mask = (update * p.data >= 0).to(p.dtype)
+                p.data.addcmul_(p.data, mask, value=-wd * lr)
+                del mask
+            else:
+                # Standard decoupled weight decay
+                p.data.add_(p.data, alpha=-wd * lr)
+
+        # Apply main update
+        p.data.add_(-update)
+
+    del update
+
 def set_seed(device: torch.device):
     """
     Initializes or resets the deterministic generator for a specific device.
