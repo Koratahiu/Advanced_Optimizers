@@ -254,7 +254,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             del grad_reshaped
 
             # denom = sqrt(vt) + eps * sqrt(den_sum)
-            denom = vt.sqrt_().add_(denom_eps_val)
+            denom = vt.sqrt().add_(denom_eps_val)
 
             update.div_(denom).mul_(step_size)
             del denom
