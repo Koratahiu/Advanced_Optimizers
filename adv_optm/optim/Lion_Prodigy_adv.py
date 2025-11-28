@@ -243,6 +243,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             # Fallback to standard Lion logic
             exp_avg = state["exp_avg"]
 
+            # Calculate scaled gradient for Prodigy step (g_t * d)
             grad_scaled = grad * self.d
 
             # Compute update term and sign for the update
