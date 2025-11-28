@@ -5,7 +5,7 @@ import math
 
 from ..util.BF16_Stochastic_Rounding import add_stochastic_, set_seed as set_stochastic_rounding_seed
 from ..util.Effective_Shape import _get_effective_shape
-from ..util.NNMF import _nnmf,_unnmf
+from ..util.NNMF import _nnmf, _unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
 from ..util.Kourkoutas import KourkoutasHelper
@@ -245,7 +245,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             del denom
 
             if group['use_bias_correction']:
-                update = (update / state['num_sum']) * math.sqrt(state['den_sum'])
+                update.mul_(math.sqrt(state['den_sum']) / state['num_sum'])
 
             update = update.view(p.shape).mul_(group['lr'])
 
@@ -271,7 +271,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             del denom
 
             if group['use_bias_correction']:
-                update = (update / state['num_sum']) * math.sqrt(state['den_sum'])
+                update.mul_(math.sqrt(state['den_sum']) / state['num_sum'])
 
             update.mul_(group['lr'])
 
