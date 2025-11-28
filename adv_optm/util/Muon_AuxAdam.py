@@ -1,5 +1,5 @@
 import torch
-from ..util.BF16_Stochastic_Rounding import add_stochastic_
+from ..util import param_update
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
@@ -176,15 +176,4 @@ def _adam_step_parameter(self, p, grad, state, group, lr, bias_correction1, bias
 
         update.mul_(step_size)
 
-    # Decoupled weight decay
-    if group["adam_weight_decay"] != 0:
-        if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-            add_stochastic_(p.data, p.data, alpha=-group["adam_weight_decay"] * lr)
-        else:
-            p.data.add_(p.data, alpha=-group["adam_weight_decay"] * lr)
-
-    if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-        add_stochastic_(p.data, -update)
-    else:
-        p.data.add_(-update)
-    del update
+    param_update.apply_parameter_update(self, p, group, update, lr, group["adam_weight_decay"])

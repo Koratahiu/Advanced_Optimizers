@@ -3,9 +3,9 @@ from typing import Optional, Callable
 
 import math
 
-from ..util.BF16_Stochastic_Rounding import add_stochastic_, set_seed as set_stochastic_rounding_seed
+from ..util import param_update
 from ..util.Effective_Shape import _get_effective_shape
-from ..util.NNMF import _nnmf,_unnmf
+from ..util.NNMF import _nnmf, _unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
 from ..util.Kourkoutas import KourkoutasHelper
@@ -39,6 +39,9 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         eps (float): term added to the denominator to improve
             numerical stability (default: 1e-8)
         weight_decay (float): weight decay (L2 penalty) (default: 0).
+        cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
+            applied only to parameter coordinates where the sign of the parameter
+            and the sign of the optimizer update align (default: False).
         alpha_grad (float): Coeficient for mixing the current gradient and EMA. for small batch
             sizes set it to high values, up to 100. And for large batch sized set it to small
             value, down to 0. (default: 100)
@@ -82,6 +85,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         betas: tuple[float, float] = (0.99, 0.999),
         eps: float = 1e-8,
         weight_decay: float = 0.0,
+        cautious_wd: bool = False,
         alpha_grad: float = 100.0,
         beta1_warmup: int | None = None,
         min_beta1: float | None = 0.9,
@@ -111,7 +115,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         if kourkoutas_beta and not (betas[1] > beta2_min): raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
 
         defaults = {
-            "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
+            "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
             "alpha_grad": alpha_grad, "beta1_warmup": beta1_warmup, "min_beta1": min_beta1,
             "vector_reshape": vector_reshape,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
@@ -132,7 +136,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             # for each device used by the parameters.
             devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
             for device in devices:
-                set_stochastic_rounding_seed(device)
+                param_update.set_seed(device)
 
     @property
     def supports_fused_back_pass(self):
@@ -245,7 +249,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             del denom
 
             if group['use_bias_correction']:
-                update = (update / state['num_sum']) * math.sqrt(state['den_sum'])
+                update.mul_(math.sqrt(state['den_sum']) / state['num_sum'])
 
             update = update.view(p.shape).mul_(group['lr'])
 
@@ -271,22 +275,11 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             del denom
 
             if group['use_bias_correction']:
-                update = (update / state['num_sum']) * math.sqrt(state['den_sum'])
+                update.mul_(math.sqrt(state['den_sum']) / state['num_sum'])
 
             update.mul_(group['lr'])
 
-        # Decoupled weight decay
-        if group["weight_decay"] != 0:
-            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-                add_stochastic_(p.data, p.data, alpha=-group["weight_decay"] * group["lr"])
-            else:
-                p.data.add_(p.data, alpha=-group["weight_decay"] * group["lr"])
-
-        if p.dtype == torch.bfloat16 and self.stochastic_rounding:
-            add_stochastic_(p.data, -update)
-        else:
-            p.data.add_(-update)
-        del update
+        param_update.apply_parameter_update(self, p, group, update, group["lr"])
 
         state['step'] += 1
 
