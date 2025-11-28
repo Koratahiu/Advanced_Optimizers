@@ -1,5 +1,7 @@
 import torch
 
+import torch.distributed as dist
+
 from ..util import param_update
 from ..util.Newton_Schulz import newton_schulz
 from ..util.Effective_Shape import _get_effective_shape
@@ -188,6 +190,12 @@ class Muon_adv(torch.optim.Optimizer):
                     "You must provide either 'use_muon' (bool) or 'optim_type' (str)."
                 )
 
+            group['use_muon'] = group.get('use_muon') or group.get('optim_type') == 'muon'
+
+            world_size = dist.get_world_size() if dist.is_initialized() else 1
+            if group['use_muon'] and world_size > 1:
+                group['params'] = sorted(group['params'], key=lambda x: x.size(), reverse=True)
+
         self.kourkoutas_helper = None
         if any(group.get('adam_kourkoutas_beta', False) for group in self.param_groups):
             self.kourkoutas_helper = KourkoutasHelper(self)
@@ -234,26 +242,7 @@ class Muon_adv(torch.optim.Optimizer):
         if len(state) > 0:
             return
 
-        # Determine optimizer type for this group
-        optim_type = group.get('optim_type')
-        use_muon = group.get('use_muon')
-
-        # Priority: optim_type > use_muon flag
-        is_muon = False
-        if optim_type == 'muon':
-            is_muon = True
-        elif optim_type == 'adam':
-            is_muon = False
-        elif use_muon is not None:
-            is_muon = use_muon
-        else:
-            # This branch should theoretically be unreachable due to __init__ validation
-            raise ValueError("Optimizer configuration missing: neither optim_type nor use_muon defined.")
-
-        # Enforce the decision back to the group for the step function
-        group['use_muon'] = is_muon
-
-        if is_muon:
+        if group['use_muon']:
 
             state['factored'] = (
                 group['nnmf_factor'] and
@@ -280,9 +269,11 @@ class Muon_adv(torch.optim.Optimizer):
                     state['normuon_v'] = torch.zeros(p.shape[0], device=p.device, dtype=torch.float32)
 
             group['adam_kourkoutas_beta'] = False
+            state['is_muon'] = True # Workaround as group was acting weirdly; passing muon params in adam path 
 
         else: # AdamW
             Muon_AuxAdam._init_auxadam_state(self, p, group)
+            state['is_muon'] = False
 
     @torch.no_grad()
     def _muon_step_parameter(self, p, grad, state, group, lr):
@@ -348,12 +339,12 @@ class Muon_adv(torch.optim.Optimizer):
             if group['rms_rescaling']:
                 rms_target = 0.2 # default (Adam) value for RMS
                 update_norm = torch.linalg.vector_norm(update)
-                update = update.view(p.shape).mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
+                update = update.reshape(p.shape).mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
                 del update_norm
             else:
                 # Matches original Muon scaling: update *= max(1, rows/cols)**0.5
                 # update is currently shape (rows, cols)
-                update = update.view(p.shape)
+                update = update.reshape(p.shape)
                 r, c = update.size(-2), update.size(-1)
                 scaling_factor = max(1, r / c) ** 0.5
                 update.mul_(scaling_factor * lr)
@@ -454,7 +445,7 @@ class Muon_adv(torch.optim.Optimizer):
         lr = group['lr']
         is_compiled = group.get('compiled_optimizer', False)
 
-        if not group['use_muon']: # AdamW path
+        if not state['is_muon']: # AdamW path
             step = state['step']
 
             if self.kourkoutas_helper:
@@ -510,9 +501,38 @@ class Muon_adv(torch.optim.Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        rank = dist.get_rank() if dist.is_initialized() else 0
+
         for group in self.param_groups:
-            for i, p in enumerate(group['params']):
-                self.step_parameter(p, group, i)
+            if group['use_muon'] and world_size > 1:
+                # Distributed logic for Muon groups
+                params = group['params']
+                # Pad parameters to make them divisible by world_size
+                # This is necessary so we can iterate in strides and all_gather cleanly
+                params_pad = params + [torch.empty_like(params[-1])] * (world_size - len(params) % world_size)
+
+                # Iterate with stride equal to world_size
+                for base_i in range(len(params))[::world_size]:
+                    # If this rank owns this specific parameter slice
+                    if base_i + rank < len(params):
+                        p = params[base_i + rank]
+                        # Ensure we have a gradient tensor to update (even if zero, for sync)
+                        if p.grad is None:
+                            p.grad = torch.zeros_like(p)
+                        
+                        self.step_parameter(p, group, base_i + rank)
+
+                    # Synchronize updated parameters across all ranks
+                    # We gather the slice of parameters processed by the group of ranks
+                    dist.all_gather(
+                        params_pad[base_i : base_i + world_size], 
+                        params_pad[base_i + rank]
+                    )
+            else:
+                # standard logic: For Adam groups or Single-GPU Muon
+                for i, p in enumerate(group['params']):
+                    self.step_parameter(p, group, i)
 
         if self.param_groups[0].get('compiled_optimizer', False):
             # Reset compile tensors once a step
