@@ -1,5 +1,7 @@
 import torch
 
+import torch.distributed as dist
+
 from ..util import param_update
 from ..util.Newton_Schulz import newton_schulz
 from ..util.Effective_Shape import _get_effective_shape
@@ -186,6 +188,10 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     "You must provide either 'use_muon' (bool) or 'optim_type' (str)."
                 )
 
+            group['use_muon'] = group.get('use_muon') or group.get('optim_type') == 'muon'
+            if group['use_muon']:
+                group['params'] = sorted(group['params'], key=lambda x: x.size(), reverse=True)
+
         self.kourkoutas_helper = None
         if any(group.get('adam_kourkoutas_beta', False) for group in self.param_groups):
             self.kourkoutas_helper = KourkoutasHelper(self)
@@ -232,26 +238,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         if len(state) > 0:
             return
 
-        # Determine optimizer type for this group
-        optim_type = group.get('optim_type')
-        use_muon = group.get('use_muon')
-
-        # Priority: optim_type > use_muon flag
-        is_muon = False
-        if optim_type == 'muon':
-            is_muon = True
-        elif optim_type == 'adam':
-            is_muon = False
-        elif use_muon is not None:
-            is_muon = use_muon
-        else:
-            # This branch should theoretically be unreachable due to __init__ validation
-            raise ValueError("Optimizer configuration missing: neither optim_type nor use_muon defined.")
-
-        # Enforce the decision back to the group for the step function
-        group['use_muon'] = is_muon
-
-        if is_muon:
+        if group['use_muon']:
 
             state['factored'] = (
                 group['nnmf_factor'] and
@@ -489,7 +476,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         if p.dtype == torch.bfloat16 and self.stochastic_rounding and is_compiled:
             random_int_tensor = param_update._get_random_int_for_sr(p)
 
-        if not group['use_muon']: # AdamW path
+        if 'mv_v_nmf' in state or 'exp_avg_sq' in state: # AdamW path
             step = state['step']
 
             if self.kourkoutas_helper:
@@ -510,21 +497,17 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             # Dispatch to compiled or uncompiled Adam step
             if is_compiled and self._compiled_adam_step is not None:
-                # convert to tensors for compiled path once a step
-                if not hasattr(self, 'lr_adam_tensor') or self.lr_adam_tensor is None:
-                    self.lr_adam_tensor = torch.tensor(group['lr'])
-                    self.bc1 = torch.tensor(bias_correction1)
-                    self.bc2 = torch.tensor(bias_correction2)
-                self._compiled_adam_step(self, p, grad, state, group, self.lr_adam_tensor, self.bc1, self.bc2, random_int_tensor)
+                lr_adam_tensor = torch.tensor(group['lr'])
+                bc1 = torch.tensor(bias_correction1)
+                bc2 = torch.tensor(bias_correction2)
+                self._compiled_adam_step(self, p, grad, state, group, lr_adam_tensor, bc1, bc2, random_int_tensor)
             else:
                 Muon_AuxAdam._adam_step_parameter(self, p, grad, state, group, lr, bias_correction1, bias_correction2)
         else: # Muon path
             # Dispatch to compiled or uncompiled Muon step
             if is_compiled and self._compiled_muon_step is not None:
-                # convert to tensors for compiled path once a step
-                if not hasattr(self, 'lr_tensor') or self.lr_tensor is None:
-                    self.lr_tensor = torch.tensor(group['lr'])
-                self._compiled_muon_step(p, grad, state, group, self.lr_tensor, random_int_tensor)
+                lr_tensor = torch.tensor(group['lr'])
+                self._compiled_muon_step(p, grad, state, group, lr_tensor, random_int_tensor)
             else:
                 self._muon_step_parameter(p, grad, state, group, lr)
 
@@ -543,12 +526,37 @@ class AdaMuon_adv(torch.optim.Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
-        for group in self.param_groups:
-            for i, p in enumerate(group['params']):
-                self.step_parameter(p, group, i)
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        rank = dist.get_rank() if dist.is_initialized() else 0
 
-        if self.param_groups[0].get('compiled_optimizer', False):
-            # Reset compile tensors once a step
-            self.lr_tensor = None
-            self.lr_adam_tensor = None
+        for group in self.param_groups:
+            if group['use_muon'] and world_size > 1:
+                # Distributed logic for Muon groups
+                params = group['params']
+                # Pad parameters to make them divisible by world_size
+                # This is necessary so we can iterate in strides and all_gather cleanly
+                params_pad = params + [torch.empty_like(params[-1])] * (world_size - len(params) % world_size)
+
+                # Iterate with stride equal to world_size
+                for base_i in range(len(params))[::world_size]:
+                    # If this rank owns this specific parameter slice
+                    if base_i + rank < len(params):
+                        p = params[base_i + rank]
+                        # Ensure we have a gradient tensor to update (even if zero, for sync)
+                        if p.grad is None:
+                            p.grad = torch.zeros_like(p)
+                        
+                        self.step_parameter(p, group, base_i + rank)
+
+                    # Synchronize updated parameters across all ranks
+                    # We gather the slice of parameters processed by the group of ranks
+                    dist.all_gather(
+                        params_pad[base_i : base_i + world_size], 
+                        params_pad[base_i + rank]
+                    )
+            else:
+                # standard logic: For Adam groups or Single-GPU Muon
+                for i, p in enumerate(group['params']):
+                    self.step_parameter(p, group, i)
+
         return loss
