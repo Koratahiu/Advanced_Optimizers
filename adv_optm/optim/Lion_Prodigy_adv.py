@@ -203,14 +203,13 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             grad = _orthogonalize_gradient(p, grad)
         state = self.state[p]
 
-        # Calculate scaled gradient for Prodigy step (g_t * d)
-        grad_scaled = grad * d
 
         if state['factored']:
             # Factored Path
             d1, d2 = state['effective_shape']
-            grad_reshaped = grad.view(d1, d2)
-            grad_scaled_reshaped = grad_scaled.view(d1, d2)
+
+            # Calculate scaled reshaped gradient for Prodigy step (g_t * d)
+            grad_scaled_reshaped = grad.view(d1, d2).view(d1, d2)
 
             # Reconstruct momentum m_{t-1}
             exp_avg = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
@@ -224,7 +223,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             signed_update = torch.lerp(grad_scaled_reshaped, exp_avg, self.beta1).sign_()
 
             if self.cautious_mask:
-                mask = (signed_update * grad_reshaped > 0).to(grad_reshaped.dtype)
+                mask = (signed_update * grad_scaled_reshaped > 0).to(grad_scaled_reshaped.dtype)
                 mask.div_(mask.mean().clamp_(min=1e-3))
                 signed_update.mul_(mask)
                 del mask
@@ -234,7 +233,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
 
             # Update momentum m_t = β2*m_{t-1} + (1-β2)*d*g_t
             exp_avg.lerp_(grad_scaled_reshaped, 1 - self.beta2)
-            del grad_reshaped, grad_scaled_reshaped
+            del grad_scaled_reshaped
 
             # Compress new momentum m_t and store factors
             state['sign'] = _pack_bools(exp_avg > 0)
@@ -249,6 +248,9 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             if exp_avg.dtype != torch.float32 and self.factored:
                 exp_avg = exp_avg.float()
 
+            # Calculate scaled gradient for Prodigy step (g_t * d)
+            grad_scaled = grad * d
+
             # Compute update term c_t
             signed_update = torch.lerp(grad_scaled, exp_avg, self.beta1).sign_()
 
@@ -262,8 +264,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
 
             # Update momentum using fused lerp
             exp_avg.lerp_(grad_scaled, 1 - self.beta2)
-
-        del grad_scaled
+            del grad_scaled
 
         # --- Accumulate Prodigy stats ---
         prodigy_steps = group['prodigy_steps']
