@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="adv_optm",
-    version="1.2.8",
+    version="1.2.9",
     author="Koratahiu",
     author_email="hiuhonor@gmail.com",
     license='Apache 2.0',
