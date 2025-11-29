@@ -275,11 +275,11 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             p_slice = p.flatten()[::slice_p].float()
             p0 = p0.float()
 
-            self.d_numerator.add_((self.d / d0) * self.dlr * torch.dot(grad_slice, p0.data - p_slice))
+            self.d_numerator.to(p.device).add_((self.d / d0) * self.dlr * torch.dot(grad_slice, p0 - p_slice))
 
             alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
             s.mul_(self.beta3).add_(grad_slice, alpha=alpha)
-            self.d_denom.add_(s.abs().sum())
+            self.d_denom.to(p.device).add_(s.abs().sum())
 
             del s, p0, grad_slice, p_slice, alpha
         else:

@@ -493,11 +493,11 @@ class Prodigy_adv(torch.optim.Optimizer):
                 p_slice = p.flatten()[::slice_p].float()
                 p0 = p0.float()
 
-                self.d_numerator.add_((d / d0) * dlr * torch.dot(grad_slice, p0.data - p_slice))
+                self.d_numerator.to(p.device).add_((d / d0) * dlr * torch.dot(grad_slice, p0 - p_slice))
 
                 alpha = ((d / d0) * d) if safeguard_warmup else ((d / d0) * dlr)
                 s.mul_(self.beta3).add_(grad_slice, alpha=alpha)
-                self.d_denom.add_(s.abs().sum())
+                self.d_denom.to(p.device).add_(s.abs().sum())
 
                 del grad_slice, p_slice, alpha
             
