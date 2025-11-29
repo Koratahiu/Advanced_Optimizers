@@ -11,6 +11,7 @@ from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
 from ..util.Kourkoutas import KourkoutasHelper
+from ..util.prodigy_util import ProdigyShapeHelper
 
 class Prodigy_adv(torch.optim.Optimizer):
     """
@@ -88,6 +89,9 @@ class Prodigy_adv(torch.optim.Optimizer):
         d_limiter (bool): whether to clamp the new step size estimate (`d_hat`)
             to prevent sudden, volatile increases in the adaptive step size (`d`).
             (default: False)
+        per_shape_dadapt (bool): whether to calculate the adaptive step size `d`
+            independently for each parameter shape group (bucket). If False, `d` is
+            calculated globally (standard Prodigy). (default: False)
         kourkoutas_beta (bool): whether to enable the layer-wise dynamic β₂ logic.
             If `False`, the optimizer behaves as standard AdamW/Prodigy. (default: False)
         beta2_min (float): The minimum value for dynamic β₂, used during periods of
@@ -142,6 +146,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         slice_p: int = 11,
         prodigy_steps: int = 0,
         d_limiter: bool = False,
+        per_shape_dadapt: bool = True,
         # K-b parameters
         kourkoutas_beta: bool = False,
         beta2_min: float = 0.9,
@@ -189,6 +194,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             "beta3": beta3, "d": d0, "d0": d0, "d_max": d0, "d_numerator": 0.0, "d_coef": d_coef,
             "growth_rate": growth_rate, "safeguard_warmup": safeguard_warmup, "k": 0, "slice_p": slice_p,
             "fsdp_in_use": fsdp_in_use, "prodigy_steps": prodigy_steps, "d_limiter": d_limiter,
+            "per_shape_dadapt": per_shape_dadapt,
             "alpha_grad": alpha_grad,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
@@ -203,6 +209,11 @@ class Prodigy_adv(torch.optim.Optimizer):
         
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
+        
+        self.per_shape_dadapt = per_shape_dadapt
+        self.shape_helper = None
+        if self.per_shape_dadapt:
+             self.shape_helper = ProdigyShapeHelper(optimizer=self, d0=d0, d_coef=d_coef)
 
         super().__init__(params, defaults)
 
@@ -242,6 +253,8 @@ class Prodigy_adv(torch.optim.Optimizer):
         if self.beta3 is None:
             self.beta3 = math.sqrt(self.beta2_default)
 
+        # If using per-shape adaptation, d and dlr are resolved per-parameter in step_parameter.
+        # We still maintain self.d/self.dlr for fallback or logging if needed.
         self.d = g_group['d']
         lr = g_group['lr']
 
@@ -255,6 +268,14 @@ class Prodigy_adv(torch.optim.Optimizer):
 
         if hasattr(p, "_fsdp_flattened"):
             self.fsdp_in_use = True
+
+        # Resolve D and DLR for this parameter
+        if self.per_shape_dadapt:
+            d = self.shape_helper.get_d(p)
+            dlr = d * group['lr']
+        else:
+            d = self.d
+            dlr = self.dlr
 
         grad = p.grad
         if grad.dtype != torch.float32 and self.factored:
@@ -332,7 +353,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             d1, d2 = state['effective_shape']
 
             # Calculate scaled reshaped gradient for factored Prodigy step (g_t * d)
-            grad_scaled_reshaped = grad.view(d1, d2) * self.d
+            grad_scaled_reshaped = grad.view(d1, d2) * d
 
             # Reconstruct momentum from previous step's factors
             if self.beta1 > 0:
@@ -386,10 +407,10 @@ class Prodigy_adv(torch.optim.Optimizer):
                 update.atan2_(denom).mul_(a)
             else:
                 denom = vt.sqrt()
-                update.div_(denom.add_(self.d * group['eps']))
+                update.div_(denom.add_(d * group['eps']))
             del denom
 
-            update = update.view(p.shape).mul_(self.dlr)
+            update = update.view(p.shape).mul_(dlr)
 
             # Compress updated moments and store new factors
             if self.beta1 > 0:
@@ -408,7 +429,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             exp_avg_sq = state['exp_avg_sq']
 
             # Calculate scaled gradient for Prodigy step (g_t * d)
-            grad_scaled = grad * self.d
+            grad_scaled = grad * d
 
             if self.beta1 > 0:
                 exp_avg = state['exp_avg']
@@ -450,10 +471,10 @@ class Prodigy_adv(torch.optim.Optimizer):
                 update.atan2_(denom).mul_(a)
             else:
                 denom = exp_avg_sq.sqrt()
-                update.div_(denom.add_(self.d * group['eps']))
+                update.div_(denom.add_(d * group['eps']))
             del denom
 
-            update.mul_(self.dlr)
+            update.mul_(dlr)
 
         # --- Accumulate Prodigy stats ---
         prodigy_steps = group['prodigy_steps']
@@ -461,17 +482,26 @@ class Prodigy_adv(torch.optim.Optimizer):
             d0, safeguard_warmup, slice_p = group['d0'], group['safeguard_warmup'], group['slice_p']
             s, p0 = state['s'], state['p0']
 
-            grad_slice = grad.flatten()[::slice_p].float()
-            p_slice = p.flatten()[::slice_p].float()
-            p0 = p0.float()
+            if self.per_shape_dadapt:
+                # Delegate accumulation to shape helper
+                self.shape_helper.accumulate_stats(
+                    p, grad, p0, s, d, dlr, self.beta3, safeguard_warmup, slice_p
+                )
+            else:
+                # Original global accumulation
+                grad_slice = grad.flatten()[::slice_p].float()
+                p_slice = p.flatten()[::slice_p].float()
+                p0 = p0.float()
 
-            self.d_numerator.add_((self.d / d0) * self.dlr * torch.dot(grad_slice, p0.data - p_slice))
+                self.d_numerator.add_((d / d0) * dlr * torch.dot(grad_slice, p0.data - p_slice))
 
-            alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
-            s.mul_(self.beta3).add_(grad_slice, alpha=alpha)
-            self.d_denom.add_(s.abs().sum())
+                alpha = ((d / d0) * d) if safeguard_warmup else ((d / d0) * dlr)
+                s.mul_(self.beta3).add_(grad_slice, alpha=alpha)
+                self.d_denom.add_(s.abs().sum())
 
-            del s, p0, grad_slice, p_slice, alpha
+                del grad_slice, p_slice, alpha
+            
+            del s, p0
         else:
             # Free memory if prodigy_steps is reached
             if 's' in state:
@@ -479,7 +509,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             if 'p0' in state:
                 del state['p0']
 
-        param_update.apply_parameter_update(self, p, group, update, self.dlr)
+        param_update.apply_parameter_update(self, p, group, update, dlr)
 
         state['step'] += 1
 
@@ -507,31 +537,42 @@ class Prodigy_adv(torch.optim.Optimizer):
         prodigy_active = not (g_group.get('prodigy_steps', 0) > 0 and g_group['k'] >= g_group['prodigy_steps'])
 
         if prodigy_active:
-            d_max, d_coef, growth_rate = g_group['d_max'], g_group['d_coef'], g_group['growth_rate']
-
-            if self.fsdp_in_use and dist.is_available() and dist.is_initialized():
-                dist_tensor = torch.stack([self.d_numerator, self.d_denom])
-                dist.all_reduce(dist_tensor, op=dist.ReduceOp.SUM)
-                global_d_numerator = dist_tensor[0].item()
-                global_d_denom = dist_tensor[1].item()
+            if self.per_shape_dadapt:
+                # Delegate to shape helper for per-shape calculation
+                self.shape_helper.compute_d_per_shape(
+                    growth_rate=g_group['growth_rate'],
+                    d_limiter=g_group.get('d_limiter', False),
+                    beta3=self.beta3
+                )
+                # NOTE: We don't update global self.d or group['d'] here, 
+                # as they are retrieved per-parameter in step_parameter.
             else:
-                global_d_numerator = self.d_numerator.item()
-                global_d_denom = self.d_denom.item()
+                # Standard global Prodigy logic
+                d_max, d_coef, growth_rate = g_group['d_max'], g_group['d_coef'], g_group['growth_rate']
 
-            d_hat = self.d
-            if global_d_denom > 0:
-                d_hat = d_coef * global_d_numerator / global_d_denom
-                if g_group.get('d_limiter', False):
-                    d_hat = min(self.d * (2 ** 0.25), d_hat)
-                if self.d == g_group['d0']:
-                    self.d = max(self.d, d_hat)
-                d_max = max(d_max, d_hat)
-                self.d = min(d_max, self.d * growth_rate)
+                if self.fsdp_in_use and dist.is_available() and dist.is_initialized():
+                    dist_tensor = torch.stack([self.d_numerator, self.d_denom])
+                    dist.all_reduce(dist_tensor, op=dist.ReduceOp.SUM)
+                    global_d_numerator = dist_tensor[0].item()
+                    global_d_denom = dist_tensor[1].item()
+                else:
+                    global_d_numerator = self.d_numerator.item()
+                    global_d_denom = self.d_denom.item()
 
-            for group in self.param_groups:
-                group['d_numerator'] = global_d_numerator
-                group['d'] = self.d
-                group['d_max'] = d_max
+                d_hat = self.d
+                if global_d_denom > 0:
+                    d_hat = d_coef * global_d_numerator / global_d_denom
+                    if g_group.get('d_limiter', False):
+                        d_hat = min(self.d * (2 ** 0.25), d_hat)
+                    if self.d == g_group['d0']:
+                        self.d = max(self.d, d_hat)
+                    d_max = max(d_max, d_hat)
+                    self.d = min(d_max, self.d * growth_rate)
+
+                for group in self.param_groups:
+                    group['d_numerator'] = global_d_numerator
+                    group['d'] = self.d
+                    group['d_max'] = d_max
 
         # Increment step counter for all groups, regardless of whether d was updated
         for group in self.param_groups:
