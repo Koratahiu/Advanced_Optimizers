@@ -10,6 +10,7 @@ from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
+from ..util.prodigy_util import ProdigyShapeHelper
 
 class Lion_Prodigy_adv(torch.optim.Optimizer):
     """
@@ -59,6 +60,9 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         d_limiter (bool): whether to clamp the new step size estimate (`d_hat`)
             to prevent sudden, volatile increases in the adaptive step size (`d`).
             (default: True)
+        per_shape_dadapt (bool): whether to calculate the adaptive step size `d`
+            independently for each parameter shape group (bucket). If False, `d` is
+            calculated globally (standard Prodigy). (default: False)
     """
 
     def __init__(
@@ -84,6 +88,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         slice_p: int = 11,
         prodigy_steps: int = 0,
         d_limiter: bool = True,
+        per_shape_dadapt: bool = True,
     ):
         if not lr > 0.0:
             raise ValueError(f"Learning rate must be > 0.0, but got {lr}")
@@ -105,6 +110,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             fsdp_in_use=fsdp_in_use,
             prodigy_steps=prodigy_steps,
             d_limiter=d_limiter,
+            per_shape_dadapt=per_shape_dadapt,
         )
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
@@ -114,12 +120,20 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         # Global state for accumulating metrics across parameter updates within a single step.
         self.init_step()
 
+        # Use the device of the first parameter to avoid hardcoding '.cuda()'
+        self.device = self.param_groups[0]['params'][0].device
+
         if self.stochastic_rounding:
             # For deterministic stochastic rounding, we need to seed the generator
             # for each device used by the parameters.
             devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
             for device in devices:
                 param_update.set_seed(device)
+
+        self.per_shape_dadapt = per_shape_dadapt
+        self.shape_helper = None
+        if self.per_shape_dadapt:
+             self.shape_helper = ProdigyShapeHelper(optimizer=self, d0=d0, d_coef=d_coef)
 
     @property
     def supports_fused_back_pass(self) -> bool:
@@ -159,6 +173,14 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
 
         if hasattr(p, "_fsdp_flattened"):
             self.fsdp_in_use = True
+
+        # Resolve D and DLR for this parameter
+        if self.per_shape_dadapt:
+            d = self.shape_helper.get_d(p)
+            dlr = d * group['lr']
+        else:
+            d = self.d
+            dlr = self.dlr
 
         grad = p.grad
         if grad.dtype != torch.float32 and self.factored:
@@ -209,7 +231,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             d1, d2 = state['effective_shape']
 
             # Calculate scaled reshaped gradient for factored Prodigy step (g_t * d)
-            grad_scaled_reshaped = grad.view(d1, d2) * self.d
+            grad_scaled_reshaped = grad.view(d1, d2) * d
 
             # Reconstruct momentum m_{t-1}
             exp_avg = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
@@ -228,7 +250,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 update.mul_(mask)
                 del mask
 
-            update = update.view(p.shape).mul_(self.dlr)
+            update = update.view(p.shape).mul_(dlr)
 
             # Update momentum m_t = β2*m_{t-1} + (1-β2)*d*g_t
             exp_avg.lerp_(grad_scaled_reshaped, 1 - self.beta2)
@@ -244,7 +266,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             exp_avg = state["exp_avg"]
 
             # Calculate scaled gradient for Prodigy step (g_t * d)
-            grad_scaled = grad * self.d
+            grad_scaled = grad * d
 
             # Compute update term and sign for the update
             if exp_avg.dtype != torch.float32 and self.factored:
@@ -259,7 +281,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 update.mul_(mask)
                 del mask
 
-            update.mul_(self.dlr)
+            update.mul_(dlr)
 
             # Update momentum using fused lerp
             exp_avg.lerp_(grad_scaled, 1 - self.beta2)
@@ -275,9 +297,9 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             p_slice = p.flatten()[::slice_p].float()
             p0 = p0.float()
 
-            self.d_numerator.to(p.device).add_((self.d / d0) * self.dlr * torch.dot(grad_slice, p0 - p_slice))
+            self.d_numerator.to(p.device).add_((d / d0) * dlr * torch.dot(grad_slice, p0 - p_slice))
 
-            alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
+            alpha = ((d / d0) * d) if safeguard_warmup else ((d / d0) * dlr)
             s.mul_(self.beta3).add_(grad_slice, alpha=alpha)
             self.d_denom.to(p.device).add_(s.abs().sum())
 
@@ -289,7 +311,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             if 'p0' in state:
                 del state['p0']
 
-        param_update.apply_parameter_update(self, p, group, update, self.dlr)
+        param_update.apply_parameter_update(self, p, group, update, dlr)
 
     @torch.no_grad()
     def step(self, closure: Optional[callable] = None):
