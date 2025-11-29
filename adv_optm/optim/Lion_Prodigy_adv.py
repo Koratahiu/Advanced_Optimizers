@@ -111,6 +111,10 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         self.factored = nnmf_factor
         self.fsdp_in_use = fsdp_in_use
         super().__init__(params, defaults)
+
+        # Use the device of the first parameter to avoid hardcoding '.cuda()'
+        self.device = self.param_groups[0]['params'][0].device
+
         # Global state for accumulating metrics across parameter updates within a single step.
         self.init_step()
 
