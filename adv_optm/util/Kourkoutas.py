@@ -106,7 +106,7 @@ class KourkoutasHelper:
             pooled_grad_norm = torch.sqrt(accumulator)
             
             # Update the persistent EMA tensor in-place.
-            r_ema_tensor.mul_(ema_alpha).add_(pooled_grad_norm, alpha=1.0 - ema_alpha)
+            r_ema_tensor.lerp_(pooled_grad_norm, 1.0 - ema_alpha)
             
             sun = torch.tensor(0.0, device=r_ema_tensor.device) # Default sun to 0 for warmup
             

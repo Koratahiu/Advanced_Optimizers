@@ -9,7 +9,6 @@ from ..util.OrthoGrad import _orthogonalize_gradient
 def _init_auxadam_state(self, p, group):
     state = self.state[p]
 
-    state['step'] = 0
 
     state['factored'] = (
         group['adam_nnmf_factor'] and
@@ -17,6 +16,10 @@ def _init_auxadam_state(self, p, group):
     )
     dtype = torch.float32 if state['factored'] else p.dtype
     device = p.device
+
+    if group.get('compiled_optimizer', False):
+        state['step_compile'] = torch.tensor(0, dtype=torch.int32, device=device)
+    state['step'] = 0
 
     if state['factored']:
         state['effective_shape'] = _get_effective_shape(p.numel())
@@ -45,7 +48,7 @@ def _init_auxadam_state(self, p, group):
 
 
 @torch.no_grad()
-def _adam_step_parameter(self, p, grad, state, group, lr, bias_correction1, bias_correction2):
+def _adam_step_parameter(self, p, grad, state, group, lr):
     if grad.dtype != torch.float32 and state.get('factored', False):
         grad = grad.float()
     if group.get("adam_orthogonal_gradient"):
@@ -58,6 +61,18 @@ def _adam_step_parameter(self, p, grad, state, group, lr, bias_correction1, bias
         self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
         # Get the dynamic beta2_adam calculated in prepare_step()
         beta2_adam = self.kourkoutas_helper.get_beta2(p, group)
+
+    if group['adam_use_bias_correction']:
+        if group.get('compiled_optimizer', False):
+            current_step = state['step_compile'].add_(1)
+        else:
+            current_step = state['step'] + 1
+        beta1_adam, beta2_adam = group['adam_betas']
+        bias_correction1 = 1.0 - beta1_adam ** current_step
+        bias_correction2 = 1.0 - beta2_adam ** current_step
+    else:
+        bias_correction1 = 1.0
+        bias_correction2 = 1.0
 
     step_size = lr / bias_correction1
 
