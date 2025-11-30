@@ -279,7 +279,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             state['is_muon'] = False
 
     @torch.no_grad()
-    def _muon_step_parameter(self, p, grad, state, group, lr):
+    def _muon_step_parameter(self, p, grad, state, group, lr, random_int_tensor: torch.Tensor | None = None):
         # Retrieve hyperparameters
         beta1, beta2 = group['betas']
         nesterov = group['nesterov']
@@ -460,7 +460,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     update = mt_buf.clone()
                 update.mul_(lr)
 
-        param_update.apply_parameter_update(self, p, group, update, lr)
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
@@ -472,9 +472,12 @@ class AdaMuon_adv(torch.optim.Optimizer):
         lr = group['lr']
         is_compiled = group.get('compiled_optimizer', False)
 
+        if p.dtype == torch.bfloat16 and self.stochastic_rounding and is_compiled:
+            # Pre-generate random tensor for stochastic rounding if needed.
+            random_int_tensor = param_update._get_random_int_for_sr(p)
+
         if not state['is_muon']: # AdamW path
             step = state['step']
-
 
             if self.kourkoutas_helper:
                 # Prepare Kourkoutas-β once per optimizer step.
@@ -485,14 +488,14 @@ class AdaMuon_adv(torch.optim.Optimizer):
             # Dispatch to compiled or uncompiled Adam step
             if is_compiled and self._compiled_adam_step is not None:
                 lr = torch.as_tensor(lr, dtype=torch.float32)
-                self._compiled_adam_step(self, p, grad, state, group, lr)
+                self._compiled_adam_step(self, p, grad, state, group, lr, random_int_tensor)
             else:
                 Muon_AuxAdam._adam_step_parameter(self, p, grad, state, group, lr)
         else: # Muon path
             # Dispatch to compiled or uncompiled Muon step
             if is_compiled and self._compiled_muon_step is not None:
                 lr = torch.as_tensor(lr, dtype=torch.float32)
-                self._compiled_muon_step(p, grad, state, group, lr)
+                self._compiled_muon_step(p, grad, state, group, lr, random_int_tensor)
             else:
                 self._muon_step_parameter(p, grad, state, group, lr)
 

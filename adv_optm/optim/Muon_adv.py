@@ -276,7 +276,7 @@ class Muon_adv(torch.optim.Optimizer):
             state['is_muon'] = False
 
     @torch.no_grad()
-    def _muon_step_parameter(self, p, grad, state, group, lr):
+    def _muon_step_parameter(self, p, grad, state, group, lr, random_int_tensor: torch.Tensor | None = None):
         beta1 = group['beta1']
         nesterov = group['nesterov']
         Simplified_AdEMAMix = group['Simplified_AdEMAMix']
@@ -430,7 +430,7 @@ class Muon_adv(torch.optim.Optimizer):
                     update = mt_buf.clone()
                 update.mul_(lr)
 
-        param_update.apply_parameter_update(self, p, group, update, lr)
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 
 
     @torch.no_grad()
@@ -445,6 +445,10 @@ class Muon_adv(torch.optim.Optimizer):
         lr = group['lr']
         is_compiled = group.get('compiled_optimizer', False)
 
+        if p.dtype == torch.bfloat16 and self.stochastic_rounding and is_compiled:
+            # Pre-generate random tensor for stochastic rounding if needed.
+            random_int_tensor = param_update._get_random_int_for_sr(p)
+
         if not state['is_muon']: # AdamW path
             step = state['step']
 
@@ -452,37 +456,19 @@ class Muon_adv(torch.optim.Optimizer):
                 # Prepare Kourkoutas-β once per optimizer step.
                 self.kourkoutas_helper.maybe_prepare_step(step)
 
-            # Adam-specific setup (bias correction)
-            if group['adam_use_bias_correction']:
-                current_step = step + 1
-                beta1_adam, beta2_adam = group['adam_betas']
-                bias_correction1 = 1.0 - beta1_adam ** current_step
-                bias_correction2 = 1.0 - beta2_adam ** current_step
-            else:
-                bias_correction1 = 1.0
-                bias_correction2 = 1.0
-
-            self.state[p]['step'] += 1
+            step += 1
 
             # Dispatch to compiled or uncompiled Adam step
             if is_compiled and self._compiled_adam_step is not None:
-                # convert to tensors for compiled path once a step
-                if not hasattr(self, 'lr_adam_tensor') or self.lr_adam_tensor is None:
-                    self.lr_adam_tensor = torch.tensor(group['lr'])
-                    self.bc1 = torch.tensor(bias_correction1)
-                    self.bc2 = torch.tensor(bias_correction2)
-                self._compiled_adam_step(self, p, grad, state, group, self.lr_adam_tensor, self.bc1, self.bc2)
+                lr = torch.as_tensor(lr, dtype=torch.float32)
+                self._compiled_adam_step(self, p, grad, state, group, lr, random_int_tensor,)
             else:
-                Muon_AuxAdam._adam_step_parameter(self, p, grad, state, group, lr, bias_correction1, bias_correction2)
+                Muon_AuxAdam._adam_step_parameter(self, p, grad, state, group, lr)
         else: # Muon path
             # Dispatch to compiled or uncompiled Muon step
             if is_compiled and self._compiled_muon_step is not None:
-                lr_tensor = torch.tensor(lr, device=p.device)
-                self._compiled_muon_step(p, grad, state, group, lr_tensor)
-                # convert to tensors for compiled path once a step
-                if not hasattr(self, 'lr_tensor') or self.lr_tensor is None:
-                    self.lr_tensor = torch.tensor(group['lr'])
-                self._compiled_muon_step(p, grad, state, group, self.lr_tensor)
+                lr = torch.as_tensor(lr, dtype=torch.float32)
+                self._compiled_muon_step(p, grad, state, group, lr, random_int_tensor)
             else:
                 self._muon_step_parameter(p, grad, state, group, lr)
 
@@ -491,7 +477,7 @@ class Muon_adv(torch.optim.Optimizer):
         print("Compiling Muon step path...")
         self._compiled_muon_step = torch.compile(self._muon_step_parameter, *args, **kwargs)
         print("Compiling AuxAdam step path...")
-        self._compiled_adam_step = torch.compile(self._adam_step_parameter, *args, **kwargs)
+        self._compiled_adam_step = torch.compile(Muon_AuxAdam._adam_step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -534,8 +520,4 @@ class Muon_adv(torch.optim.Optimizer):
                 for i, p in enumerate(group['params']):
                     self.step_parameter(p, group, i)
 
-        if self.param_groups[0].get('compiled_optimizer', False):
-            # Reset compile tensors once a step
-            self.lr_tensor = None
-            self.lr_adam_tensor = None
         return loss

@@ -48,7 +48,7 @@ def _init_auxadam_state(self, p, group):
 
 
 @torch.no_grad()
-def _adam_step_parameter(self, p, grad, state, group, lr):
+def _adam_step_parameter(self, p, grad, state, group, lr, random_int_tensor: torch.Tensor | None = None):
     if grad.dtype != torch.float32 and state.get('factored', False):
         grad = grad.float()
     if group.get("adam_orthogonal_gradient"):
@@ -191,4 +191,4 @@ def _adam_step_parameter(self, p, grad, state, group, lr):
 
         update.mul_(step_size)
 
-    param_update.apply_parameter_update(self, p, group, update, lr, group["adam_weight_decay"])
+    param_update.apply_parameter_update(self, p, group, update, lr, group["adam_weight_decay"], random_int_tensor=random_int_tensor)

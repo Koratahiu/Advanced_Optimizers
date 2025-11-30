@@ -143,8 +143,8 @@ class AdamW_adv(torch.optim.Optimizer):
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
 
-        # Initialize compiled functions to None
-        self._compiled_step = None
+        # Initialize compiled function
+        self._compiled_step_parameter = None
         if compiled_optimizer:
             torch._dynamo.config.cache_size_limit = 8192
             self.compile(fullgraph=True, dynamic=False)
@@ -223,7 +223,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
 
     @torch.no_grad()
-    def _step_parameter(self, p, grad, state, group, lr):
+    def _step_parameter(self, p, grad, state, group, lr, random_int_tensor: torch.Tensor | None = None):
         if p.grad is None:
             return
 
@@ -373,7 +373,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
             update.mul_(step_size)
 
-        param_update.apply_parameter_update(self, p, group, update, group["lr"])
+        param_update.apply_parameter_update(self, p, group, update, group["lr"], random_int_tensor=random_int_tensor)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
@@ -394,14 +394,17 @@ class AdamW_adv(torch.optim.Optimizer):
         step += 1
 
         # Dispatch to compiled or uncompiled Adam step
-        if group.get('compiled_optimizer', False) and self._compiled_step is not None:
+        if group.get('compiled_optimizer', False) and self._compiled_step_parameter is not None:
+            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
+                # Pre-generate random tensor for stochastic rounding if needed.
+                random_int_tensor = param_update._get_random_int_for_sr(p)
             lr = torch.as_tensor(lr, dtype=torch.float32)
-            self._compiled_step(self, p, grad, state, group, lr)
+            self._compiled_step_parameter(self, p, grad, state, group, lr, random_int_tensor)
         else:
             self._step_parameter(self, p, grad, state, group, lr)
 
     def compile(self, *args, **kwargs):
-        self._compiled_step = torch.compile(self._step_parameter, *args, **kwargs)
+        self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def step(self, closure=None):
