@@ -445,6 +445,7 @@ class Muon_adv(torch.optim.Optimizer):
         lr = group['lr']
         is_compiled = group.get('compiled_optimizer', False)
 
+        random_int_tensor = None
         if p.dtype == torch.bfloat16 and self.stochastic_rounding and is_compiled:
             # Pre-generate random tensor for stochastic rounding if needed.
             random_int_tensor = param_update._get_random_int_for_sr(p)

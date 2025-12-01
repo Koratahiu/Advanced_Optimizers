@@ -122,7 +122,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         accelerated_ns: bool = False,
         cns_a_bound: float = 1e-4,
         # Compiled
-        compiled_optimizer: bool = True,
+        compiled_optimizer: bool = False,
         # --- AdamW_adv specific parameters ---
         adam_betas: tuple[float, float] = (0.9, 0.99),
         adam_eps: float = 1e-8,
@@ -472,8 +472,9 @@ class AdaMuon_adv(torch.optim.Optimizer):
         lr = group['lr']
         is_compiled = group.get('compiled_optimizer', False)
 
+        # Pre-generate random tensor for stochastic rounding if needed.
+        random_int_tensor = None
         if p.dtype == torch.bfloat16 and self.stochastic_rounding and is_compiled:
-            # Pre-generate random tensor for stochastic rounding if needed.
             random_int_tensor = param_update._get_random_int_for_sr(p)
 
         if not state['is_muon']: # AdamW path

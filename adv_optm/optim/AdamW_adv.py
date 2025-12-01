@@ -104,7 +104,7 @@ class AdamW_adv(torch.optim.Optimizer):
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
         nnmf_factor: bool = False,
-        compiled_optimizer: bool = False,
+        compiled_optimizer: bool = True,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -182,8 +182,6 @@ class AdamW_adv(torch.optim.Optimizer):
 
         state['step'] = 0
 
-        if group.get('compiled_optimizer', False):
-            state['step_compile'] = torch.tensor(0, dtype=torch.int32, device=device)
 
         should_factor = (
             self.factored and
@@ -194,6 +192,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
         dtype = torch.float32 if self.factored else p.dtype
         device = p.device
+
 
         if state['factored']:
             state['effective_shape'] = _get_effective_shape(p.numel())
@@ -221,13 +220,11 @@ class AdamW_adv(torch.optim.Optimizer):
                 state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
             state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
+        if group.get('compiled_optimizer', False):
+            state['step_compile'] = torch.tensor(0, dtype=torch.int32, device=device)
 
     @torch.no_grad()
     def _step_parameter(self, p, grad, state, group, lr, random_int_tensor: torch.Tensor | None = None):
-        if p.grad is None:
-            return
-
-        grad = p.grad
         if grad.dtype != torch.float32 and self.factored:
             grad = grad.float()
         if group["orthogonal_gradient"]:
@@ -236,7 +233,6 @@ class AdamW_adv(torch.optim.Optimizer):
 
         beta1, beta2 = group['betas']
 
-        current_step = state['step']
         if group.get('kourkoutas_beta', False):
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
@@ -395,13 +391,14 @@ class AdamW_adv(torch.optim.Optimizer):
 
         # Dispatch to compiled or uncompiled Adam step
         if group.get('compiled_optimizer', False) and self._compiled_step_parameter is not None:
+            random_int_tensor = None
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
             lr = torch.as_tensor(lr, dtype=torch.float32)
-            self._compiled_step_parameter(self, p, grad, state, group, lr, random_int_tensor)
+            self._compiled_step_parameter(p, grad, state, group, lr, random_int_tensor)
         else:
-            self._step_parameter(self, p, grad, state, group, lr)
+            self._step_parameter(p, grad, state, group, lr)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
