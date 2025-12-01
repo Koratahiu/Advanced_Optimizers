@@ -331,7 +331,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 v_t = state['normuon_v']
                 # Update 2nd moment estimate
                 mean_squared_update = torch.mean(update.square(), dim=1)
-                v_t.mul_(beta2).add_(mean_squared_update, alpha=1 - beta2)
+                v_t.lerp_(mean_squared_update, 1 - beta2)
                 # Normalize update
                 update.div_(v_t.sqrt().unsqueeze(1).add_(group['eps']))
                 del mean_squared_update
@@ -414,7 +414,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     v_t = state['normuon_v']
                     # Update 2nd moment estimate
                     mean_squared_update = torch.mean(update.square(), dim=1)
-                    v_t.mul_(beta2).add_(mean_squared_update, alpha=1 - beta2)
+                    v_t.lerp_(mean_squared_update, 1 - beta2)
                     # Normalize update
                     update.div_(v_t.sqrt().unsqueeze(1).add_(group['eps']))
                     del mean_squared_update
