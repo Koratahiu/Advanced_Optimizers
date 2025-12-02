@@ -236,7 +236,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
         state = self.state[p]
 
         if 'is_muon' in state:
-        if 'is_muon' in state:
             return
 
         if group['use_muon']:
@@ -467,8 +466,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
         if grad is None:
             return
         state = self.state[p]
-
-        self.__init_state(p, group)
 
         self.__init_state(p, group)
 

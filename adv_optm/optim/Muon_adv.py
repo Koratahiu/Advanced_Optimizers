@@ -238,7 +238,6 @@ class Muon_adv(torch.optim.Optimizer):
         state = self.state[p]
 
         if 'is_muon' in state:
-        if 'is_muon' in state:
             return
 
         if group['use_muon']:
@@ -440,7 +439,6 @@ class Muon_adv(torch.optim.Optimizer):
 
         state = self.state[p]
 
-        self.__init_state(p, group)
         self.__init_state(p, group)
 
         lr = group['lr']
