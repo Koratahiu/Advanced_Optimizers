@@ -120,7 +120,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         eps: float = 1e-8,
         weight_decay: float = 0.0,
         cautious_wd: bool = False,
-        vector_reshape: bool = True,
+        vector_reshape: bool = False,
         stochastic_rounding: bool = True,
         use_atan2: bool = False,
         cautious_mask: bool = False,

@@ -200,8 +200,6 @@ class Muon_adv(torch.optim.Optimizer):
         if any(group.get('adam_kourkoutas_beta', False) for group in self.param_groups):
             self.kourkoutas_helper = KourkoutasHelper(self)
 
-        self.init_step()
-
         # Initialize compiled functions to None
         self._compiled_muon_step = None
         self._compiled_adam_step = None
@@ -239,7 +237,7 @@ class Muon_adv(torch.optim.Optimizer):
     def __init_state(self, p, group):
         state = self.state[p]
 
-        if len(state) > 0:
+        if 'is_muon' in state:
             return
 
         if group['use_muon']:
@@ -441,6 +439,7 @@ class Muon_adv(torch.optim.Optimizer):
 
         state = self.state[p]
 
+        self.__init_state(p, group)
 
         lr = group['lr']
         is_compiled = group.get('compiled_optimizer', False)
