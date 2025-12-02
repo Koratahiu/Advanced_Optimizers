@@ -4,6 +4,25 @@ A comprehensive, all-in-one collection of optimization algorithms for deep learn
 
 [![PyPI](https://img.shields.io/pypi/v/adv_optm)](https://pypi.org/project/adv_optm/)
 
+## 🔥 What's New in 1.2.x
+
+* Added **advanced variants** of [Muon optimizer](https://kellerjordan.github.io/posts/muon/) with **features** and **settings** from recent papers.
+
+| Optimizer | Description |
+|---|---|
+| `Muon_adv` | Advanced Muon implementation with CANS, NorMuon, Low-Rank ortho, etc. features. |
+| `AdaMuon_adv` | Advanced AdaMuon implementation, which combines Muon's geometry with Adam-like adaptive scaling and sign-based orthogonalization. |
+
+> *Documentation coming soon.*
+
+* Implemented [Cautious Weight Decay](https://arxiv.org/abs/2510.12402) for all advanced optimizers.
+
+* Improved parameter update and weight decay for **BF16** with **stochastic rounding**. The updates are now accumulated in **float32** and rounded once at the end.
+
+* Use fused and in-place operations whenever possible for all advanced optimizers.
+
+* **Prodigy variants** are now **50% faster** by [avoiding CUDA syncs](https://github.com/Koratahiu/Advanced_Optimizers/pull/5). Thanks to **@dxqb**!
+
 ---
 
 ## 📦 Installation
