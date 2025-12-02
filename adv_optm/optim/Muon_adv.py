@@ -238,6 +238,7 @@ class Muon_adv(torch.optim.Optimizer):
         state = self.state[p]
 
         if 'is_muon' in state:
+        if 'is_muon' in state:
             return
 
         if group['use_muon']:
@@ -328,7 +329,7 @@ class Muon_adv(torch.optim.Optimizer):
                 beta2_normuon = group['beta2_normuon']
                 # Update 2nd moment estimate
                 mean_squared_update = torch.mean(update.square(), dim=1)
-                v_t.mul_(beta2_normuon).add_(mean_squared_update, alpha=1 - beta2_normuon)
+                v_t.lerp_(mean_squared_update, 1 - beta2_normuon)
                 # Normalize update
                 update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
                 del mean_squared_update
@@ -395,7 +396,7 @@ class Muon_adv(torch.optim.Optimizer):
                     beta2_normuon = group['beta2_normuon']
                     # Update 2nd moment estimate
                     mean_squared_update = torch.mean(update.square(), dim=1)
-                    v_t.mul_(beta2_normuon).add_(mean_squared_update, alpha=1 - beta2_normuon)
+                    v_t.lerp_(mean_squared_update, 1 - beta2_normuon)
                     # Normalize update
                     update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
 
@@ -439,6 +440,7 @@ class Muon_adv(torch.optim.Optimizer):
 
         state = self.state[p]
 
+        self.__init_state(p, group)
         self.__init_state(p, group)
 
         lr = group['lr']

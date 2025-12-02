@@ -18,8 +18,10 @@ def apply_parameter_update(
     """
     Applies decoupled weight decay (standard or cautious) and the final
     parameter update to p in-place.
+    parameter update to p in-place.
 
     Args:
+        p: The parameter tensor whose data (p) will be updated.
         p: The parameter tensor whose data (p) will be updated.
         group: The parameter group dictionary (must contain "weight_decay").
         update: The pre-calculated update tensor (e.g., scaled gradient or momentum term).
@@ -33,6 +35,7 @@ def apply_parameter_update(
 
     # Compute full update in float32 if using bfloat16 with stochastic rounding
     if p.dtype == torch.bfloat16 and self.stochastic_rounding:
+        p_fp32 = p.float()
         p_fp32 = p.float()
         update_fp32 = update.float()
 
@@ -66,12 +69,16 @@ def apply_parameter_update(
                 # Cautious Weight Decay
                 mask = (update * p >= 0).to(p.dtype)
                 p.addcmul_(p, mask, value=-wd * lr)
+                mask = (update * p >= 0).to(p.dtype)
+                p.addcmul_(p, mask, value=-wd * lr)
                 del mask
             else:
                 # Standard decoupled weight decay
                 p.add_(p, alpha=-wd * lr)
+                p.add_(p, alpha=-wd * lr)
 
         # Apply main update
+        p.add_(-update)
         p.add_(-update)
 
     del update
