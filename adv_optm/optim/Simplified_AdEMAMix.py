@@ -90,7 +90,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         beta1_warmup: int | None = None,
         min_beta1: float | None = 0.9,
         use_bias_correction: bool = True,
-        vector_reshape: bool = True,
+        vector_reshape: bool = False,
         stochastic_rounding: bool = True,
         orthogonal_gradient: bool = False,
         kourkoutas_beta: bool = False,
