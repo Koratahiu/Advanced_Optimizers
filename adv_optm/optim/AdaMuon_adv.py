@@ -122,7 +122,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         accelerated_ns: bool = False,
         cns_a_bound: float = 1e-4,
         # Compiled
-        compiled_optimizer: bool = False,
+        compiled_optimizer: bool = True,
         # --- AdamW_adv specific parameters ---
         adam_betas: tuple[float, float] = (0.9, 0.99),
         adam_eps: float = 1e-8,
@@ -198,8 +198,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
         if any(group.get('adam_kourkoutas_beta', False) for group in self.param_groups):
             self.kourkoutas_helper = KourkoutasHelper(self)
 
-        self.init_step()
-
         # Initialize compiled functions to None
         self._compiled_muon_step = None
         self._compiled_adam_step = None
@@ -237,7 +235,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
     def __init_state(self, p, group):
         state = self.state[p]
 
-        if len(state) > 0:
+        if 'is_muon' in state:
             return
 
         if group['use_muon']:
@@ -469,6 +467,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
             return
         state = self.state[p]
 
+        self.__init_state(p, group)
+
         lr = group['lr']
         is_compiled = group.get('compiled_optimizer', False)
 
@@ -485,6 +485,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 self.kourkoutas_helper.maybe_prepare_step(step)
 
             step += 1
+            state['step'] = step
 
             # Dispatch to compiled or uncompiled Adam step
             if is_compiled and self._compiled_adam_step is not None:
