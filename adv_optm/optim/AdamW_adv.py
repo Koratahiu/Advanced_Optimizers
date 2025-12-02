@@ -104,6 +104,7 @@ class AdamW_adv(torch.optim.Optimizer):
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
         nnmf_factor: bool = False,
+        compiled_optimizer: bool = True,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -126,6 +127,7 @@ class AdamW_adv(torch.optim.Optimizer):
             "beta3_ema": beta3_ema, "alpha": alpha,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
+            "compiled_optimizer":compiled_optimizer,
         }
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
@@ -136,8 +138,16 @@ class AdamW_adv(torch.optim.Optimizer):
         self.layer_key_fn = layer_key_fn
         super().__init__(params, defaults)
 
+        self.init_step()
+
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
+
+        # Initialize compiled function
+        self._compiled_step_parameter = None
+        if compiled_optimizer:
+            torch._dynamo.config.cache_size_limit = 8192
+            self.compile(fullgraph=True)
 
         if self.stochastic_rounding:
             # For deterministic stochastic rounding, we need to seed the generator
@@ -158,81 +168,82 @@ class AdamW_adv(torch.optim.Optimizer):
     def supports_flat_params(self):
         return False
 
+    def init_step(self):
+        for group in self.param_groups:
+            for i, p in enumerate(group['params']):
+                self.__init_state(p, group)
+
     @torch.no_grad()
-    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-        if p.grad is None:
+    def __init_state(self, p, group):
+        state = self.state[p]
+
+        if 'step' in state:
             return
 
-        grad = p.grad
+        state['step'] = 0
+
+
+        should_factor = (
+            self.factored and
+            not (len(p.shape) == 1 and not group['vector_reshape'])
+        )
+
+        state['factored'] = should_factor
+
+        dtype = torch.float32 if self.factored else p.dtype
+        device = p.device
+
+
+        if state['factored']:
+            state['effective_shape'] = _get_effective_shape(p.numel())
+            d1, d2 = state['effective_shape']
+
+            # First moment (m)
+            if group['betas'][0] > 0:
+                state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
+                state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+                if not self.grams_moment:
+                    packed_d2 = (d2 + 7) // 8
+                    state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+            if self.use_AdEMAMix:
+                state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
+                state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
+                packed_d2 = (d2 + 7) // 8
+                state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+            # Second moment (v)
+            state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
+            state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+        else:  # Fallback to standard AdamW for non-factored tensors
+            if group['betas'][0] > 0:
+                state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
+            if self.use_AdEMAMix:
+                state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
+            state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
+
+    @torch.no_grad()
+    def _step_parameter(self, p, grad, state, group, lr, random_int_tensor: torch.Tensor | None = None):
         if grad.dtype != torch.float32 and self.factored:
             grad = grad.float()
         if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)
         state = self.state[p]
 
-        # State Initialization
-        if 'step' not in state:
-            state['step'] = 0
-
-            should_factor = (
-                self.factored and
-                not (len(p.shape) == 1 and not group['vector_reshape'])
-            )
-
-            state['factored'] = should_factor
-
-            dtype = torch.float32 if self.factored else p.dtype
-            device = p.device
-
-            if state['factored']:
-                state['effective_shape'] = _get_effective_shape(p.numel())
-                d1, d2 = state['effective_shape']
-
-                # First moment (m)
-                if group['betas'][0] > 0:
-                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
-                    state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
-                    if not self.grams_moment:
-                        packed_d2 = (d2 + 7) // 8
-                        state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
-                if self.use_AdEMAMix:
-                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
-                    state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                    packed_d2 = (d2 + 7) // 8
-                    state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
-                # Second moment (v)
-                state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
-                state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
-            else:  # Fallback to standard AdamW for non-factored tensors
-                if group['betas'][0] > 0:
-                    state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
-                if self.use_AdEMAMix:
-                    state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
-                state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
-
         beta1, beta2 = group['betas']
 
-        current_step = state['step']
+        if group['use_bias_correction']:
+            current_step = state['step']
+            bias_correction1 = 1.0 - beta1 ** current_step
+            bias_correction2 = 1.0 - beta2 ** current_step
+        else:
+            bias_correction1 = 1.0
+            bias_correction2 = 1.0
+        step_size = lr / bias_correction1
+
         if group.get('kourkoutas_beta', False):
-            # Call prepare_step() once at the beginning of the step for all params
-            self.kourkoutas_helper.maybe_prepare_step(current_step)
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
             # Get the dynamic beta2 calculated in prepare_step()
             beta2 = self.kourkoutas_helper.get_beta2(p, group)
-
-        step = state['step'] + 1
-        if group['use_bias_correction']:
-            bias_correction1 = 1.0 - beta1 ** step
-            if group.get('kourkoutas_beta', False):
-                bias_correction2 = 1.0 - group['betas'][1] ** step
-                # Use beta2_max for bias correction
-            else:
-                bias_correction2 = 1.0 - beta2 ** step
-        else:
-            bias_correction1 = 1
-            bias_correction2 = 1
-        step_size = group['lr'] / bias_correction1
 
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
@@ -354,7 +365,33 @@ class AdamW_adv(torch.optim.Optimizer):
 
         param_update.apply_parameter_update(self, p, group, update, group["lr"])
 
-        state['step'] += 1
+    @torch.no_grad()
+    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        grad = p.grad
+        if grad is None:
+            return
+
+        state = self.state[p]
+
+        lr = group['lr']
+
+        step = state['step']
+
+        if self.kourkoutas_helper:
+            # Prepare Kourkoutas-β once per optimizer step.
+            self.kourkoutas_helper.maybe_prepare_step(step)
+
+        step += 1
+        state['step']= step
+
+        # Dispatch to compiled or uncompiled Adam step
+        if group.get('compiled_optimizer', False) and self._compiled_step_parameter is not None:
+            self._compiled_step_parameter(p, grad, state, group, lr)
+        else:
+            self._step_parameter(p, grad, state, group, lr)
+
+    def compile(self, *args, **kwargs):
+        self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def step(self, closure=None):
