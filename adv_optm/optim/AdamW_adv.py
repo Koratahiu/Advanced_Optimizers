@@ -87,7 +87,7 @@ class AdamW_adv(torch.optim.Optimizer):
         weight_decay: float = 0.0,
         cautious_wd: bool = False,
         use_bias_correction: bool = True,
-        vector_reshape: bool = True,
+        vector_reshape: bool = False,
         stochastic_rounding: bool = True,
         use_atan2: bool = False,
         cautious_mask: bool = False,
