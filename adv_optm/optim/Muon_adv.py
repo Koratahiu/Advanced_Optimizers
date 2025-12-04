@@ -70,6 +70,11 @@ class Muon_adv(torch.optim.Optimizer):
         accelerated_ns (bool): If True, enables Chebyshev-accelerated Newton-Schulz, which
             dynamically calculates optimal 3rd-order polynomial coefficients. (default: False)
         cns_a_bound (float): Initial lower bound for singular values for CANS. (default: 1e-4)
+        approx_mars (bool): If True, enables Approximated MARS-M variance reduction.
+        fom the paper "MARS-M: When Variance Reduction Meets Matrices"
+            (default: False)
+        mars_gamma (float): The scaling coefficient for MARS gradient correction.
+            (default: 0.025)
         --- Auxiliary AdamW_adv Parameters (used for 'adam' groups) ---
         adam_betas (tuple[float, float]): Betas for the AdamW optimizer part.
         adam_eps (float): Epsilon for the AdamW optimizer part.
@@ -115,6 +120,9 @@ class Muon_adv(torch.optim.Optimizer):
         # CANS
         accelerated_ns: bool = False,
         cns_a_bound: float = 1e-4,
+        # MARS-M
+        approx_mars: bool = False,
+        mars_gamma: float = 0.025,
         # Compiled
         compiled_optimizer: bool = False,
         # --- AdamW_adv specific parameters ---
@@ -166,6 +174,8 @@ class Muon_adv(torch.optim.Optimizer):
             "normuon_eps": normuon_eps,
             # CANS
             "accelerated_ns": accelerated_ns, "cns_a_bound": cns_a_bound,
+            # MARS-M
+            "approx_mars": approx_mars, "mars_gamma": mars_gamma,
             # AdamW_adv defaults
             "adam_betas": adam_betas, "adam_eps": adam_eps, "adam_weight_decay": adam_weight_decay,
             "adam_use_bias_correction": adam_use_bias_correction, "adam_use_atan2": adam_use_atan2,
@@ -259,6 +269,11 @@ class Muon_adv(torch.optim.Optimizer):
             else:
                 state['momentum_buffer'] = torch.zeros_like(p)
 
+            # MARS-M state initialization
+            if group.get('approx_mars', False):
+                # Note: This requires full-rank memory even if factored
+                state['last_grad'] = torch.zeros_like(p, device=device, dtype=dtype)
+
             # NorMuon state initialization
             if group['normuon_variant']:
                 if state['factored']:
@@ -283,6 +298,23 @@ class Muon_adv(torch.optim.Optimizer):
             grad = grad.float()
         if group.get("orthogonal_gradient"):
             grad = _orthogonalize_gradient(p, grad)
+
+        # MARS-M Approximated (Variance Reduction)
+        # c_t = g_t + gamma * beta / (1 - beta) * (g_t - g_{t-1})
+        if group.get('approx_mars', False):
+
+            last_grad = state['last_grad']
+            mars_factor = group['mars_gamma'] * beta1 / (1.0 - beta1)
+
+            # Compute corrected gradient c_t
+            # c_t = grad + mars_factor * (grad - last_grad)
+            correction = grad.sub(last_grad).mul_(mars_factor).add_(grad)
+
+            # Update last_grad to current grad for the next step
+            last_grad.copy_(grad)
+
+            # Use correction as the gradient for subsequent momentum updates
+            grad = correction
 
         if state['factored']: # Factored Muon
 
