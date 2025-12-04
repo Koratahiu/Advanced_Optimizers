@@ -218,7 +218,7 @@ class Lion_adv(torch.optim.Optimizer):
             # Compute update term c_t
             raw_update = torch.lerp(grad, exp_avg, beta1)
 
-            update = self._get_lion_k_update(raw_update, kappa_p)
+            update = _get_lion_k_update(self, raw_update, kappa_p)
 
             # Apply Cautious Masking if enabled
             if self.cautious_mask:
