@@ -327,7 +327,7 @@ class Muon_adv(torch.optim.Optimizer):
                 v_t = state['normuon_v']
                 beta2_normuon = group['beta2_normuon']
                 # Update 2nd moment estimate
-                mean_squared_update = torch.mean(update.square(), dim=1)
+                mean_squared_update = torch.mean(update.square(), dim=1, dtype=v_t.dtype)
                 v_t.lerp_(mean_squared_update, 1 - beta2_normuon)
                 # Normalize update
                 update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
@@ -394,7 +394,7 @@ class Muon_adv(torch.optim.Optimizer):
                     v_t = state['normuon_v']
                     beta2_normuon = group['beta2_normuon']
                     # Update 2nd moment estimate
-                    mean_squared_update = torch.mean(update.square(), dim=1)
+                    mean_squared_update = torch.mean(update.square(), dim=1, dtype=v_t.dtype)
                     v_t.lerp_(mean_squared_update, 1 - beta2_normuon)
                     # Normalize update
                     update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
