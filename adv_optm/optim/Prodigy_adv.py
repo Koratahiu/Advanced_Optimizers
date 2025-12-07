@@ -405,8 +405,6 @@ class Prodigy_adv(torch.optim.Optimizer):
             del vt
 
         else:  # Standard AdamW logic for non-factored tensors
-            exp_avg_sq = state['exp_avg_sq']
-
             # Calculate scaled gradient for Prodigy step (g_t * d)
             grad_scaled = grad * self.d
 
@@ -417,14 +415,17 @@ class Prodigy_adv(torch.optim.Optimizer):
                 else:
                     exp_avg.lerp_(grad_scaled, 1 - self.beta1)
                 if self.grams_moment:
-                    update_mt = grad.sign().mul_(exp_avg.abs())
+                    update_mt = grad_scaled.sign().mul_(exp_avg.abs())
                 elif self.cautious_mask:
-                    mask = (exp_avg * grad > 0).to(grad.dtype)
+                    mask = (exp_avg * grad_scaled > 0).to(grad_scaled.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
                     update_mt = exp_avg.mul(mask)
                     del mask
                 else:
                     update_mt = exp_avg.clone()
+
+            exp_avg_sq = state['exp_avg_sq']
+            exp_avg_sq.mul_(beta2).addcmul_(grad_scaled, grad_scaled, value=1.0 - beta2)
 
             if self.use_AdEMAMix:
                 exp_avg_slow = state['exp_avg_slow']
@@ -441,8 +442,6 @@ class Prodigy_adv(torch.optim.Optimizer):
                     del grad_scaled
                 else:
                     update = grad_scaled
-
-            exp_avg_sq.mul_(beta2).addcmul_(grad_scaled, grad_scaled, value=1.0 - beta2)
 
             if group['use_atan2']:
                 a = 1.2732395
