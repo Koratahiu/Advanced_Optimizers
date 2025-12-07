@@ -284,12 +284,11 @@ class Muon_adv(torch.optim.Optimizer):
 
 
         @torch.compile(fullgraph=True, disable= not is_compiled)
-        def compiled_muon_step_parameter(state, grad, group):
+        def compiled_muon_step_parameter(state, grad, group, lr):
             beta1 = group['beta1']
             nesterov = group['nesterov']
             Simplified_AdEMAMix = group['Simplified_AdEMAMix']
             alpha_grad = group['alpha_grad']
-            lr = group['lr']
 
             if grad.dtype != torch.float32 and state.get('factored', False):
                 grad = grad.float()
@@ -461,7 +460,7 @@ class Muon_adv(torch.optim.Optimizer):
 
             param_update.apply_parameter_update(self, p, group, update, lr)
 
-        compiled_muon_step_parameter(state, grad, group)
+        compiled_muon_step_parameter(state, grad, group, group['lr'])
 
 
     @torch.no_grad()
