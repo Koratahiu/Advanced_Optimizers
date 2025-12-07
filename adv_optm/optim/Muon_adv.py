@@ -477,7 +477,6 @@ class Muon_adv(torch.optim.Optimizer):
         is_compiled = group.get('compiled_optimizer', False)
 
         if not state['is_muon']: # AdamW path
-
             Muon_AuxAdam._adam_step_parameter(self, p, grad, state, group, is_compiled)
         else: # Muon path
             self._muon_step_parameter(p, grad, state, group, is_compiled)
