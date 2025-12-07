@@ -45,135 +45,154 @@ def _init_auxadam_state(self, p, group):
 
 
 @torch.no_grad()
-def _adam_step_parameter(self, p, grad, state, group, lr, bias_correction1, bias_correction2):
-    if grad.dtype != torch.float32 and state.get('factored', False):
-        grad = grad.float()
-    if group.get("adam_orthogonal_gradient"):
-        grad = _orthogonalize_gradient(p, grad)
+def _adam_step_parameter(self, p, grad, state, group, is_compiled):
+
+    step = state['step']
 
     beta1_adam, beta2_adam = group['adam_betas']
 
-    if group.get('adam_kourkoutas_beta', False):
+    if self.kourkoutas_helper:
+        # Prepare Kourkoutas-β once per optimizer step.
+        self.kourkoutas_helper.maybe_prepare_step(step)
         # Accumulate current grad's norm for the *next* step
         self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
         # Get the dynamic beta2_adam calculated in prepare_step()
         beta2_adam = self.kourkoutas_helper.get_beta2(p, group)
 
-    step_size = lr / bias_correction1
+    if group['adam_use_bias_correction']:
+        current_step = step + 1
+        beta1_adam, beta2_adam = group['adam_betas']
+        bias_correction1 = 1.0 - beta1_adam ** current_step
+        bias_correction2 = 1.0 - beta2_adam ** current_step
+    else:
+        bias_correction1 = 1.0
+        bias_correction2 = 1.0
 
-    if group.get('adam_use_AdEMAMix'):
-        beta3_ema = group['adam_beta3_ema']
-        alpha = group['adam_alpha']
+    state['step'] += 1
 
-    if state['factored']:
-        d1, d2 = state['effective_shape']
-        grad_reshaped = grad.view(d1, d2)
-
-        # Reconstruct momentum from previous step's factors
-        if beta1_adam > 0:
-            mt = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
-            if not group.get('adam_grams_moment'):
-                unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
-                torch.where(unpacked_sign, mt, -mt, out=mt)
-                del unpacked_sign
-
-            # Update momentum in full-size
-            mt.lerp_(grad_reshaped, 1.0 - beta1_adam)
-
-            if group.get('adam_grams_moment'):
-                update_mt = (grad_reshaped.sign().mul_(mt.abs()))
-            elif group.get('adam_cautious_mask'):
-                mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
-                mask.div_(mask.mean().clamp_(min=1e-3))
-                update_mt = mt.mul(mask)
-                del mask
-            else:
-                update_mt = mt.clone()
-
-        vt = _unnmf((state['mu_v_nmf'], state['mv_v_nmf']))
-        vt.mul_(beta2_adam).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2_adam)
+    @torch.compile(fullgraph=True, disable= not is_compiled)
+    def compiled_muon_step_parameter(state, grad, group):
+        step_size = group['lr'] / bias_correction1
+        if grad.dtype != torch.float32 and state.get('factored', False):
+            grad = grad.float()
+        if group.get("adam_orthogonal_gradient"):
+            grad = _orthogonalize_gradient(p, grad)
 
         if group.get('adam_use_AdEMAMix'):
-            mt_slow = _unnmf((state['mu_m_slow_nmf'], state['mv_m_slow_nmf']))
-            if state['sign_slow'].dtype != torch.uint8:
-                state['sign_slow'] = state['sign_slow'].to(torch.uint8)
-            unpacked_sign_slow = _unpack_bools(state['sign_slow'], original_m=d2)
-            torch.where(unpacked_sign_slow, mt_slow, -mt_slow, out=mt_slow)
-            del unpacked_sign_slow
+            beta3_ema = group['adam_beta3_ema']
+            alpha = group['adam_alpha']
 
-            mt_slow.lerp_(grad_reshaped, 1.0 - beta3_ema)
+        if state['factored']:
+            d1, d2 = state['effective_shape']
+            grad_reshaped = grad.view(d1, d2)
+
+            # Reconstruct momentum from previous step's factors
+            if beta1_adam > 0:
+                mt = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
+                if not group.get('adam_grams_moment'):
+                    unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
+                    torch.where(unpacked_sign, mt, -mt, out=mt)
+                    del unpacked_sign
+
+                # Update momentum in full-size
+                mt.lerp_(grad_reshaped, 1.0 - beta1_adam)
+
+                if group.get('adam_grams_moment'):
+                    update_mt = (grad_reshaped.sign().mul_(mt.abs()))
+                elif group.get('adam_cautious_mask'):
+                    mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
+                    mask.div_(mask.mean().clamp_(min=1e-3))
+                    update_mt = mt.mul(mask)
+                    del mask
+                else:
+                    update_mt = mt.clone()
+
+            vt = _unnmf((state['mu_v_nmf'], state['mv_v_nmf']))
+            vt.mul_(beta2_adam).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2_adam)
+
+            if group.get('adam_use_AdEMAMix'):
+                mt_slow = _unnmf((state['mu_m_slow_nmf'], state['mv_m_slow_nmf']))
+                if state['sign_slow'].dtype != torch.uint8:
+                    state['sign_slow'] = state['sign_slow'].to(torch.uint8)
+                unpacked_sign_slow = _unpack_bools(state['sign_slow'], original_m=d2)
+                torch.where(unpacked_sign_slow, mt_slow, -mt_slow, out=mt_slow)
+                del unpacked_sign_slow
+
+                mt_slow.lerp_(grad_reshaped, 1.0 - beta3_ema)
+
+                if beta1_adam > 0:
+                    update = update_mt.add_(mt_slow, alpha=alpha)
+                else:
+                    update = torch.add(grad_reshaped, mt_slow, alpha=alpha)
+            else:
+                update = update_mt if beta1_adam > 0 else grad_reshaped.clone()
+            del grad_reshaped
+
+            if group['adam_use_atan2']:
+                a = 1.2732395
+                denom = (vt.sqrt() / (bias_correction2**0.5))
+                update.atan2_(denom).mul_(a)
+            else:
+                denom = (vt.sqrt() / (bias_correction2**0.5)).add_(group['adam_eps'])
+                update.div_(denom)
+            del denom
+
+            update = update.view(p.shape).mul_(step_size)
+
+            # Compress updated moments and store new factors
+            if beta1_adam > 0:
+                if not group.get('adam_grams_moment'):
+                    state['sign'] = _pack_bools(mt > 0)
+                _nnmf(mt.abs(), out=(state['mu_m_nmf'], state['mv_m_nmf']))
+                del mt
+            if group.get('adam_use_AdEMAMix'):
+                state['sign_slow'] = _pack_bools(mt_slow > 0)
+                _nnmf(mt_slow.abs(), out=(state['mu_m_slow_nmf'], state['mv_m_slow_nmf']))
+                del mt_slow
+            _nnmf(vt, out=(state['mu_v_nmf'], state['mv_v_nmf']))
+            del vt
+
+        else:  # Standard AdamW logic for non-factored tensors
+            exp_avg_sq = state['exp_avg_sq']
 
             if beta1_adam > 0:
-                update = update_mt.add_(mt_slow, alpha=alpha)
+                exp_avg = state['exp_avg']
+                exp_avg.lerp_(grad, 1.0 - beta1_adam)
+
+                if group.get('adam_grams_moment'):
+                    update_mt = grad.sign().mul_(exp_avg.abs())
+                elif group.get('adam_cautious_mask'):
+                    mask = (exp_avg * grad > 0).to(grad.dtype)
+                    mask.div_(mask.mean().clamp_(min=1e-3))
+                    update_mt = exp_avg.mul(mask)
+                    del mask
+                else:
+                    update_mt = exp_avg.clone()
+
+            if group.get('adam_use_AdEMAMix'):
+                exp_avg_slow = state['exp_avg_slow']
+                exp_avg_slow.lerp_(grad, 1.0 - beta3_ema)
+
+                if beta1_adam > 0:
+                    update = update_mt.add_(exp_avg_slow, alpha=alpha)
+                else:
+                    update = torch.add(grad, exp_avg_slow, alpha=alpha)
             else:
-                update = torch.add(grad_reshaped, mt_slow, alpha=alpha)
-        else:
-            update = update_mt if beta1_adam > 0 else grad_reshaped.clone()
-        del grad_reshaped
+                update = update_mt if beta1_adam > 0 else grad.clone()
 
-        if group['adam_use_atan2']:
-            a = 1.2732395
-            denom = (vt.sqrt() / (bias_correction2**0.5))
-            update.atan2_(denom).mul_(a)
-        else:
-            denom = (vt.sqrt() / (bias_correction2**0.5)).add_(group['adam_eps'])
-            update.div_(denom)
-        del denom
+            exp_avg_sq.mul_(beta2_adam).addcmul_(grad, grad.conj(), value=1 - beta2_adam)
 
-        update = update.view(p.shape).mul_(step_size)
-
-        # Compress updated moments and store new factors
-        if beta1_adam > 0:
-            if not group.get('adam_grams_moment'):
-                state['sign'] = _pack_bools(mt > 0)
-            _nnmf(mt.abs(), out=(state['mu_m_nmf'], state['mv_m_nmf']))
-            del mt
-        if group.get('adam_use_AdEMAMix'):
-            state['sign_slow'] = _pack_bools(mt_slow > 0)
-            _nnmf(mt_slow.abs(), out=(state['mu_m_slow_nmf'], state['mv_m_slow_nmf']))
-            del mt_slow
-        _nnmf(vt, out=(state['mu_v_nmf'], state['mv_v_nmf']))
-        del vt
-
-    else:  # Standard AdamW logic for non-factored tensors
-        exp_avg_sq = state['exp_avg_sq']
-
-        if beta1_adam > 0:
-            exp_avg = state['exp_avg']
-            exp_avg.lerp_(grad, 1.0 - beta1_adam)
-
-            if group.get('adam_grams_moment'):
-                update_mt = grad.sign().mul_(exp_avg.abs())
-            elif group.get('adam_cautious_mask'):
-                mask = (exp_avg * grad > 0).to(grad.dtype)
-                mask.div_(mask.mean().clamp_(min=1e-3))
-                update_mt = exp_avg.mul(mask)
-                del mask
+            if group.get('adam_use_atan2'):
+                a = 1.2732395
+                denom = (exp_avg_sq.sqrt() / (bias_correction2**0.5))
+                update.atan2_(denom).mul_(a)
             else:
-                update_mt = exp_avg.clone()
+                denom = (exp_avg_sq.sqrt() / (bias_correction2**0.5)).add_(group['adam_eps'])
+                update.div_(denom)
+            del denom
 
-        if group.get('adam_use_AdEMAMix'):
-            exp_avg_slow = state['exp_avg_slow']
-            exp_avg_slow.lerp_(grad, 1.0 - beta3_ema)
+            update.mul_(step_size)
 
-            if beta1_adam > 0:
-                update = update_mt.add_(exp_avg_slow, alpha=alpha)
-            else:
-                update = torch.add(grad, exp_avg_slow, alpha=alpha)
-        else:
-            update = update_mt if beta1_adam > 0 else grad.clone()
+        param_update.apply_parameter_update(self, p, group, update, step_size, group["adam_weight_decay"])
 
-        exp_avg_sq.mul_(beta2_adam).addcmul_(grad, grad.conj(), value=1 - beta2_adam)
-
-        if group.get('adam_use_atan2'):
-            a = 1.2732395
-            denom = (exp_avg_sq.sqrt() / (bias_correction2**0.5))
-            update.atan2_(denom).mul_(a)
-        else:
-            denom = (exp_avg_sq.sqrt() / (bias_correction2**0.5)).add_(group['adam_eps'])
-            update.div_(denom)
-        del denom
-
-        update.mul_(step_size)
-
-    param_update.apply_parameter_update(self, p, group, update, lr, group["adam_weight_decay"])
+    compiled_muon_step_parameter(state, grad, group)
