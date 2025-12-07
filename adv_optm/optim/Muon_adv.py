@@ -124,7 +124,7 @@ class Muon_adv(torch.optim.Optimizer):
         approx_mars: bool = False,
         mars_gamma: float = 0.025,
         # Compiled
-        compiled_optimizer: bool = False,
+        compiled_optimizer: bool = True,
         # --- AdamW_adv specific parameters ---
         adam_betas: tuple[float, float] = (0.9, 0.99),
         adam_eps: float = 1e-8,
@@ -209,15 +209,6 @@ class Muon_adv(torch.optim.Optimizer):
         self.kourkoutas_helper = None
         if any(group.get('adam_kourkoutas_beta', False) for group in self.param_groups):
             self.kourkoutas_helper = KourkoutasHelper(self)
-
-        # Initialize compiled functions to None
-        self._compiled_muon_step = None
-        self._compiled_adam_step = None
-
-        if compiled_optimizer:
-            print("Compiling Muon_adv optimizer paths...")
-            torch._dynamo.config.cache_size_limit = 8192
-            self.compile(fullgraph=True)
 
         if self.stochastic_rounding:
             # For deterministic stochastic rounding, we need to seed the generator
