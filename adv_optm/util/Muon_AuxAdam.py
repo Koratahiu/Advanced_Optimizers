@@ -63,16 +63,17 @@ def _adam_step_parameter(self, p, grad, state, group, is_compiled):
         current_step = step + 1
         beta1_adam, beta2_adam = group['adam_betas']
         bias_correction1 = 1.0 - beta1_adam ** current_step
-        bias_correction2 = 1.0 - beta2_adam ** current_step
+        bias_correction2 = (1.0 - beta2_adam ** current_step)**0.5
     else:
         bias_correction1 = 1.0
         bias_correction2 = 1.0
 
     state['step'] += 1
 
+    step_size = group['lr'] / bias_correction1
+
     @torch.compile(fullgraph=True, disable= not is_compiled)
-    def compiled_muon_step_parameter(state, grad, group):
-        step_size = group['lr'] / bias_correction1
+    def compiled_muon_step_parameter(state, grad, group, step_size, bias_correction2):
         if grad.dtype != torch.float32 and state.get('factored', False):
             grad = grad.float()
         if group.get("adam_orthogonal_gradient"):
@@ -130,10 +131,12 @@ def _adam_step_parameter(self, p, grad, state, group, is_compiled):
 
             if group['adam_use_atan2']:
                 a = 1.2732395
-                denom = (vt.sqrt() / (bias_correction2**0.5))
+                denom = vt.sqrt()
+                denom.div_(bias_correction2)
                 update.atan2_(denom).mul_(a)
             else:
-                denom = (vt.sqrt() / (bias_correction2**0.5)).add_(group['adam_eps'])
+                denom = vt.sqrt()
+                denom.div_(bias_correction2).add_(group['adam_eps'])
                 update.div_(denom)
             del denom
 
@@ -184,10 +187,12 @@ def _adam_step_parameter(self, p, grad, state, group, is_compiled):
 
             if group.get('adam_use_atan2'):
                 a = 1.2732395
-                denom = (exp_avg_sq.sqrt() / (bias_correction2**0.5))
+                denom = exp_avg_sq.sqrt()
+                denom.div_(bias_correction2)
                 update.atan2_(denom).mul_(a)
             else:
-                denom = (exp_avg_sq.sqrt() / (bias_correction2**0.5)).add_(group['adam_eps'])
+                denom = exp_avg_sq.sqrt()
+                denom.div_(bias_correction2).add_(group['adam_eps'])
                 update.div_(denom)
             del denom
 
@@ -195,4 +200,4 @@ def _adam_step_parameter(self, p, grad, state, group, is_compiled):
 
         param_update.apply_parameter_update(self, p, group, update, step_size, group["adam_weight_decay"])
 
-    compiled_muon_step_parameter(state, grad, group)
+    compiled_muon_step_parameter(state, grad, group, step_size, bias_correction2)
