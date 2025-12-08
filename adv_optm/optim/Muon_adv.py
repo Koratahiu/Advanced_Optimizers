@@ -10,7 +10,6 @@ from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util import Muon_AuxAdam
-from ..util.Mars_M import approx_mars_correction
 
 class Muon_adv(torch.optim.Optimizer):
     """
@@ -258,16 +257,13 @@ class Muon_adv(torch.optim.Optimizer):
                     state['mv_mbuf_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
                     packed_d2 = (d2 + 7) // 8
                     state['sign_buf'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
-                    if group.get('approx_mars', False):
-                        # MARS-M state initialization
-                        state['mu_mars_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
-                        state['mv_mars_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
-                        state['sign_mars'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
             else:
                 state['momentum_buffer'] = torch.zeros_like(p)
-                if group.get('approx_mars', False):
-                    # MARS-M state initialization
-                    state['last_grad'] = torch.zeros_like(p, device=device, dtype=dtype)
+
+            # MARS-M state initialization
+            if group.get('approx_mars', False):
+                # Note: This requires full-rank memory even if factored
+                state['last_grad'] = torch.zeros_like(p, device=device, dtype=dtype)
 
             # NorMuon state initialization
             if group['normuon_variant']:
@@ -299,36 +295,34 @@ class Muon_adv(torch.optim.Optimizer):
             if group.get("orthogonal_gradient"):
                 grad = _orthogonalize_gradient(p, grad)
 
+            # MARS-M Approximated (Variance Reduction)
+            # c_t = g_t + gamma * beta / (1 - beta) * (g_t - g_{t-1})
+            if group.get('approx_mars', False):
+
+                last_grad = state['last_grad']
+                mars_factor = group['mars_gamma'] * beta1 / (1.0 - beta1)
+
+                # Compute corrected gradient c_t
+                # c_t = grad + mars_factor * (grad - last_grad)
+                correction = grad.sub(last_grad).mul_(mars_factor).add_(grad)
+
+                # Update last_grad to current grad for the next step
+                last_grad.copy_(grad)
+
+                # Use correction as the gradient for subsequent momentum updates
+                grad = correction
+
             if state['factored']: # Factored Muon
 
-                d1, d2 = state['effective_shape']
-                grad_reshaped = grad.view(d1, d2)
-
-                # MARS-M Approximated (Variance Reduction)
-                if group.get('approx_mars', False):
-                    # Reconstruct MARS-M state from previous step's factors & sign
-                    last_grad = _unnmf((state['mu_mars_nmf'], state['mv_mars_nmf']))
-                    unpacked_sign_mars = _unpack_bools(state['sign_mars'], original_m=d2)
-                    torch.where(unpacked_sign_mars, last_grad, -last_grad, out=last_grad)
-                    del unpacked_sign_mars
-
-                    corrected_grad = approx_mars_correction(group['mars_gamma'], beta1, grad_reshaped, last_grad)
-                    del last_grad
-
-                    # Update last_grad to current grad for the next step
-                    state['sign_mars'] = _pack_bools(grad_reshaped > 0)
-                    _nnmf(grad_reshaped.abs(), out=(state['mu_mars_nmf'], state['mv_mars_nmf']))
-
-                    # Use the corrected gradient as the gradient for subsequent optimizer updates
-                    grad_reshaped = corrected_grad
-
                 # Reconstruct momentum from previous step's factors & sign
+                d1, d2 = state['effective_shape']
                 mt_buf = _unnmf((state['mu_mbuf_nmf'], state['mv_mbuf_nmf']))
                 unpacked_sign = _unpack_bools(state['sign_buf'], original_m=d2)
                 torch.where(unpacked_sign, mt_buf, -mt_buf, out=mt_buf)
                 del unpacked_sign
 
                 # Update momentum in full-size
+                grad_reshaped = grad.view(d1, d2)
                 if not Simplified_AdEMAMix:
                     mt_buf.lerp_(grad_reshaped, 1 - beta1)
                 else:
@@ -392,16 +386,6 @@ class Muon_adv(torch.optim.Optimizer):
                 if len(p.shape) >= 2:
 
                     original_shape = p.shape
-
-                    # MARS-M Approximated (Variance Reduction)
-                    if group.get('approx_mars', False):
-                        last_grad = state['last_grad']
-                        corrected_grad = approx_mars_correction(group['mars_gamma'], beta1, grad, last_grad)
-                        # Update last_grad to current grad for the next step
-                        last_grad.copy_(grad)
-
-                        # Use the corrected gradient as the gradient for subsequent optimizer updates
-                        grad = corrected_grad
 
                     # Momentum update
                     mt_buf = state['momentum_buffer']
