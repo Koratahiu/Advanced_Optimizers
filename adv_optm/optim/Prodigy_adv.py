@@ -234,8 +234,6 @@ class Prodigy_adv(torch.optim.Optimizer):
 
     def init_step(self):
         """Resets accumulators and calculates dlr for the upcoming step."""
-        self.d_denom = torch.tensor(0.0, device=self.device)
-
         g_group = self.param_groups[0]
         self.beta1, self.beta2_default = g_group['betas']
         self.beta3 = g_group['beta3']
@@ -246,7 +244,11 @@ class Prodigy_adv(torch.optim.Optimizer):
         lr = g_group['lr']
 
         self.dlr = self.d * lr
-        self.d_numerator = torch.tensor(g_group.get('d_numerator', 0.0) * self.beta3, device=self.device)
+
+        if hasattr(self, 'd_denom'):
+            device = self.d_denom.device
+            self.d_denom = torch.tensor(0.0, device=device)
+            self.d_numerator = torch.tensor(g_group.get('d_numerator', 0.0) * self.beta3, device=device)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
@@ -311,8 +313,9 @@ class Prodigy_adv(torch.optim.Optimizer):
                 state['p0'] = p.flatten()[::slice_p].detach().clone()
             else:
                 state['p0'] = torch.tensor(0, device=device, dtype=p.dtype)
-            self.d_numerator = self.d_numerator.to(device)
-            self.d_denom = self.d_denom.to(device)
+            if not hasattr(self, 'd_denom'):
+                self.d_denom = torch.tensor(0.0, device=device)
+                self.d_numerator = torch.tensor(group.get('d_numerator', 0.0) * self.beta3, device=device)
 
 
         current_step = state['step']
