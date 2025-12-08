@@ -139,8 +139,6 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
 
     def init_step(self):
         """Resets accumulators and calculates dlr for the upcoming step."""
-        self.d_denom = torch.tensor(0.0, device=self.device)
-
         g_group = self.param_groups[0]
         self.beta1, self.beta2 = g_group['betas']
         self.beta3 = g_group['beta3']
@@ -153,7 +151,10 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
 
         self.dlr = self.d * lr
 
-        self.d_numerator = torch.tensor(g_group.get('d_numerator', 0.0) * self.beta3, device=self.device)
+        if hasattr(self, 'd_denom'):
+            device = self.d_denom.device
+            self.d_denom = torch.tensor(0.0, device=device)
+            self.d_numerator = torch.tensor(g_group.get('d_numerator', 0.0) * self.beta3, device=device)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: Optional[int] = None):
@@ -197,6 +198,9 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 state['p0'] = p.flatten()[::slice_p].detach().clone()
             else:
                 state['p0'] = torch.tensor(0, device=p.device, dtype=p.dtype)
+            if not hasattr(self, 'd_denom'):
+                self.d_denom = torch.tensor(0.0, device=p.device)
+                self.d_numerator = torch.tensor(group.get('d_numerator', 0.0) * self.beta3, device=p.device)
 
             if state['factored']:
                 state['effective_shape'] = _get_effective_shape(p.numel())
@@ -279,11 +283,11 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             p_slice = p.flatten()[::slice_p].float()
             p0 = p0.float()
 
-            self.d_numerator.to(p.device).add_((self.d / d0) * self.dlr * torch.dot(grad_slice, p0 - p_slice))
+            self.d_numerator.add_((self.d / d0) * self.dlr * torch.dot(grad_slice, p0 - p_slice))
 
             alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
             s.mul_(self.beta3).add_(grad_slice, alpha=alpha)
-            self.d_denom.to(p.device).add_(s.abs().sum())
+            self.d_denom.add_(s.abs().sum())
 
             del s, p0, grad_slice, p_slice, alpha
         else:

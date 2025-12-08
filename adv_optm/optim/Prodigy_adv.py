@@ -234,8 +234,6 @@ class Prodigy_adv(torch.optim.Optimizer):
 
     def init_step(self):
         """Resets accumulators and calculates dlr for the upcoming step."""
-        self.d_denom = torch.tensor(0.0, device=self.device)
-
         g_group = self.param_groups[0]
         self.beta1, self.beta2_default = g_group['betas']
         self.beta3 = g_group['beta3']
@@ -246,7 +244,11 @@ class Prodigy_adv(torch.optim.Optimizer):
         lr = g_group['lr']
 
         self.dlr = self.d * lr
-        self.d_numerator = torch.tensor(g_group.get('d_numerator', 0.0) * self.beta3, device=self.device)
+
+        if hasattr(self, 'd_denom'):
+            device = self.d_denom.device
+            self.d_denom = torch.tensor(0.0, device=device)
+            self.d_numerator = torch.tensor(g_group.get('d_numerator', 0.0) * self.beta3, device=device)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
@@ -305,11 +307,16 @@ class Prodigy_adv(torch.optim.Optimizer):
                     state['exp_avg_slow'] = torch.zeros_like(p, dtype=dtype)
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
+            # Prodigy states
             state['s'] = torch.zeros_like(p.flatten()[::slice_p]).detach()
             if p.any():
                 state['p0'] = p.flatten()[::slice_p].detach().clone()
             else:
                 state['p0'] = torch.tensor(0, device=device, dtype=p.dtype)
+            if not hasattr(self, 'd_denom'):
+                self.d_denom = torch.tensor(0.0, device=device)
+                self.d_numerator = torch.tensor(group.get('d_numerator', 0.0) * self.beta3, device=device)
+
 
         current_step = state['step']
         if group.get('kourkoutas_beta', False):
@@ -405,8 +412,6 @@ class Prodigy_adv(torch.optim.Optimizer):
             del vt
 
         else:  # Standard AdamW logic for non-factored tensors
-            exp_avg_sq = state['exp_avg_sq']
-
             # Calculate scaled gradient for Prodigy step (g_t * d)
             grad_scaled = grad * self.d
 
@@ -417,14 +422,17 @@ class Prodigy_adv(torch.optim.Optimizer):
                 else:
                     exp_avg.lerp_(grad_scaled, 1 - self.beta1)
                 if self.grams_moment:
-                    update_mt = grad.sign().mul_(exp_avg.abs())
+                    update_mt = grad_scaled.sign().mul_(exp_avg.abs())
                 elif self.cautious_mask:
-                    mask = (exp_avg * grad > 0).to(grad.dtype)
+                    mask = (exp_avg * grad_scaled > 0).to(grad_scaled.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
                     update_mt = exp_avg.mul(mask)
                     del mask
                 else:
                     update_mt = exp_avg.clone()
+
+            exp_avg_sq = state['exp_avg_sq']
+            exp_avg_sq.mul_(beta2).addcmul_(grad_scaled, grad_scaled, value=1.0 - beta2)
 
             if self.use_AdEMAMix:
                 exp_avg_slow = state['exp_avg_slow']
@@ -441,8 +449,6 @@ class Prodigy_adv(torch.optim.Optimizer):
                     del grad_scaled
                 else:
                     update = grad_scaled
-
-            exp_avg_sq.mul_(beta2).addcmul_(grad_scaled, grad_scaled, value=1.0 - beta2)
 
             if group['use_atan2']:
                 a = 1.2732395
@@ -465,11 +471,11 @@ class Prodigy_adv(torch.optim.Optimizer):
             p_slice = p.flatten()[::slice_p].float()
             p0 = p0.float()
 
-            self.d_numerator.to(p.device).add_((self.d / d0) * self.dlr * torch.dot(grad_slice, p0 - p_slice))
+            self.d_numerator.add_((self.d / d0) * self.dlr * torch.dot(grad_slice, p0 - p_slice))
 
             alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
             s.mul_(self.beta3).add_(grad_slice, alpha=alpha)
-            self.d_denom.to(p.device).add_(s.abs().sum())
+            self.d_denom.add_(s.abs().sum())
 
             del s, p0, grad_slice, p_slice, alpha
         else:
