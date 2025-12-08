@@ -305,11 +305,15 @@ class Prodigy_adv(torch.optim.Optimizer):
                     state['exp_avg_slow'] = torch.zeros_like(p, dtype=dtype)
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
+            # Prodigy states
             state['s'] = torch.zeros_like(p.flatten()[::slice_p]).detach()
             if p.any():
                 state['p0'] = p.flatten()[::slice_p].detach().clone()
             else:
                 state['p0'] = torch.tensor(0, device=device, dtype=p.dtype)
+            self.d_numerator = self.d_numerator.to(device)
+            self.d_denom = self.d_denom.to(device)
+
 
         current_step = state['step']
         if group.get('kourkoutas_beta', False):
@@ -464,11 +468,11 @@ class Prodigy_adv(torch.optim.Optimizer):
             p_slice = p.flatten()[::slice_p].float()
             p0 = p0.float()
 
-            self.d_numerator.to(p.device).add_((self.d / d0) * self.dlr * torch.dot(grad_slice, p0 - p_slice))
+            self.d_numerator.add_((self.d / d0) * self.dlr * torch.dot(grad_slice, p0 - p_slice))
 
             alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
             s.mul_(self.beta3).add_(grad_slice, alpha=alpha)
-            self.d_denom.to(p.device).add_(s.abs().sum())
+            self.d_denom.add_(s.abs().sum())
 
             del s, p0, grad_slice, p_slice, alpha
         else:

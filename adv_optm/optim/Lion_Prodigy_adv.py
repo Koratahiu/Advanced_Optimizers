@@ -197,6 +197,8 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 state['p0'] = p.flatten()[::slice_p].detach().clone()
             else:
                 state['p0'] = torch.tensor(0, device=p.device, dtype=p.dtype)
+            self.d_numerator = self.d_numerator.to(p.device)
+            self.d_denom = self.d_denom.to(p.device)
 
             if state['factored']:
                 state['effective_shape'] = _get_effective_shape(p.numel())
@@ -279,11 +281,11 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             p_slice = p.flatten()[::slice_p].float()
             p0 = p0.float()
 
-            self.d_numerator.to(p.device).add_((self.d / d0) * self.dlr * torch.dot(grad_slice, p0 - p_slice))
+            self.d_numerator.add_((self.d / d0) * self.dlr * torch.dot(grad_slice, p0 - p_slice))
 
             alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
             s.mul_(self.beta3).add_(grad_slice, alpha=alpha)
-            self.d_denom.to(p.device).add_(s.abs().sum())
+            self.d_denom.add_(s.abs().sum())
 
             del s, p0, grad_slice, p_slice, alpha
         else:
