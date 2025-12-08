@@ -40,7 +40,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             Initial D estimate for D-adaptation (default 1e-6). Rarely needs changing.
         d_coef (float):
             Coefficient in the expression for the estimate of d (default 1.0).
-            Values such as 0.5 and 2.0 typically work as well. 
+            Values such as 0.5 and 2.0 typically work as well.
             Changing this parameter is the preferred way to tune the method.
         growth_rate (float):
             prevent the D estimate from growing faster than this multiplicative rate.
@@ -50,8 +50,8 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             If you're using sharded parameters, this should be set to True. The optimizer
             will attempt to auto-detect this, but if you're using an implementation other
             than PyTorch's builtin version, the auto-detection won't work.
-        slice_p (int): Reduce memory usage by calculating LR adaptation statistics on only every 
-            pth entry of each tensor. For values greater than 1 this an an approximation to standard 
+        slice_p (int): Reduce memory usage by calculating LR adaptation statistics on only every
+            pth entry of each tensor. For values greater than 1 this an an approximation to standard
             Prodigy. Values ~11 are reasonable (default 11).
         prodigy_steps (int): If greater than zero, disable Prodigy's stepsize adjustments
             after the specified optimiser step and release all state memory required by Prodigy
@@ -145,7 +145,6 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         if self.beta3 is None:
             self.beta3 = math.sqrt(self.beta2)
 
-        k = g_group['k']
         self.d = g_group['d']
         lr = g_group['lr']
 
@@ -205,7 +204,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             if state['factored']:
                 state['effective_shape'] = _get_effective_shape(p.numel())
                 d1, d2 = state['effective_shape']
-                state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
+                state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
                 state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                 packed_d2 = (d2 + 7) // 8
                 state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)

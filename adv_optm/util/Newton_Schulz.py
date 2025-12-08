@@ -35,7 +35,7 @@ def _newton_schulz_iteration(
 
     transposed = G.size(-2) > G.size(-1)
     if transposed:
-        X = X.mT 
+        X = X.mT
 
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + eps)
 
