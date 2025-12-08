@@ -69,7 +69,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             Initial D estimate for D-adaptation (default 1e-6). Rarely needs changing.
         d_coef (float):
             Coefficient in the expression for the estimate of d (default 1.0).
-            Values such as 0.5 and 2.0 typically work as well. 
+            Values such as 0.5 and 2.0 typically work as well.
             Changing this parameter is the preferred way to tune the method.
         growth_rate (float):
             prevent the D estimate from growing faster than this multiplicative rate.
@@ -79,8 +79,8 @@ class Prodigy_adv(torch.optim.Optimizer):
             If you're using sharded parameters, this should be set to True. The optimizer
             will attempt to auto-detect this, but if you're using an implementation other
             than PyTorch's builtin version, the auto-detection won't work.
-        slice_p (int): Reduce memory usage by calculating LR adaptation statistics on only every 
-            pth entry of each tensor. For values greater than 1 this an an approximation to standard 
+        slice_p (int): Reduce memory usage by calculating LR adaptation statistics on only every
+            pth entry of each tensor. For values greater than 1 this an an approximation to standard
             Prodigy. Values ~11 are reasonable (default 11).
         prodigy_steps (int): If greater than zero, disable Prodigy's stepsize adjustments
             after the specified optimiser step and release all state memory required by Prodigy
@@ -105,7 +105,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         k_logging (int): if > 0 and kourkoutas_beta=True, enables periodic console
             logging of Kourkoutas-β statistics (min, max, mean of `β₂` across layers)
             every logging steps. Useful for debugging and tuning. Set to 0 to disable
-            logging (default: 0). 
+            logging (default: 0).
         layer_key_fn (Optional[Callable]): A function that takes a parameter `p`
             and returns a unique, hashable key representing its "layer" or "bucket".
             If `None`, parameters are bucketed by their memory ID (tensor-wise).
@@ -200,7 +200,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         self.Simplified_AdEMAMix = Simplified_AdEMAMix
         self.factored = nnmf_factor
         self.fsdp_in_use = fsdp_in_use
-        
+
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
 
@@ -287,18 +287,18 @@ class Prodigy_adv(torch.optim.Optimizer):
 
                 # First moment (m)
                 if self.beta1 > 0:
-                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
+                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                     state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
                     if not self.grams_moment:
                         packed_d2 = (d2 + 7) // 8
                         state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
                 if self.use_AdEMAMix:
-                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
+                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
                     state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                     packed_d2 = (d2 + 7) // 8
                     state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
                 # Second moment (v)
-                state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
+                state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                 state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
             else:  # Fallback to standard AdamW for non-factored tensors
                 if self.beta1 > 0:
@@ -508,7 +508,7 @@ class Prodigy_adv(torch.optim.Optimizer):
     def calculate_d(self):
         """Calculates the new `d` based on the accumulated stats."""
         g_group = self.param_groups[0]
-        
+
         # Only perform d-adaptation if prodigy_steps has not been reached
         prodigy_active = not (g_group.get('prodigy_steps', 0) > 0 and g_group['k'] >= g_group['prodigy_steps'])
 

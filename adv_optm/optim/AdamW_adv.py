@@ -69,7 +69,7 @@ class AdamW_adv(torch.optim.Optimizer):
         k_logging (int): if > 0 and kourkoutas_beta=True, enables periodic console
             logging of Kourkoutas-β statistics (min, max, mean of `β₂` across layers)
             every logging steps. Useful for debugging and tuning. Set to 0 to disable
-            logging (default: 0). 
+            logging (default: 0).
         layer_key_fn (Optional[Callable]): A function that takes a parameter `p`
             and returns a unique, hashable key representing its "layer" or "bucket".
             If `None`, parameters are bucketed by their memory ID (tensor-wise).
@@ -113,7 +113,8 @@ class AdamW_adv(torch.optim.Optimizer):
             raise ValueError(f"Epsilon should be >= 0.0. Got {eps}")
         if not (weight_decay >= 0.0):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
-        if kourkoutas_beta and not (betas[1] > beta2_min): raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
+        if kourkoutas_beta and not (betas[1] > beta2_min):
+            raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
 
         if cautious_mask and grams_moment:
             print("Warning: cautious is incompatible with grams, Disabling cautious.")
@@ -190,18 +191,18 @@ class AdamW_adv(torch.optim.Optimizer):
 
                 # First moment (m)
                 if group['betas'][0] > 0:
-                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
+                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                     state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
                     if not self.grams_moment:
                         packed_d2 = (d2 + 7) // 8
                         state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
                 if self.use_AdEMAMix:
-                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype) 
+                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
                     state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                     packed_d2 = (d2 + 7) // 8
                     state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
                 # Second moment (v)
-                state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype) 
+                state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                 state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
             else:  # Fallback to standard AdamW for non-factored tensors
                 if group['betas'][0] > 0:

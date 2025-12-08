@@ -95,7 +95,7 @@ def copy_stochastic_(target: Tensor, source: Tensor):
     device = source.device
     if device not in _generators:
         set_seed(device)
-    
+
     generator = _generators[device]
 
     # create a random 16 bit integer

@@ -285,7 +285,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 state['last_grad'] = torch.zeros_like(p, device=device, dtype=dtype)
 
             group['adam_kourkoutas_beta'] = False
-            state['is_muon'] = True # Workaround as group was acting weirdly; passing muon params in adam path 
+            state['is_muon'] = True # Workaround as group was acting weirdly; passing muon params in adam path
 
         else: # AdamW
             Muon_AuxAdam._init_auxadam_state(self, p, group)
@@ -573,13 +573,13 @@ class AdaMuon_adv(torch.optim.Optimizer):
                         # Ensure we have a gradient tensor to update (even if zero, for sync)
                         if p.grad is None:
                             p.grad = torch.zeros_like(p)
-                        
+
                         self.step_parameter(p, group, base_i + rank)
 
                     # Synchronize updated parameters across all ranks
                     # We gather the slice of parameters processed by the group of ranks
                     dist.all_gather(
-                        params_pad[base_i : base_i + world_size], 
+                        params_pad[base_i : base_i + world_size],
                         params_pad[base_i + rank]
                     )
             else:
