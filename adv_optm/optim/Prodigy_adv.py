@@ -132,6 +132,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
         nnmf_factor: bool = False,
+        compiled_optimizer: bool = False,
         # prodigy parameters
         beta3: float = None,
         d0: float = 1e-6,
@@ -185,7 +186,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
             "vector_reshape": vector_reshape, "use_atan2": use_atan2,
             "orthogonal_gradient": orthogonal_gradient,
-            "beta3_ema": beta3_ema, "alpha": alpha,
+            "beta3_ema": beta3_ema, "alpha": alpha, "compiled_optimizer": compiled_optimizer,
             "beta3": beta3, "d": d0, "d0": d0, "d_max": d0, "d_numerator": 0.0, "d_coef": d_coef,
             "growth_rate": growth_rate, "safeguard_warmup": safeguard_warmup, "k": 0, "slice_p": slice_p,
             "fsdp_in_use": fsdp_in_use, "prodigy_steps": prodigy_steps, "d_limiter": d_limiter,
@@ -219,6 +220,12 @@ class Prodigy_adv(torch.optim.Optimizer):
             devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
             for device in devices:
                 param_update.set_seed(device)
+
+        # Initialize compiled function
+        self._compiled_step_parameter = None
+
+        if compiled_optimizer:
+            self.compile(fullgraph=True)
 
     @property
     def supports_fused_back_pass(self):
@@ -259,10 +266,6 @@ class Prodigy_adv(torch.optim.Optimizer):
             self.fsdp_in_use = True
 
         grad = p.grad
-        if grad.dtype != torch.float32 and self.factored:
-            grad = grad.float()
-        if group["orthogonal_gradient"]:
-            grad = _orthogonalize_gradient(p, grad)
         state = self.state[p]
 
         # State Initialization
@@ -317,23 +320,37 @@ class Prodigy_adv(torch.optim.Optimizer):
                 self.d_denom = torch.tensor(0.0, device=device)
                 self.d_numerator = torch.tensor(group.get('d_numerator', 0.0) * self.beta3, device=device)
 
-
         current_step = state['step']
         if group.get('kourkoutas_beta', False):
             # Call prepare_step() once at the beginning of the step for all params
             self.kourkoutas_helper.maybe_prepare_step(current_step)
-            # Accumulate current grad's norm for the *next* step
-            self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
             # Get the dynamic beta2 calculated in prepare_step()
             beta2 = self.kourkoutas_helper.get_beta2(p, group)
         else:
             beta2 = self.beta2_default
+
+        if group.get('compiled_optimizer', False):
+            self._compiled_step_parameter(p, grad, state, group, beta2)
+        else:
+            self._step_parameter(p, grad, state, group, beta2)
+
+        state['step'] += 1
+
+    def _step_parameter(self, p, grad, state, group, beta2):
+        if grad.dtype != torch.float32 and self.factored:
+            grad = grad.float()
+        if group["orthogonal_gradient"]:
+            grad = _orthogonalize_gradient(p, grad)
 
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
             alpha = group['alpha']
         if self.Simplified_AdEMAMix:
             alpha_grad = group["alpha_grad"]
+
+        if group.get('kourkoutas_beta', False):
+            # Accumulate current grad's norm for the *next* step
+            self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
 
         if state['factored']:
             d1, d2 = state['effective_shape']
@@ -487,7 +504,8 @@ class Prodigy_adv(torch.optim.Optimizer):
 
         param_update.apply_parameter_update(self, p, group, update, self.dlr)
 
-        state['step'] += 1
+    def compile(self, *args, **kwargs):
+        self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def step(self, closure=None):
