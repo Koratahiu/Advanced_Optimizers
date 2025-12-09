@@ -212,6 +212,7 @@ class Prodigy_adv(torch.optim.Optimizer):
 
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
+
         self.init_step()
 
         if self.stochastic_rounding:
@@ -246,11 +247,6 @@ class Prodigy_adv(torch.optim.Optimizer):
         self.beta3 = g_group['beta3']
         if self.beta3 is None:
             self.beta3 = math.sqrt(self.beta2_default)
-
-        self.d = g_group['d']
-        lr = g_group['lr']
-
-        self.dlr = self.d * lr
 
         if hasattr(self, 'd_denom'):
             device = self.d_denom.device
@@ -329,14 +325,16 @@ class Prodigy_adv(torch.optim.Optimizer):
         else:
             beta2 = self.beta2_default
 
+        dlr = group['d'] * group['lr']
+
         if group.get('compiled_optimizer', False):
-            self._compiled_step_parameter(p, grad, state, group, beta2)
+            self._compiled_step_parameter(p, grad, state, group, beta2, dlr)
         else:
-            self._step_parameter(p, grad, state, group, beta2)
+            self._step_parameter(p, grad, state, group, beta2, dlr)
 
         state['step'] += 1
 
-    def _step_parameter(self, p, grad, state, group, beta2):
+    def _step_parameter(self, p, grad, state, group, beta2, dlr):
         if grad.dtype != torch.float32 and self.factored:
             grad = grad.float()
         if group["orthogonal_gradient"]:
@@ -356,7 +354,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             d1, d2 = state['effective_shape']
 
             # Calculate scaled reshaped gradient for factored Prodigy step (g_t * d)
-            grad_scaled_reshaped = grad.view(d1, d2) * self.d
+            grad_scaled_reshaped = grad.view(d1, d2) * group['d']
 
             # Reconstruct momentum from previous step's factors
             if self.beta1 > 0:
@@ -410,10 +408,10 @@ class Prodigy_adv(torch.optim.Optimizer):
                 update.atan2_(denom).mul_(a)
             else:
                 denom = vt.sqrt()
-                update.div_(denom.add_(self.d * group['eps']))
+                update.div_(denom.add_(group['d'] * group['eps']))
             del denom
 
-            update = update.view(p.shape).mul_(self.dlr)
+            update = update.view(p.shape).mul_(dlr)
 
             # Compress updated moments and store new factors
             if self.beta1 > 0:
@@ -430,7 +428,7 @@ class Prodigy_adv(torch.optim.Optimizer):
 
         else:  # Standard AdamW logic for non-factored tensors
             # Calculate scaled gradient for Prodigy step (g_t * d)
-            grad_scaled = grad * self.d
+            grad_scaled = grad * group['d']
 
             if self.beta1 > 0:
                 exp_avg = state['exp_avg']
@@ -473,10 +471,10 @@ class Prodigy_adv(torch.optim.Optimizer):
                 update.atan2_(denom).mul_(a)
             else:
                 denom = exp_avg_sq.sqrt()
-                update.div_(denom.add_(self.d * group['eps']))
+                update.div_(denom.add_(group['d'] * group['eps']))
             del denom
 
-            update.mul_(self.dlr)
+            update.mul_(dlr)
 
         # --- Accumulate Prodigy stats ---
         prodigy_steps = group['prodigy_steps']
@@ -488,9 +486,9 @@ class Prodigy_adv(torch.optim.Optimizer):
             p_slice = p.flatten()[::slice_p].float()
             p0 = p0.float()
 
-            self.d_numerator.add_((self.d / d0) * self.dlr * torch.dot(grad_slice, p0 - p_slice))
+            self.d_numerator.add_((group['d'] / d0) * dlr * torch.dot(grad_slice, p0 - p_slice))
 
-            alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
+            alpha = ((group['d'] / d0) * group['d']) if safeguard_warmup else ((group['d'] / d0) * dlr)
             s.mul_(self.beta3).add_(grad_slice, alpha=alpha)
             self.d_denom.add_(s.abs().sum())
 
@@ -502,7 +500,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             if 'p0' in state:
                 del state['p0']
 
-        param_update.apply_parameter_update(self, p, group, update, self.dlr)
+        param_update.apply_parameter_update(self, p, group, update, dlr)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
@@ -542,19 +540,19 @@ class Prodigy_adv(torch.optim.Optimizer):
                 global_d_numerator = self.d_numerator.item()
                 global_d_denom = self.d_denom.item()
 
-            d_hat = self.d
+            d_hat = g_group['d']
             if global_d_denom > 0:
                 d_hat = d_coef * global_d_numerator / global_d_denom
                 if g_group.get('d_limiter', False):
-                    d_hat = min(self.d * (2 ** 0.25), d_hat)
-                if self.d == g_group['d0']:
-                    self.d = max(self.d, d_hat)
+                    d_hat = min(g_group['d'] * (2 ** 0.25), d_hat)
+                if g_group['d'] == g_group['d0']:
+                    g_group['d'] = max(g_group['d'], d_hat)
                 d_max = max(d_max, d_hat)
-                self.d = min(d_max, self.d * growth_rate)
+                g_group['d'] = min(d_max, g_group['d'] * growth_rate)
 
             for group in self.param_groups:
                 group['d_numerator'] = global_d_numerator
-                group['d'] = self.d
+                group['d'] = g_group['d']
                 group['d_max'] = d_max
 
         # Increment step counter for all groups, regardless of whether d was updated
