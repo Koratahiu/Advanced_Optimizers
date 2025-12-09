@@ -1,15 +1,36 @@
 import torch
 
-import torch.distributed as dist
+from typing import Union, List, Tuple
 
 from ..util import param_update
-from ..util.Newton_Schulz import newton_schulz
+from ..util.Newton_Schulz import newton_schulz, _is_suitable_for_muon, rms_adjustment
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util import Muon_AuxAdam
+
+_NS_COEFFICIENTS = {
+    "original": (3.4445, -4.7750, 2.0315),
+    "quintic": [
+        (4.0848, -6.8946, 2.9270),
+        (3.9505, -6.3029, 2.6377),
+        (3.7418, -5.5913, 2.3037),
+        (2.8769, -3.1427, 1.2046),
+        (2.8366, -3.0525, 1.2012),
+    ],
+    "polar_express": [
+        (8.237312490495555, -23.157747414558198, 16.680568411445915),
+        (4.082441999064835, -2.893047735332586, 0.5252849256975648),
+        (3.9263479922546582, -2.8547468034765298, 0.5318022422894988),
+        (3.2982187133085143, -2.424541981026706, 0.48632008358844075),
+        (2.2970369434552573, -1.63662558125903, 0.4002628455953627),
+        (1.8763805351440397, -1.2347896577722228, 0.35891887501668385),
+        (1.8564423485617974, -1.2132449880935525, 0.3568003487825883),
+        (1.8749994008682747, -1.2499988017229169, 0.3749994008546422),
+    ]
+}
 
 class Muon_adv(torch.optim.Optimizer):
     """
@@ -95,13 +116,14 @@ class Muon_adv(torch.optim.Optimizer):
         self,
         params,
         lr: float = 1e-3,
-        beta1: float = 0.9,
+        beta1: float = 0.95,
         weight_decay: float = 0.0,
         cautious_wd: bool = False,
         nesterov: bool = True,
         ns_steps: int = 5,
         ns_eps: float = 1e-7,
-        ns_coeffs: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
+        # ns_coeffs can be a tuple (a,b,c) OR a string key ("quintic", "polar_express")
+        ns_coeffs: Union[str, Tuple[float, float, float], List[Tuple[float, float, float]]] = "original",
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
         stochastic_rounding: bool = True,
@@ -195,16 +217,17 @@ class Muon_adv(torch.optim.Optimizer):
         # Validate that every group has a determined optimizer type
         for i, group in enumerate(self.param_groups):
             if group.get('use_muon') is None and group.get('optim_type') is None:
-                raise ValueError(
-                    f"Parameter group {i} is missing configuration. "
-                    "You must provide either 'use_muon' (bool) or 'optim_type' (str)."
-                )
+                # Automatic shape-based detection if not explicit
+                has_muon_shape = False
+                for p in group['params']:
+                    has_muon_shape = _is_suitable_for_muon(p)
+                    if has_muon_shape:
+                        group['use_muon'] = True
+                    else:
+                        group['use_muon'] = False
 
-            group['use_muon'] = group.get('use_muon') or group.get('optim_type') == 'muon'
-
-            world_size = dist.get_world_size() if dist.is_initialized() else 1
-            if group['use_muon'] and world_size > 1:
-                group['params'] = sorted(group['params'], key=lambda x: x.size(), reverse=True)
+            if group.get('use_muon') is None: # Fallback
+                 group['use_muon'] = group.get('optim_type') == 'muon'
 
         self.kourkoutas_helper = None
         if any(group.get('adam_kourkoutas_beta', False) for group in self.param_groups):
@@ -289,6 +312,14 @@ class Muon_adv(torch.optim.Optimizer):
             nesterov = group['nesterov']
             Simplified_AdEMAMix = group['Simplified_AdEMAMix']
             alpha_grad = group['alpha_grad']
+            
+            # Resolve coefficients
+            coeffs = group['ns_coeffs']
+            if isinstance(coeffs, str):
+                if coeffs in _NS_COEFFICIENTS:
+                    coeffs = _NS_COEFFICIENTS[coeffs]
+                else:
+                    raise ValueError(f"Unknown coefficients preset: {coeffs}")
 
             if grad.dtype != torch.float32 and state.get('factored', False):
                 grad = grad.float()
@@ -350,7 +381,6 @@ class Muon_adv(torch.optim.Optimizer):
                     ortho_rank=group['ortho_rank']
                 )
 
-
                 if group['normuon_variant']:
                     v_t = state['normuon_v']
                     beta2_normuon = group['beta2_normuon']
@@ -361,21 +391,10 @@ class Muon_adv(torch.optim.Optimizer):
                     update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
                     del mean_squared_update
 
-                # RMS-aligned rescaling
-                if group['rms_rescaling']:
-                    rms_target = 0.2 # default (Adam) value for RMS
-                    update_norm = torch.linalg.vector_norm(update)
-                    update = update.reshape(p.shape).mul_(rms_target * (p.numel()**0.5) / update_norm.add_(1e-8))
-                    del update_norm
-                else:
-                    # Matches original Muon scaling: update *= max(1, rows/cols)**0.5
-                    # update is currently shape (rows, cols)
-                    update = update.reshape(p.shape)
-                    r, c = update.size(-2), update.size(-1)
-                    scaling_factor = max(1, r / c) ** 0.5
-                    update.mul_(scaling_factor)
+                # Factored RMS-aligned scaling
+                rms_adjustment(update, group['rms_rescaling'])
 
-                update.mul_(lr)
+                update.view(p.shape).mul_(lr)
 
                 state['sign_buf'] = _pack_bools(mt_buf > 0)
                 _nnmf(mt_buf.abs(), out=(state['mu_mbuf_nmf'], state['mv_mbuf_nmf']))
@@ -403,8 +422,10 @@ class Muon_adv(torch.optim.Optimizer):
                         # Standard momentum
                         update = mt_buf.clone()
 
-                    if update.ndim == 4:
-                        update = update.view(len(update), -1)
+                    # Flatten any 3D+ structure (e.g. Conv2d output, input, spatial)
+                    # to (Out, Rest) for orthogonalization
+                    if update.ndim >= 2:
+                        update = update.view(update.size(0), -1)
 
                     # Orthogonalization step
                     update = newton_schulz(
@@ -429,39 +450,13 @@ class Muon_adv(torch.optim.Optimizer):
                         update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
 
                     # RMS-aligned rescaling
-                    if group['rms_rescaling']:
-                        rms_target = 0.2 # default (Adam) value for RMS
-                        update_norm = torch.linalg.vector_norm(update)
-                        update = update.view(original_shape).mul_(rms_target * (p.numel()**0.5) / update_norm.add_(1e-8))
-                        del update_norm
-                    else:
-                        # Matches original Muon scaling: update *= max(1, rows/cols)**0.5
-                        update = update.view(p.shape)
-                        r, c = update.size(-2), update.size(-1)
-                        scaling_factor = max(1, r / c) ** 0.5
-                        update.mul_(scaling_factor)
+                    rms_adjustment(update, group['rms_rescaling'])
 
-                    update.mul_(lr)
-
-                else: # Fallback to standard SGD with momentum for 1D params (biases, etc.)
-                    # Momentum update
-                    mt_buf = state['momentum_buffer']
-                    mt_buf.mul_(beta1).add_(grad)
-                    if nesterov:
-                        # Nesterov momentum
-                        update = grad.add(mt_buf, alpha=beta1)
-                    # FIXME, Simplified_AdEMAMix will break SGD since it requires x100 lower LR
-    #                elif Simplified_AdEMAMix:
-    #                    update = torch.add(mt_buf, grad, alpha=alpha_grad)
-                    else:
-                        # Standard momentum
-                        update = mt_buf.clone()
-                    update.mul_(lr)
+                    update = update.view(original_shape).mul_(lr)
 
             param_update.apply_parameter_update(self, p, group, update, lr)
 
         compiled_muon_step_parameter(state, grad, group, group['lr'])
-
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
@@ -488,37 +483,8 @@ class Muon_adv(torch.optim.Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
-        rank = dist.get_rank() if dist.is_initialized() else 0
-
         for group in self.param_groups:
-            if group['use_muon'] and world_size > 1:
-                # Distributed logic for Muon groups
-                params = group['params']
-                # Pad parameters to make them divisible by world_size
-                # This is necessary so we can iterate in strides and all_gather cleanly
-                params_pad = params + [torch.empty_like(params[-1])] * (world_size - len(params) % world_size)
-
-                # Iterate with stride equal to world_size
-                for base_i in range(len(params))[::world_size]:
-                    # If this rank owns this specific parameter slice
-                    if base_i + rank < len(params):
-                        p = params[base_i + rank]
-                        # Ensure we have a gradient tensor to update (even if zero, for sync)
-                        if p.grad is None:
-                            p.grad = torch.zeros_like(p)
-
-                        self.step_parameter(p, group, base_i + rank)
-
-                    # Synchronize updated parameters across all ranks
-                    # We gather the slice of parameters processed by the group of ranks
-                    dist.all_gather(
-                        params_pad[base_i : base_i + world_size],
-                        params_pad[base_i + rank]
-                    )
-            else:
-                # standard logic: For Adam groups or Single-GPU Muon
-                for i, p in enumerate(group['params']):
-                    self.step_parameter(p, group, i)
+            for i, p in enumerate(group['params']):
+                self.step_parameter(p, group, i)
 
         return loss
