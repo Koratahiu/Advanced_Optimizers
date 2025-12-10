@@ -197,9 +197,6 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 state['p0'] = p.flatten()[::slice_p].detach().clone()
             else:
                 state['p0'] = torch.tensor(0, device=p.device, dtype=p.dtype)
-            if not hasattr(self, 'd_denom'):
-                self.d_denom = torch.tensor(0.0, device=p.device)
-                self.d_numerator = torch.tensor(group.get('d_numerator', 0.0) * self.beta3, device=p.device)
 
             if state['factored']:
                 state['effective_shape'] = _get_effective_shape(p.numel())
@@ -210,6 +207,10 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
             else: # Fallback to standard Lion
                 state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
+
+        if not hasattr(self, 'd_denom'):
+            self.d_denom = torch.tensor(0.0, device=p.device)
+            self.d_numerator = torch.tensor(group.get('d_numerator', 0.0), device=p.device)
 
         if state['factored']:
             # Factored Path
