@@ -1,12 +1,11 @@
 import torch
-from typing import List, Tuple, Union
 
 @torch.no_grad()
 def _newton_schulz_iteration(
     G: torch.Tensor,
     steps: int = 5,
     eps: float = 1e-7,
-    coeffs: Union[Tuple[float, float, float], List[Tuple[float, float, float]]] = (3.4445, -4.7750, 2.0315),
+    coeffs: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
     cns: bool = False,
     cns_a_bound: float = 1e-4,
 ) -> torch.Tensor:
@@ -32,6 +31,8 @@ def _newton_schulz_iteration(
         torch.Tensor: The orthogonalized matrix.
     """
     assert G.ndim in (2, 3), f"Input must be 2D or 3D, got {G.ndim}D"
+
+    a, b, c = coeffs
 
     X = G.to(torch.bfloat16)
 
@@ -96,14 +97,7 @@ def _newton_schulz_iteration(
             upper_bound = 1.0 + eps_val
     else:
         # Standard Quintic Newton-Schulz
-        # Handle coefficients: If tuple, repeat. If list, iterate.
-        if isinstance(coeffs, tuple):
-            coeff_iter = [coeffs] * steps
-        else:
-            # truncate or extend
-            coeff_iter = coeffs[:steps] if len(coeffs) >= steps else coeffs + [coeffs[-1]] * (steps - len(coeffs))
-
-        for a, b, c in coeff_iter:
+        for _ in range(steps):
             # A = X @ X.mT
             mm_fn(A, X, X.mT, beta=0.0, alpha=1.0, out=A)
             # B = b * A + c * (A @ A)
@@ -124,7 +118,7 @@ def newton_schulz(
     G: torch.Tensor,
     steps: int = 5,
     eps: float = 1e-7,
-    coeffs: Union[Tuple[float, float, float], List[Tuple[float, float, float]]] = (3.4445, -4.7750, 2.0315),
+    coeffs: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
     cns: bool = False,
     cns_a_bound: float = 1e-4,
     low_rank_ortho: bool = False,

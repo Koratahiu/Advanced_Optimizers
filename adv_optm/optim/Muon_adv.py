@@ -1,7 +1,5 @@
 import torch
 
-from typing import Union, List, Tuple
-
 from ..util import param_update
 from ..util.Muon_util import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update
 from ..util.Effective_Shape import _get_effective_shape
@@ -10,27 +8,6 @@ from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util import Muon_AuxAdam
-
-_NS_COEFFICIENTS = {
-    "original": (3.4445, -4.7750, 2.0315),
-    "quintic": [
-        (4.0848, -6.8946, 2.9270),
-        (3.9505, -6.3029, 2.6377),
-        (3.7418, -5.5913, 2.3037),
-        (2.8769, -3.1427, 1.2046),
-        (2.8366, -3.0525, 1.2012),
-    ],
-    "polar_express": [
-        (8.237312490495555, -23.157747414558198, 16.680568411445915),
-        (4.082441999064835, -2.893047735332586, 0.5252849256975648),
-        (3.9263479922546582, -2.8547468034765298, 0.5318022422894988),
-        (3.2982187133085143, -2.424541981026706, 0.48632008358844075),
-        (2.2970369434552573, -1.63662558125903, 0.4002628455953627),
-        (1.8763805351440397, -1.2347896577722228, 0.35891887501668385),
-        (1.8564423485617974, -1.2132449880935525, 0.3568003487825883),
-        (1.8749994008682747, -1.2499988017229169, 0.3749994008546422),
-    ]
-}
 
 class Muon_adv(torch.optim.Optimizer):
     """
@@ -122,8 +99,7 @@ class Muon_adv(torch.optim.Optimizer):
         nesterov: bool = True,
         ns_steps: int = 5,
         ns_eps: float = 1e-7,
-        # ns_coeffs can be a tuple (a,b,c) OR a string key ("quintic", "polar_express")
-        ns_coeffs: Union[str, Tuple[float, float, float], List[Tuple[float, float, float]]] = "original",
+        ns_coeffs: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
         stochastic_rounding: bool = True,
@@ -312,14 +288,6 @@ class Muon_adv(torch.optim.Optimizer):
             nesterov = group['nesterov']
             Simplified_AdEMAMix = group['Simplified_AdEMAMix']
             alpha_grad = group['alpha_grad']
-            
-            # Resolve coefficients
-            coeffs = group['ns_coeffs']
-            if isinstance(coeffs, str):
-                if coeffs in _NS_COEFFICIENTS:
-                    coeffs = _NS_COEFFICIENTS[coeffs]
-                else:
-                    raise ValueError(f"Unknown coefficients preset: {coeffs}")
 
             if grad.dtype != torch.float32 and state.get('factored', False):
                 grad = grad.float()
