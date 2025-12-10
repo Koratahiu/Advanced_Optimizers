@@ -3,7 +3,7 @@ import torch
 from typing import Union, List, Tuple
 
 from ..util import param_update
-from ..util.Newton_Schulz import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update
+from ..util.Muon_util import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
