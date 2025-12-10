@@ -240,14 +240,20 @@ def _is_suitable_for_muon(
     return True
 
 def rms_adjustment(update: torch.tensor, rms_rescaling: bool):
-    if rms_rescaling:
-        # RMS matching (Kimi/RMS-AdamW style)
-        # 0.2 * sqrt(max(rows, cols))
-        r, c = update.size(-2), update.size(-1)
-        scale = 0.2 * max(r, c) ** 0.5
-        return update.mul_(scale)
+    if rms_rescaling: # RMS-aligned rescaling
+        # This is slower due to norm calculations but it worked the best for t2i models.
+        rms_target = 0.2 # default (Adam) value for RMS
+        update_norm = torch.linalg.vector_norm(update)
+        return update.mul_(rms_target * (update.numel()**0.5) / update_norm.clamp_min(1e-8))
     else:
         # Original Muon scaling
         r, c = update.size(-2), update.size(-1)
         scaling_factor = max(1, r / c) ** 0.5
         return update.mul_(scaling_factor)
+
+def normuon_update(update: torch.tensor, v_t: torch.tensor, beta2, eps):
+    # Update 2nd moment estimate
+    mean_squared_update = torch.mean(update.square(), dim=1, dtype=v_t.dtype)
+    v_t.lerp_(mean_squared_update, 1 - beta2)
+    # Normalize update
+    return update.div_(v_t.sqrt().unsqueeze(1).add_(eps))

@@ -3,7 +3,7 @@ import torch
 from typing import Union, List, Tuple
 
 from ..util import param_update
-from ..util.Newton_Schulz import newton_schulz, _is_suitable_for_muon, rms_adjustment
+from ..util.Newton_Schulz import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update
 from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
@@ -382,19 +382,12 @@ class Muon_adv(torch.optim.Optimizer):
                 )
 
                 if group['normuon_variant']:
-                    v_t = state['normuon_v']
-                    beta2_normuon = group['beta2_normuon']
-                    # Update 2nd moment estimate
-                    mean_squared_update = torch.mean(update.square(), dim=1, dtype=v_t.dtype)
-                    v_t.lerp_(mean_squared_update, 1 - beta2_normuon)
-                    # Normalize update
-                    update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
-                    del mean_squared_update
+                    normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['normuon_eps'])
 
                 # Factored RMS-aligned scaling
                 rms_adjustment(update, group['rms_rescaling'])
 
-                update.view(p.shape).mul_(lr)
+                update.reshape(p.shape).mul_(lr)
 
                 state['sign_buf'] = _pack_bools(mt_buf > 0)
                 _nnmf(mt_buf.abs(), out=(state['mu_mbuf_nmf'], state['mv_mbuf_nmf']))
@@ -441,18 +434,12 @@ class Muon_adv(torch.optim.Optimizer):
 
                     # NorMuon Logic
                     if group['normuon_variant']:
-                        v_t = state['normuon_v']
-                        beta2_normuon = group['beta2_normuon']
-                        # Update 2nd moment estimate
-                        mean_squared_update = torch.mean(update.square(), dim=1, dtype=v_t.dtype)
-                        v_t.lerp_(mean_squared_update, 1 - beta2_normuon)
-                        # Normalize update
-                        update.div_(v_t.sqrt().unsqueeze(1).add_(group['normuon_eps']))
+                        normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['normuon_eps'])
 
                     # RMS-aligned rescaling
                     rms_adjustment(update, group['rms_rescaling'])
 
-                    update = update.view(original_shape).mul_(lr)
+                    update = update.reshape(original_shape).mul_(lr)
 
             param_update.apply_parameter_update(self, p, group, update, lr)
 
