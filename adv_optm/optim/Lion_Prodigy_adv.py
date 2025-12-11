@@ -8,7 +8,6 @@ from typing import Tuple, Optional
 from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
-from ..util.Prodigy_util import _accumulate_for_prodigy
 
 class Lion_Prodigy_adv(torch.optim.Optimizer):
     """
