@@ -83,6 +83,7 @@ def _newton_schulz_iteration(
 
             denom = K + L
 
+            # Calculate alpha, which scales the polynomial
             alpha = 6.0 / denom
 
             c1 = alpha * e_sq
@@ -91,6 +92,7 @@ def _newton_schulz_iteration(
             # Apply the 3rd-order Newton-Schulz update
             # A = X @ X.mT
             mm_fn(A, X, X.mT, beta=0.0, alpha=1.0, out=A)
+            # X = c1 * X + c3 * (A @ X)
             mm_fn(X, A, X, beta=c1, alpha=c3, out=C)
             X, C = C, X
 
