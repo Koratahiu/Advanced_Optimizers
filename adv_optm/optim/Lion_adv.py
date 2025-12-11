@@ -7,6 +7,7 @@ from ..util.Effective_Shape import _get_effective_shape
 from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
+from ..util.lion_k import _get_lion_k_update
 
 class Lion_adv(torch.optim.Optimizer):
     """
@@ -29,11 +30,19 @@ class Lion_adv(torch.optim.Optimizer):
             matrices to apply low-rank compression (default: True).
         stochastic_rounding (bool, optional): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
+        orthogonal_gradient (bool): whether to orthogonalize the gradient (default: False).
         cautious_mask (bool): whether to use the cautious masking technique. (default: False).
         clip_threshold (float, optional): whether to clip the gradients norm
-            per-parameter as proposed in the paper `Lions and Muons: Optimization via
-            Stochastic Frank-Wolfe` (https://arxiv.org/abs/2506.04192) to make Lion more stable
-            (default: 0.0).
+            per-parameter (default: 0.0).
+        kappa_p (float, optional): The p-value for the Lp-norm in Lion-K (domain [1.0, 2.0]).
+            - 1.0: Standard Lion (sign update).
+            - 2.0: Spherical Lion (normalized L2 update).
+            - values between 1.0 and 2.0 interpolate behavior.
+            (default: 1.0).
+        auto_kappa_p (bool, optional): If True, automatically determines kappa_p based on
+            parameter dimensionality. Sets p=2.0 for 4D tensors (Conv2D) (Biases/Norms) to
+            use Spherical updates, and p=1.0 for others (Linear/Embeddings) to use Sign
+            updates. Overrides explicit kappa_p value. (default: False).
         nnmf_factor (bool): whether to use the factorization or use the
             uncompressed optimizer. (default: True)
     """
@@ -50,7 +59,9 @@ class Lion_adv(torch.optim.Optimizer):
         orthogonal_gradient: bool = False,
         cautious_mask: bool = False,
         clip_threshold: float = 0.0,
-        nnmf_factor: bool = True,
+        kappa_p: float = 1.0,
+        auto_kappa_p: bool = False,
+        nnmf_factor: bool = False,
     ):
         if not lr > 0.0:
             raise ValueError(f"Learning rate must be > 0.0, but got {lr}")
@@ -67,6 +78,8 @@ class Lion_adv(torch.optim.Optimizer):
             vector_reshape=vector_reshape,
             orthogonal_gradient=orthogonal_gradient,
             clip_threshold=clip_threshold,
+            kappa_p=kappa_p,
+            auto_kappa_p=auto_kappa_p,
         )
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
@@ -137,6 +150,16 @@ class Lion_adv(torch.optim.Optimizer):
         beta1, beta2 = group["betas"]
         lr = group["lr"]
 
+        # Lion-K Logic
+        kappa_p = group.get("kappa_p", 1.0)
+        if group.get("auto_kappa_p", False):
+            # Apply p=2.0 (Spherical) for 4D (Conv2D)
+            # Apply p=1.0 (Sign) for everything else (Linear/Embeddings)
+            if p.ndim == 4:
+                kappa_p = 2.0
+            else:
+                kappa_p = 1.0
+
         if state['factored']:
             # Factored Path
             d1, d2 = state['effective_shape']
@@ -151,7 +174,9 @@ class Lion_adv(torch.optim.Optimizer):
                 exp_avg = exp_avg.float()
 
             # Compute update term c_t
-            update = torch.lerp(grad_reshaped, exp_avg, beta1).sign_()
+            update = torch.lerp(grad_reshaped, exp_avg, beta1)
+
+            update = _get_lion_k_update(update, kappa_p)
 
             if self.cautious_mask:
                 mask = (update * grad_reshaped > 0).to(grad_reshaped.dtype)
@@ -180,7 +205,9 @@ class Lion_adv(torch.optim.Optimizer):
             if exp_avg.dtype != torch.float32 and self.factored:
                 exp_avg = exp_avg.float()
 
-            update = torch.lerp(grad, exp_avg, beta1).sign_()
+            update = torch.lerp(grad, exp_avg, beta1)
+
+            update = _get_lion_k_update(update, kappa_p)
 
             if self.cautious_mask:
                 mask = (update * grad > 0).to(grad.dtype)
