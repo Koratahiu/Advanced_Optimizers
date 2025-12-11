@@ -229,7 +229,7 @@ class Adopt_adv(torch.optim.Optimizer):
                 state['mu_v_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
                 state['mv_v_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                 # Initialize v_0
-                _nnmf(vt_init, out=(state['mu_v_nmf'], state['mv_v_nmf']))
+                state['mu_v_nmf'], state['mv_v_nmf'] = _nnmf(vt_init)
                 del vt_init
             else: # Fallback for non-factored tensors
                 if group['betas'][0] > 0:
