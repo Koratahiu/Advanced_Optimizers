@@ -69,15 +69,21 @@ def _newton_schulz_iteration(
             # Calculate optimal 3rd-order coefficients c1, c3 for p(x) = c1*x + c3*x^3
             # based on the current singular value bounds [lower_bound, upper_bound].
             # Formulas are derived from Proposition 2 and its proof in Appendix B of the paper.
-            a_bound, b_bound = lower_bound, upper_bound
-            term = a_bound*a_bound + a_bound*b_bound + b_bound*b_bound
-            e_sq = term / 3.0
+            lb, ub = lower_bound, upper_bound
+            lb_ub = lb * ub
 
-            # Calculate alpha, which scales the polynomial
-            common_den_part = 2.0 * (e_sq**1.5)
-            ab_part = a_bound*a_bound*b_bound + b_bound*b_bound*a_bound
-            alpha_den = common_den_part + ab_part
-            alpha = 6.0 / alpha_den
+            # Calculate Mean Square Error term
+            e_sq = (lb*lb + lb_ub + ub*ub) / 3.0
+
+            # Calculate components for alpha and bounds update
+            # K is the error scaling component
+            # L is the bound interaction component
+            K = 2.0 * e_sq**1.5
+            L = lb_ub * (lb + ub)
+
+            denom = K + L
+
+            alpha = 6.0 / denom
 
             c1 = alpha * e_sq
             c3 = -alpha / 3.0
@@ -85,16 +91,12 @@ def _newton_schulz_iteration(
             # Apply the 3rd-order Newton-Schulz update
             # A = X @ X.mT
             mm_fn(A, X, X.mT, beta=0.0, alpha=1.0, out=A)
-
-            # X = c1 * X + c3 * (A @ X)
             mm_fn(X, A, X, beta=c1, alpha=c3, out=C)
             X, C = C, X
 
             # Update the singular value bounds for the next iteration based on the error
-            eps_num = common_den_part - ab_part
-            eps_val = eps_num / alpha_den
-            lower_bound = 1.0 - eps_val
-            upper_bound = 1.0 + eps_val
+            eps_val = (K - L) / denom
+            lower_bound, upper_bound = 1.0 - eps_val, 1.0 + eps_val
     else:
         # Standard Quintic Newton-Schulz
         for _ in range(steps):
