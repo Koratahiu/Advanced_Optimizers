@@ -9,6 +9,3 @@ def _cautious_update(mt: torch.tensor, grad: torch.tensor):
     update_mt = mt.mul(mask)
     del mask
     return update_mt
-
-def _atan2_update(update, denom, a=1.2732395):
-        return update.atan2_(denom).mul_(a)
