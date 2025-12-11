@@ -1,8 +1,6 @@
 import torch
 from typing import Optional, Callable
 
-torch._dynamo.config.cache_size_limit = 8000
-
 from ..util import param_update
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.update_util import _grams_update, _cautious_update
