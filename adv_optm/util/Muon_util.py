@@ -233,6 +233,34 @@ def _is_suitable_for_muon(
 
     return True
 
+def approx_mars(current_grad: torch.tensor, last_grad: torch.tensor, mars_gamma, beta1):
+    """
+    The approximated version of MARS-M, proposed in the paper: "MARS-M: When Variance Reduction
+    Meets Matrices" (https://arxiv.org/abs/2510.21800). A variance reduction technique that
+    incorporates the changes in gradients into the momentum gradient.
+    Formula: c_t = g_t + gamma * beta / (1 - beta) * (g_t - g_{t-1}
+    """
+    mars_factor = mars_gamma * beta1 / (1.0 - beta1)
+    # Compute corrected gradient c_t
+    # c_t = current_grad + mars_factor * (current_grad - last_grad)
+    correction = current_grad.sub(last_grad).mul_(mars_factor).add_(current_grad)
+    # Update last_grad to current grad for the next step
+    last_grad.copy_(current_grad)
+    # Use correction as the gradient for subsequent momentum updates
+    return correction
+
+def normuon_update(update: torch.tensor, v_t: torch.tensor, beta2, eps):
+    """
+    The scalar state update of NorMuon variant, proposed in the paper: "NorMuon: Making Muon more
+    efficient and scalable" (https://arxiv.org/abs/2510.05491). Implement a row-wise normalization
+    2nd moment estimation to balance parameter utilization and retain Muon conditioning.
+    """
+    # Update 2nd moment estimate
+    mean_squared_update = torch.mean(update.square(), dim=1, dtype=v_t.dtype)
+    v_t.lerp_(mean_squared_update, 1 - beta2)
+    # Normalize update
+    return update.div_(v_t.sqrt().unsqueeze(1).add_(eps))
+
 def rms_adjustment(update: torch.tensor, rms_rescaling: bool):
     if rms_rescaling: # RMS-aligned rescaling
         # This is slower due to norm calculations but it worked the best for t2i models.
@@ -244,10 +272,3 @@ def rms_adjustment(update: torch.tensor, rms_rescaling: bool):
         r, c = update.size(-2), update.size(-1)
         scaling_factor = max(1, r / c) ** 0.5
         return update.mul_(scaling_factor)
-
-def normuon_update(update: torch.tensor, v_t: torch.tensor, beta2, eps):
-    # Update 2nd moment estimate
-    mean_squared_update = torch.mean(update.square(), dim=1, dtype=v_t.dtype)
-    v_t.lerp_(mean_squared_update, 1 - beta2)
-    # Normalize update
-    return update.div_(v_t.sqrt().unsqueeze(1).add_(eps))

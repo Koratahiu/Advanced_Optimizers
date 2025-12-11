@@ -6,10 +6,9 @@ import math
 from typing import Tuple, Optional
 
 from ..util import param_update
-from ..util.Effective_Shape import _get_effective_shape
-from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
-from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
+from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
+from ..util.Prodigy_util import _accumulate_for_prodigy
 
 class Lion_Prodigy_adv(torch.optim.Optimizer):
     """
@@ -112,9 +111,6 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         self.fsdp_in_use = fsdp_in_use
         super().__init__(params, defaults)
 
-        # Use the device of the first parameter to avoid hardcoding '.cuda()'
-        self.device = self.param_groups[0]['params'][0].device
-
         # Global state for accumulating metrics across parameter updates within a single step.
         self.init_step()
 
@@ -144,11 +140,6 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         self.beta3 = g_group['beta3']
         if self.beta3 is None:
             self.beta3 = math.sqrt(self.beta2)
-
-        self.d = g_group['d']
-        lr = g_group['lr']
-
-        self.dlr = self.d * lr
 
         if hasattr(self, 'd_denom'):
             device = self.d_denom.device
@@ -211,20 +202,17 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             else: # Fallback to standard Lion
                 state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
 
+        dlr = group['d'] * group['lr']
+
         if state['factored']:
             # Factored Path
             d1, d2 = state['effective_shape']
 
             # Calculate scaled reshaped gradient for factored Prodigy step (g_t * d)
-            grad_scaled_reshaped = grad.view(d1, d2) * self.d
+            grad_scaled_reshaped = grad.view(d1, d2) * group['d']
 
             # Reconstruct momentum m_{t-1}
-            exp_avg = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
-            unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
-            torch.where(unpacked_sign, exp_avg, -exp_avg, out=exp_avg)
-            del unpacked_sign
-            if exp_avg.dtype != torch.float32:
-                exp_avg = exp_avg.float()
+            exp_avg = _reconstruct_state(state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2)
 
             # Compute update term c_t = β1*m_{t-1} + (1-β1)*g_t*d
             update = torch.lerp(grad_scaled_reshaped, exp_avg, self.beta1).sign_()
@@ -235,23 +223,20 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 update.mul_(mask)
                 del mask
 
-            update = update.view(p.shape).mul_(self.dlr)
+            update = update.view(p.shape).mul_(dlr)
 
             # Update momentum m_t = β2*m_{t-1} + (1-β2)*d*g_t
             exp_avg.lerp_(grad_scaled_reshaped, 1 - self.beta2)
             del grad_scaled_reshaped
 
             # Compress new momentum m_t and store factors
-            state['sign'] = _pack_bools(exp_avg > 0)
-            _nnmf(exp_avg.abs(), out=(state['mu_m_nmf'], state['mv_m_nmf']))
-            del exp_avg
-
+            state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True)
         else:
             # Fallback to standard Lion logic
             exp_avg = state["exp_avg"]
 
             # Calculate scaled gradient for Prodigy step (g_t * d)
-            grad_scaled = grad * self.d
+            grad_scaled = grad * group['d']
 
             # Compute update term and sign for the update
             if exp_avg.dtype != torch.float32 and self.factored:
@@ -266,7 +251,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 update.mul_(mask)
                 del mask
 
-            update.mul_(self.dlr)
+            update.mul_(dlr)
 
             # Update momentum using fused lerp
             exp_avg.lerp_(grad_scaled, 1 - self.beta2)
@@ -282,9 +267,9 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             p_slice = p.flatten()[::slice_p].float()
             p0 = p0.float()
 
-            self.d_numerator.add_((self.d / d0) * self.dlr * torch.dot(grad_slice, p0 - p_slice))
+            self.d_numerator.add_((group['d'] / d0) * dlr * torch.dot(grad_slice, p0 - p_slice))
 
-            alpha = ((self.d / d0) * self.d) if safeguard_warmup else ((self.d / d0) * self.dlr)
+            alpha = ((group['d'] / d0) * group['d']) if safeguard_warmup else ((group['d'] / d0) * dlr)
             s.mul_(self.beta3).add_(grad_slice, alpha=alpha)
             self.d_denom.add_(s.abs().sum())
 
@@ -296,7 +281,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             if 'p0' in state:
                 del state['p0']
 
-        param_update.apply_parameter_update(self, p, group, update, self.dlr)
+        param_update.apply_parameter_update(self, p, group, update, dlr)
 
     @torch.no_grad()
     def step(self, closure: Optional[callable] = None):
@@ -335,19 +320,19 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 global_d_numerator = self.d_numerator.item()
                 global_d_denom = self.d_denom.item()
 
-            d_hat = self.d
+            d_hat = g_group['d']
             if global_d_denom > 0:
                 d_hat = d_coef * global_d_numerator / global_d_denom
                 if g_group.get('d_limiter', False):
-                    d_hat = min(self.d * (2 ** 0.25), d_hat)
-                if self.d == g_group['d0']:
-                    self.d = max(self.d, d_hat)
+                    d_hat = min(g_group['d'] * (2 ** 0.25), d_hat)
+                if g_group['d'] == g_group['d0']:
+                    g_group['d'] = max(g_group['d'], d_hat)
                 d_max = max(d_max, d_hat)
-                self.d = min(d_max, self.d * growth_rate)
+                g_group['d'] = min(d_max, g_group['d'] * growth_rate)
 
             for group in self.param_groups:
                 group['d_numerator'] = global_d_numerator
-                group['d'] = self.d
+                group['d'] = g_group['d']
                 group['d_max'] = d_max
 
         # Increment step counter for all groups, regardless of whether d was updated

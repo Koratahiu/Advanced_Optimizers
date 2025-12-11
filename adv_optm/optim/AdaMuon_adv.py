@@ -1,12 +1,8 @@
 import torch
 
-import torch.distributed as dist
-
 from ..util import param_update
-from ..util.Muon_util import newton_schulz
-from ..util.Effective_Shape import _get_effective_shape
-from ..util.NNMF import _nnmf,_unnmf
-from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
+from ..util.Muon_util import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update, approx_mars
+from ..util.factorization_util import _get_effective_shape, _factorize_state, _reconstruct_state
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util import Muon_AuxAdam
@@ -95,6 +91,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         adam_beta3_ema (float): Beta3 for AdEMAMix.
         adam_alpha (float): Alpha for AdEMAMix.
         adam_kourkoutas_beta (bool): Kourkoutas-β for AdamW.
+        adam_nnmf_factor (bool): 1-bit factored for AdamW.
     """
 
     def __init__(
@@ -167,7 +164,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             "vector_reshape": vector_reshape,
             "nesterov":nesterov, "use_atan2":use_atan2,
             "Simplified_AdEMAMix": Simplified_AdEMAMix, "alpha_grad": alpha_grad,
-            "normuon_variant": normuon_variant, "orthogonal_gradient": orthogonal_gradient,
+            "normuon_variant": normuon_variant, "orthogonal_gradient": orthogonal_gradient, "compiled_optimizer":compiled_optimizer,
             "use_muon": use_muon,
             # Low-rank Ortho
             "low_rank_ortho": low_rank_ortho, "ortho_rank": ortho_rank,
@@ -193,29 +190,21 @@ class AdaMuon_adv(torch.optim.Optimizer):
         # Validate that every group has a determined optimizer type
         for i, group in enumerate(self.param_groups):
             if group.get('use_muon') is None and group.get('optim_type') is None:
-                raise ValueError(
-                    f"Parameter group {i} is missing configuration. "
-                    "You must provide either 'use_muon' (bool) or 'optim_type' (str)."
-                )
+                # Automatic shape-based detection if not explicit
+                has_muon_shape = False
+                for p in group['params']:
+                    has_muon_shape = _is_suitable_for_muon(p)
+                    if has_muon_shape:
+                        group['use_muon'] = True
+                    else:
+                        group['use_muon'] = False
 
-            group['use_muon'] = group.get('use_muon') or group.get('optim_type') == 'muon'
-
-            world_size = dist.get_world_size() if dist.is_initialized() else 1
-            if group['use_muon'] and world_size > 1:
-                group['params'] = sorted(group['params'], key=lambda x: x.size(), reverse=True)
+            if group.get('use_muon') is None: # Fallback
+                 group['use_muon'] = group.get('optim_type') == 'muon'
 
         self.kourkoutas_helper = None
         if any(group.get('adam_kourkoutas_beta', False) for group in self.param_groups):
             self.kourkoutas_helper = KourkoutasHelper(self)
-
-        # Initialize compiled functions to None
-        self._compiled_muon_step = None
-        self._compiled_adam_step = None
-
-        if compiled_optimizer:
-            print("Compiling AdaMuon_adv optimizer paths...")
-            torch._dynamo.config.cache_size_limit = 8192
-            self.compile(fullgraph=True)
 
         if self.stochastic_rounding:
             # For deterministic stochastic rounding, we need to seed the generator
@@ -268,7 +257,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                         state['mu_vbuf_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                         state['mv_vbuf_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
             else:
-                if len(p.shape) >= 2 and not group['normuon_variant']:
+                if not group['normuon_variant']:
                     state['second_momentum_buffer'] = torch.zeros_like(p)
                 state['momentum_buffer'] = torch.zeros_like(p)
 
@@ -292,120 +281,85 @@ class AdaMuon_adv(torch.optim.Optimizer):
             state['is_muon'] = False
 
     @torch.no_grad()
-    def _muon_step_parameter(self, p, grad, state, group, lr):
-        # Retrieve hyperparameters
-        beta1, beta2 = group['betas']
-        nesterov = group['nesterov']
-        Simplified_AdEMAMix = group['Simplified_AdEMAMix']
-        alpha_grad = group['alpha_grad']
-        if grad.dtype != torch.float32 and state.get('factored', False):
-            grad = grad.float()
-        if group.get("orthogonal_gradient"):
-            grad = _orthogonalize_gradient(p, grad)
+    def _muon_step_parameter(self, p, grad, state, group, is_compiled):
 
-        # MARS-M Approximated (Variance Reduction)
-        # c_t = g_t + gamma * beta / (1 - beta) * (g_t - g_{t-1})
-        if group.get('approx_mars', False):
 
-            last_grad = state['last_grad']
-            mars_factor = group['mars_gamma'] * beta1 / (1.0 - beta1)
+        @torch.compile(fullgraph=True, disable= not is_compiled)
+        def compiled_muon_step_parameter(state, grad, group, lr):
+            beta1, beta2 = group['betas']
+            nesterov = group['nesterov']
+            Simplified_AdEMAMix = group['Simplified_AdEMAMix']
+            alpha_grad = group['alpha_grad']
 
-            # Compute corrected gradient c_t
-            # c_t = grad + mars_factor * (grad - last_grad)
-            correction = grad.sub(last_grad).mul_(mars_factor).add_(grad)
+            if grad.dtype != torch.float32 and state.get('factored', False):
+                grad = grad.float()
+            if group.get("orthogonal_gradient"):
+                grad = _orthogonalize_gradient(p, grad)
 
-            # Update last_grad to current grad for the next step
-            last_grad.copy_(grad)
+            # MARS-M Approximated (Variance Reduction)
+            if group.get('approx_mars', False):
+                grad = approx_mars(grad, state['last_grad'], group['mars_gamma'], beta1)
 
-            # Use correction as the gradient for subsequent momentum updates
-            grad = correction
+            if state['factored']: # Factored Muon
+                d1, d2 = state['effective_shape']
+                grad_reshaped = grad.view(d1, d2)
 
-        if state['factored']: # Factored AdaMuon
+                # Reconstruct momentum from previous step's factors & sign
+                mt_buf = _reconstruct_state(state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'], d2)
 
-            # Reconstruct momentum from previous step's factors & sign
-            d1, d2 = state['effective_shape']
-            mt_buf = _unnmf((state['mu_mbuf_nmf'], state['mv_mbuf_nmf']))
-            unpacked_sign = _unpack_bools(state['sign_buf'], original_m=d2)
-            torch.where(unpacked_sign, mt_buf, -mt_buf, out=mt_buf)
-            del unpacked_sign
-
-            # Update momentum in full-size
-            grad_reshaped = grad.view(d1, d2)
-            if not Simplified_AdEMAMix:
-                mt_buf.lerp_(grad_reshaped, 1 - beta1)
-            else:
-                mt_buf.mul_(beta1).add_(grad_reshaped)
-
-            if nesterov:
-                signed_m_buf = torch.sign(grad_reshaped.lerp(mt_buf, beta1))
-            elif Simplified_AdEMAMix:
-                signed_m_buf = torch.sign(mt_buf.add(grad_reshaped, alpha=alpha_grad))
-            else:
-                signed_m_buf = torch.sign(mt_buf)
-            del grad_reshaped
-
-            # Orthogonalization step
-            update = newton_schulz(
-                signed_m_buf,
-                steps=group['ns_steps'],
-                eps=group['ns_eps'],
-                coeffs=group['ns_coeffs'],
-                cns=group['accelerated_ns'],
-                cns_a_bound=group['cns_a_bound'],
-                low_rank_ortho=group['low_rank_ortho'],
-                ortho_rank=group['ortho_rank']
-            )
-            del signed_m_buf
-
-            if group['normuon_variant']:
-                v_t = state['normuon_v']
-                # Update 2nd moment estimate
-                mean_squared_update = torch.mean(update.square(), dim=1, dtype=v_t.dtype)
-                v_t.lerp_(mean_squared_update, 1 - beta2)
-                # Normalize update
-                update.div_(v_t.sqrt().unsqueeze(1).add_(group['eps']))
-                del mean_squared_update
-            else:
-                # Reconstruct second momentum from previous step's factors
-                vt_buf = _unnmf((state['mu_vbuf_nmf'], state['mv_vbuf_nmf']))
-                # Update second momentum in full-size
-                vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
-                # Apply second momentum update (adaptive scaling)
-                if group['use_atan2']:
-                    a = 1.2732395
-                    denom = vt_buf.sqrt()
-                    update.atan2_(denom).mul_(a)
+                # Update momentum in full-size
+                if not Simplified_AdEMAMix:
+                    mt_buf.lerp_(grad_reshaped, 1 - beta1)
                 else:
-                    denom = vt_buf.sqrt().add_(group['eps'])
-                    update.div_(denom)
-                del denom
+                    mt_buf.mul_(beta1).add_(grad_reshaped)
 
-            # RMS-aligned rescaling
-            if group['rms_rescaling']:
-                rms_target = 0.2 # default (Adam) value for RMS
-                update_norm = torch.linalg.vector_norm(update)
-                update = update.reshape(p.shape).mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
-                del update_norm
-            else:
-                # Matches original Muon scaling: update *= max(1, rows/cols)**0.5
-                update = update.reshape(p.shape)
-                r, c = update.size(-2), update.size(-1)
-                scaling_factor = max(1, r / c) ** 0.5
-                update.mul_(scaling_factor * lr)
+                if nesterov:
+                    update = torch.sign(grad_reshaped.lerp(mt_buf, beta1))
+                elif Simplified_AdEMAMix:
+                    update = torch.sign(mt_buf.add(grad_reshaped, alpha=alpha_grad))
+                else:
+                    update = torch.sign(mt_buf)
+                del grad_reshaped
 
-            # Compress updated moments and store new factors
-            state['sign_buf'] = _pack_bools(mt_buf > 0)
-            _nnmf(mt_buf.abs(), out=(state['mu_mbuf_nmf'], state['mv_mbuf_nmf']))
-            del mt_buf
+                # Orthogonalization step
+                update = newton_schulz(
+                    update,
+                    steps=group['ns_steps'],
+                    eps=group['ns_eps'],
+                    coeffs=group['ns_coeffs'],
+                    cns=group['accelerated_ns'],
+                    cns_a_bound=group['cns_a_bound'],
+                    low_rank_ortho=group['low_rank_ortho'],
+                    ortho_rank=group['ortho_rank']
+                )
+                del update
 
-            if not group['normuon_variant']:
-                _nnmf(vt_buf.abs(), out=(state['mu_vbuf_nmf'], state['mv_vbuf_nmf']))
-                del vt_buf
+                if group['normuon_variant']:
+                    normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['normuon_eps'])
+                else:
+                    # Reconstruct second momentum from previous step's factors
+                    vt_buf = _reconstruct_state(state['mu_vbuf_nmf'], state['mv_vbuf_nmf'])
+                    # Update second momentum in full-size
+                    vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
+                    # Apply second momentum update (adaptive scaling)
+                    if group['use_atan2']:
+                        a = 1.2732395
+                        denom = vt_buf.sqrt()
+                        update.atan2_(denom).mul_(a)
+                    else:
+                        denom = vt_buf.sqrt().add_(group['eps'])
+                        update.div_(denom)
+                    del denom
 
-        else: # Standard AdaMuon logic for non-factored tensors
+                # Factored RMS-aligned scaling
+                rms_adjustment(update, group['rms_rescaling'])
 
-            if len(p.shape) >= 2:
+                update.reshape(p.shape).mul_(lr)
 
+                state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True)
+                del mt_buf
+
+            else: # Standard AdaMuon logic for non-factored tensors
                 original_shape = p.shape
 
                 # Momentum update
@@ -416,19 +370,18 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     mt_buf.mul_(beta1).add_(grad)
 
                 if nesterov:
-                    signed_m_buf = torch.sign(grad.lerp(mt_buf, beta1))
+                    update = torch.sign(grad.lerp(mt_buf, beta1))
                 elif Simplified_AdEMAMix:
-                    signed_m_buf = torch.sign(mt_buf.add(grad, alpha=alpha_grad))
+                    update = torch.sign(mt_buf.add(grad, alpha=alpha_grad))
                 else:
-                    signed_m_buf = torch.sign(mt_buf)
+                    update = torch.sign(mt_buf)
 
                 # Flatten if necessary (e.g., for Conv layers)
-                if signed_m_buf.ndim == 4:
-                    signed_m_buf = signed_m_buf.view(len(signed_m_buf), -1)
+                update = update.flatten(1)
 
                 # Orthogonalization step
                 update = newton_schulz(
-                    signed_m_buf,
+                    update,
                     steps=group['ns_steps'],
                     eps=group['ns_eps'],
                     coeffs=group['ns_coeffs'],
@@ -437,18 +390,10 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     low_rank_ortho=group['low_rank_ortho'],
                     ortho_rank=group['ortho_rank']
                 )
-                del signed_m_buf
 
+                # NorMuon Logic
                 if group['normuon_variant']:
-                    # NorMuon Logic
-                    v_t = state['normuon_v']
-                    # Update 2nd moment estimate
-                    mean_squared_update = torch.mean(update.square(), dim=1, dtype=v_t.dtype)
-                    v_t.lerp_(mean_squared_update, 1 - beta2)
-                    # Normalize update
-                    update.div_(v_t.sqrt().unsqueeze(1).add_(group['eps']))
-                    del mean_squared_update
-                    update = update.view(original_shape)
+                    normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['normuon_eps'])
                 else:
                     # Original AdaMuon Logic
                     update = update.view(original_shape)
@@ -465,86 +410,30 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     del denom
 
                 # RMS-aligned rescaling
-                if group['rms_rescaling']:
-                    rms_target = 0.2 # default (Adam) value for RMS
-                    update_norm = torch.linalg.vector_norm(update)
-                    update.mul_(rms_target * lr * (p.numel()**0.5) / update_norm.add_(1e-8))
-                    del update_norm
-                else:
-                    # Matches original Muon scaling: update *= max(1, rows/cols)**0.5
-                    r, c = update.size(-2), update.size(-1)
-                    scaling_factor = max(1, r / c) ** 0.5
-                    update.mul_(scaling_factor)
-                    update.mul_(lr)
+                rms_adjustment(update, group['rms_rescaling'])
 
-            else: # Fallback to standard SGD with momentum for 1D params (biases, etc.)
-                # Momentum update
-                mt_buf = state['momentum_buffer']
-                mt_buf.mul_(beta1).add_(grad)
-                if nesterov:
-                    update = grad.add(mt_buf, alpha=beta1)
-                # FIXME, Simplified_AdEMAMix will break SGD since it requires x100 lower LR
-#                 elif Simplified_AdEMAMix:
-#                     update = mt_buf.add(grad, alpha=alpha_grad)
-                else:
-                    update = mt_buf.clone()
-                update.mul_(lr)
+                update = update.reshape(original_shape).mul_(lr)
 
-        param_update.apply_parameter_update(self, p, group, update, lr)
+            param_update.apply_parameter_update(self, p, group, update, lr)
+
+        compiled_muon_step_parameter(state, grad, group, group['lr'])
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
         grad = p.grad
         if grad is None:
             return
+
         state = self.state[p]
 
         self.__init_state(p, group)
 
-        lr = group['lr']
         is_compiled = group.get('compiled_optimizer', False)
 
         if not state['is_muon']: # AdamW path
-            step = state['step']
-
-            if self.kourkoutas_helper:
-                # Prepare Kourkoutas-β once per optimizer step.
-                self.kourkoutas_helper.maybe_prepare_step(step)
-
-            # Adam-specific setup (bias correction)
-            if group['adam_use_bias_correction']:
-                current_step = step + 1
-                beta1_adam, beta2_adam = group['adam_betas']
-                bias_correction1 = 1.0 - beta1_adam ** current_step
-                bias_correction2 = 1.0 - beta2_adam ** current_step
-            else:
-                bias_correction1 = 1.0
-                bias_correction2 = 1.0
-
-            self.state[p]['step'] += 1
-
-            # Dispatch to compiled or uncompiled Adam step
-            if is_compiled and self._compiled_adam_step is not None:
-                lr = torch.as_tensor(lr, dtype=torch.float32)
-                bias_correction1 = torch.as_tensor(bias_correction1, dtype=torch.float32)
-                bias_correction2 = torch.as_tensor(bias_correction2, dtype=torch.float32)
-                self._compiled_adam_step(self, p, grad, state, group, lr, bias_correction1, bias_correction2)
-            else:
-                Muon_AuxAdam._adam_step_parameter(self, p, grad, state, group, lr, bias_correction1, bias_correction2)
+            Muon_AuxAdam._adam_step_parameter(self, p, grad, state, group, is_compiled)
         else: # Muon path
-            # Dispatch to compiled or uncompiled Muon step
-            if is_compiled and self._compiled_muon_step is not None:
-                lr = torch.as_tensor(lr, dtype=torch.float32)
-                self._compiled_muon_step(p, grad, state, group, lr)
-            else:
-                self._muon_step_parameter(p, grad, state, group, lr)
-
-
-    def compile(self, *args, **kwargs):
-        print("Compiling AdaMuon step path...")
-        self._compiled_muon_step = torch.compile(self._muon_step_parameter, *args, **kwargs)
-        print("Compiling AuxAdam step path...")
-        self._compiled_adam_step = torch.compile(Muon_AuxAdam._adam_step_parameter, *args, **kwargs)
+            self._muon_step_parameter(p, grad, state, group, is_compiled)
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -554,37 +443,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
-        rank = dist.get_rank() if dist.is_initialized() else 0
-
         for group in self.param_groups:
-            if group['use_muon'] and world_size > 1:
-                # Distributed logic for Muon groups
-                params = group['params']
-                # Pad parameters to make them divisible by world_size
-                # This is necessary so we can iterate in strides and all_gather cleanly
-                params_pad = params + [torch.empty_like(params[-1])] * (world_size - len(params) % world_size)
-
-                # Iterate with stride equal to world_size
-                for base_i in range(len(params))[::world_size]:
-                    # If this rank owns this specific parameter slice
-                    if base_i + rank < len(params):
-                        p = params[base_i + rank]
-                        # Ensure we have a gradient tensor to update (even if zero, for sync)
-                        if p.grad is None:
-                            p.grad = torch.zeros_like(p)
-
-                        self.step_parameter(p, group, base_i + rank)
-
-                    # Synchronize updated parameters across all ranks
-                    # We gather the slice of parameters processed by the group of ranks
-                    dist.all_gather(
-                        params_pad[base_i : base_i + world_size],
-                        params_pad[base_i + rank]
-                    )
-            else:
-                # standard logic: For Adam groups or Single-GPU Muon
-                for i, p in enumerate(group['params']):
-                    self.step_parameter(p, group, i)
+            for i, p in enumerate(group['params']):
+                self.step_parameter(p, group, i)
 
         return loss

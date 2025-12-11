@@ -1,10 +1,8 @@
 import torch
 
 from ..util import param_update
-from ..util.Muon_util import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update
-from ..util.Effective_Shape import _get_effective_shape
-from ..util.NNMF import _nnmf,_unnmf
-from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
+from ..util.Muon_util import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update, approx_mars
+from ..util.factorization_util import _get_effective_shape, _factorize_state, _reconstruct_state
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util import Muon_AuxAdam
@@ -295,33 +293,17 @@ class Muon_adv(torch.optim.Optimizer):
                 grad = _orthogonalize_gradient(p, grad)
 
             # MARS-M Approximated (Variance Reduction)
-            # c_t = g_t + gamma * beta / (1 - beta) * (g_t - g_{t-1})
             if group.get('approx_mars', False):
-
-                last_grad = state['last_grad']
-                mars_factor = group['mars_gamma'] * beta1 / (1.0 - beta1)
-
-                # Compute corrected gradient c_t
-                # c_t = grad + mars_factor * (grad - last_grad)
-                correction = grad.sub(last_grad).mul_(mars_factor).add_(grad)
-
-                # Update last_grad to current grad for the next step
-                last_grad.copy_(grad)
-
-                # Use correction as the gradient for subsequent momentum updates
-                grad = correction
+                grad = approx_mars(grad, state['last_grad'], group['mars_gamma'], beta1)
 
             if state['factored']: # Factored Muon
+                d1, d2 = state['effective_shape']
+                grad_reshaped = grad.view(d1, d2)
 
                 # Reconstruct momentum from previous step's factors & sign
-                d1, d2 = state['effective_shape']
-                mt_buf = _unnmf((state['mu_mbuf_nmf'], state['mv_mbuf_nmf']))
-                unpacked_sign = _unpack_bools(state['sign_buf'], original_m=d2)
-                torch.where(unpacked_sign, mt_buf, -mt_buf, out=mt_buf)
-                del unpacked_sign
+                mt_buf = _reconstruct_state(state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'], d2)
 
                 # Update momentum in full-size
-                grad_reshaped = grad.view(d1, d2)
                 if not Simplified_AdEMAMix:
                     mt_buf.lerp_(grad_reshaped, 1 - beta1)
                 else:
@@ -357,8 +339,7 @@ class Muon_adv(torch.optim.Optimizer):
 
                 update.reshape(p.shape).mul_(lr)
 
-                state['sign_buf'] = _pack_bools(mt_buf > 0)
-                _nnmf(mt_buf.abs(), out=(state['mu_mbuf_nmf'], state['mv_mbuf_nmf']))
+                state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True)
                 del mt_buf
 
             else: # Standard Muon logic for non-factored tensors
@@ -383,10 +364,8 @@ class Muon_adv(torch.optim.Optimizer):
                         # Standard momentum
                         update = mt_buf.clone()
 
-                    # Flatten any 3D+ structure (e.g. Conv2d output, input, spatial)
-                    # to (Out, Rest) for orthogonalization
-                    if update.ndim >= 2:
-                        update = update.view(update.size(0), -1)
+                    # Flatten if necessary (e.g., for Conv layers)
+                    update = update.flatten(1)
 
                     # Orthogonalization step
                     update = newton_schulz(

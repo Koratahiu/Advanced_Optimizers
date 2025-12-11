@@ -3,10 +3,9 @@ import torch
 from typing import Tuple, Optional
 
 from ..util import param_update
-from ..util.Effective_Shape import _get_effective_shape
-from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
-from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
+from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
+
 
 class Lion_adv(torch.optim.Optimizer):
     """
@@ -143,12 +142,7 @@ class Lion_adv(torch.optim.Optimizer):
             grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct momentum m_{t-1}
-            exp_avg = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
-            unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
-            torch.where(unpacked_sign, exp_avg, -exp_avg, out=exp_avg)
-            del unpacked_sign
-            if exp_avg.dtype != torch.float32:
-                exp_avg = exp_avg.float()
+            exp_avg = _reconstruct_state(state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2)
 
             # Compute update term c_t
             update = torch.lerp(grad_reshaped, exp_avg, beta1).sign_()
@@ -159,7 +153,6 @@ class Lion_adv(torch.optim.Optimizer):
                 update.mul_(mask)
                 del mask
 
-            # Parameter update
             update = update.view(p.shape).mul_(lr)
 
             # Standard Lion momentum update
@@ -168,9 +161,7 @@ class Lion_adv(torch.optim.Optimizer):
             del grad_reshaped
 
             # Compress new momentum m_t and store factors
-            state['sign'] = _pack_bools(exp_avg > 0)
-            _nnmf(exp_avg.abs(), out=(state['mu_m_nmf'], state['mv_m_nmf']))
-            del exp_avg
+            state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True)
 
         else:
             # Fallback to standard Lion logic

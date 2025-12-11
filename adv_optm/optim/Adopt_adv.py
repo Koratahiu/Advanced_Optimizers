@@ -2,11 +2,10 @@ import torch
 from typing import Callable, Optional
 
 from ..util import param_update
-from ..util.Effective_Shape import _get_effective_shape
-from ..util.NNMF import _nnmf, _unnmf
+from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state, _nnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
-from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
 from ..util.Kourkoutas import KourkoutasHelper
+from ..util.update_util import _grams_update, _cautious_update
 
 class Adopt_adv(torch.optim.Optimizer):
     """
@@ -212,31 +211,32 @@ class Adopt_adv(torch.optim.Optimizer):
                 state['effective_shape'] = _get_effective_shape(p.numel())
                 d1, d2 = state['effective_shape']
 
-                # m_0 = 0
+                # First moment (m)
                 if group['betas'][0] > 0:
                     state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
                     state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                    if not self.grams_moment:
-                        packed_d2 = (d2 + 7) // 8
-                        state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+                    packed_d2 = (d2 + 7) // 8
+                    state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+                # AdEMAMix slow moment (m_slow)
                 if self.use_AdEMAMix:
                     state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
                     state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                     packed_d2 = (d2 + 7) // 8
                     state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
-                # v_0 = g_0^2 (SMMF_ADOPT NMF storage)
+                # Second moment (v)
                 vt_init = grad.view(d1, d2).square_()
                 # Allocate NMF factors for vt
                 state['mu_v_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
                 state['mv_v_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                # Initialize v_0 using NMF
+                # Initialize v_0
                 _nnmf(vt_init, out=(state['mu_v_nmf'], state['mv_v_nmf']))
+                del vt_init
             else: # Fallback for non-factored tensors
                 if group['betas'][0] > 0:
-                    state['exp_avg'] = torch.zeros_like(p, dtype=dtype) # m_0
+                    state['exp_avg'] = torch.zeros_like(p, dtype=dtype)
                 if self.use_AdEMAMix:
                     state['exp_avg_slow'] = torch.zeros_like(p, dtype=dtype)
-                state['exp_avg_sq'] = grad.square()   # v_0
+                state['exp_avg_sq'] = grad.square()
 
         beta1, beta2 = group['betas']
 
@@ -265,25 +265,14 @@ class Adopt_adv(torch.optim.Optimizer):
 
             # Reconstruct m_{t-1}
             if beta1 > 0:
-                mt = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
-                if not self.grams_moment:
-                    if state['sign'].dtype != torch.uint8:
-                        state['sign'] = state['sign'].to(torch.uint8)
-                    unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
-                    torch.where(unpacked_sign, mt, -mt, out=mt)
-                    del unpacked_sign
+                mt = _reconstruct_state(state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2)
 
             # Reconstruct AdEMAMix EMA
             if self.use_AdEMAMix:
-                mt_slow = _unnmf((state['mu_m_slow_nmf'], state['mv_m_slow_nmf']))
-                if state['sign_slow'].dtype != torch.uint8:
-                    state['sign_slow'] = state['sign_slow'].to(torch.uint8)
-                unpacked_sign_slow = _unpack_bools(state['sign_slow'], original_m=d2)
-                torch.where(unpacked_sign_slow, mt_slow, -mt_slow, out=mt_slow)
-                del unpacked_sign_slow
+                mt_slow = _reconstruct_state(state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2)
 
-            # Reconstruct v_{t-1} using NNMF
-            vt = _unnmf((state['mu_v_nmf'], state['mv_v_nmf']))
+            # Reconstruct v_{t-1}
+            vt = _reconstruct_state(state['mu_v_nmf'], state['mv_v_nmf'])
 
             # ADOPT Step A: Decorrelate g_t using v_{t-1}
             grad_reshaped = grad.view(d1, d2)
@@ -306,12 +295,9 @@ class Adopt_adv(torch.optim.Optimizer):
                     mt.lerp_(normalized_grad, 1.0 - beta1)
 
                 if self.grams_moment:
-                    update_mt = grad_reshaped.sign().mul_(mt.abs())
+                    update_mt = _grams_update(mt, grad_reshaped)
                 elif self.cautious_mask:
-                    mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
-                    mask.div_(mask.mean().clamp_(min=1e-3))
-                    update_mt = mt.mul(mask)
-                    del mask
+                    update_mt = _cautious_update(mt, grad_reshaped)
                 else:
                     update_mt = mt.clone()
 
@@ -343,19 +329,14 @@ class Adopt_adv(torch.optim.Optimizer):
 
             # Compress and store new factors
             if beta1 > 0:
-                if not self.grams_moment:
-                    state['sign'] = _pack_bools(mt > 0)
-                _nnmf(mt.abs(), out=(state['mu_m_nmf'], state['mv_m_nmf']))
+                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
                 del mt
 
             if self.use_AdEMAMix:
-                state['sign_slow'] = _pack_bools(mt_slow > 0)
-                _nnmf(mt_slow.abs(), out=(state['mu_m_slow_nmf'], state['mv_m_slow_nmf']))
+                state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
                 del mt_slow
 
-            # factorize v_t using NMF compression
-            _nnmf(vt, out=(state['mu_v_nmf'], state['mv_v_nmf']))
-            del vt
+            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
 
         else: # Standard ADOPT logic for non-factored tensors
             vt = state['exp_avg_sq'] # v_{t-1}
@@ -380,15 +361,12 @@ class Adopt_adv(torch.optim.Optimizer):
                 else:
                     mt.lerp_(normalized_grad, 1.0 - beta1)
 
-            if self.grams_moment:
-                update_mt = grad.sign().mul_(mt.abs())
-            elif self.cautious_mask:
-                mask = (mt * grad > 0).to(grad.dtype)
-                mask.div_(mask.mean().clamp_(min=1e-3))
-                update_mt = mt.mul(mask)
-                del mask
-            else:
-                update_mt = mt.clone()
+                if self.grams_moment:
+                    update_mt = _grams_update(mt, grad)
+                elif self.cautious_mask:
+                    update_mt = _cautious_update(mt, grad)
+                else:
+                    update_mt = mt.clone()
 
             if self.use_AdEMAMix:
                 m_slow = state['exp_avg_slow']
@@ -406,10 +384,10 @@ class Adopt_adv(torch.optim.Optimizer):
                 else:
                     update = normalized_grad
 
+            update.mul_(group['lr'])
+
             if self.use_atan2:
-                update.mul_(group['lr'] * 1.2732395447351628)
-            else:
-                update.mul_(group['lr'])
+                update.mul_(1.2732395447351628)
 
             # Update second moment v_t for the next step using raw g_t
             vt.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)

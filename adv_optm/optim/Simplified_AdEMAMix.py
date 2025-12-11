@@ -4,11 +4,9 @@ from typing import Optional, Callable
 import math
 
 from ..util import param_update
-from ..util.Effective_Shape import _get_effective_shape
-from ..util.NNMF import _nnmf, _unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
-from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
 from ..util.Kourkoutas import KourkoutasHelper
+from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 
 # A little helper from the original simplified_AdEMAMix
 def linear_hl_warmup_scheduler(step, beta_end, beta_start=0, warmup=1):
@@ -229,17 +227,15 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
         if state['factored']:
             d1, d2 = state['effective_shape']
+            grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct momentum from previous step's factors
-            mt = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
-            unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
-            torch.where(unpacked_sign, mt, -mt, out=mt)
-            del unpacked_sign
+            mt = _reconstruct_state(state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2)
+
             # Update momentum in full-size
-            grad_reshaped = grad.view(d1, d2)
             mt.mul_(beta1).add_(grad_reshaped, alpha=1.0)
 
-            vt = _unnmf((state['mu_v_nmf'], state['mv_v_nmf']))
+            vt = _reconstruct_state(state['mu_v_nmf'], state['mv_v_nmf'])
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
 
             update = torch.add(mt, grad_reshaped, alpha=alpha_grad)
@@ -255,10 +251,9 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             update = update.view(p.shape).mul_(group['lr'])
 
             # Compress updated moments and store new factors
-            state['sign'] = _pack_bools(mt > 0)
-            _nnmf(mt.abs(), out=(state['mu_m_nmf'], state['mv_m_nmf']))
+            state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
             del mt
-            _nnmf(vt, out=(state['mu_v_nmf'], state['mv_v_nmf']))
+            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
             del vt
 
         else:  # Standard optimizer logic for non-factored tensors
