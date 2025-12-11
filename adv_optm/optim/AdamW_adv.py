@@ -1,6 +1,8 @@
 import torch
 from typing import Optional, Callable
 
+torch._dynamo.config.cache_size_limit = 8000
+
 from ..util import param_update
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.update_util import _grams_update, _cautious_update
@@ -149,7 +151,6 @@ class AdamW_adv(torch.optim.Optimizer):
 
         # Initialize compiled function
         self._compiled_step_parameter = None
-
         if compiled_optimizer:
             self.compile(fullgraph=True)
 
@@ -235,14 +236,21 @@ class AdamW_adv(torch.optim.Optimizer):
             bias_correction2 = 1
         step_size = group['lr'] / bias_correction1
 
+        random_int_tensor = None
+
         if group.get('compiled_optimizer', False):
-            self._compiled_step_parameter(p, grad, state, group, step_size, beta1, beta2, bias_correction2)
+            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
+                # Pre-generate random tensor for stochastic rounding if needed.
+                random_int_tensor = param_update._get_random_int_for_sr(p)
+            step_param_fn = self._compiled_step_parameter
         else:
-            self._step_parameter(p, grad, state, group, step_size, beta1, beta2, bias_correction2)
+            step_param_fn = self._step_parameter
+
+        step_param_fn(p, grad, state, group, step_size, beta1, beta2, bias_correction2, random_int_tensor)
 
         state['step'] += 1
 
-    def _step_parameter(self, p, grad, state, group, step_size, beta1, beta2, bias_correction2):
+    def _step_parameter(self, p, grad, state, group, step_size, beta1, beta2, bias_correction2, random_int_tensor):
         if grad.dtype != torch.float32 and self.factored:
             grad = grad.float()
         if group["orthogonal_gradient"]:
@@ -355,7 +363,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
             update.mul_(step_size)
 
-        param_update.apply_parameter_update(self, p, group, update, step_size)
+        param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)

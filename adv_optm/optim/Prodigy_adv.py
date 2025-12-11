@@ -327,14 +327,19 @@ class Prodigy_adv(torch.optim.Optimizer):
 
         dlr = group['d'] * group['lr']
 
+        random_int_tensor = None
+
         if group.get('compiled_optimizer', False):
-            self._compiled_step_parameter(p, grad, state, group, beta2, dlr)
+            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
+                # Pre-generate random tensor for stochastic rounding if needed.
+                random_int_tensor = param_update._get_random_int_for_sr(p)
+            self._compiled_step_parameter(p, grad, state, group, beta2, dlr, random_int_tensor)
         else:
-            self._step_parameter(p, grad, state, group, beta2, dlr)
+            self._step_parameter(p, grad, state, group, beta2, dlr, random_int_tensor)
 
         state['step'] += 1
 
-    def _step_parameter(self, p, grad, state, group, beta2, dlr):
+    def _step_parameter(self, p, grad, state, group, beta2, dlr, random_int_tensor):
         if grad.dtype != torch.float32 and self.factored:
             grad = grad.float()
         if group["orthogonal_gradient"]:
@@ -488,7 +493,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             if 'p0' in state:
                 del state['p0']
 
-        param_update.apply_parameter_update(self, p, group, update, dlr)
+        param_update.apply_parameter_update(self, p, group, update, dlr, random_int_tensor=random_int_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)

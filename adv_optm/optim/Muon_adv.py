@@ -277,11 +277,11 @@ class Muon_adv(torch.optim.Optimizer):
             state['is_muon'] = False
 
     @torch.no_grad()
-    def _muon_step_parameter(self, p, grad, state, group, is_compiled):
+    def _muon_step_parameter(self, p, grad, state, group, is_compiled, random_int_tensor):
 
 
         @torch.compile(fullgraph=True, disable= not is_compiled)
-        def compiled_muon_step_parameter(state, grad, group, lr):
+        def compiled_muon_step_parameter(state, grad, group, lr, random_int_tensor):
             beta1 = group['beta1']
             nesterov = group['nesterov']
             Simplified_AdEMAMix = group['Simplified_AdEMAMix']
@@ -388,9 +388,9 @@ class Muon_adv(torch.optim.Optimizer):
 
                     update = update.reshape(original_shape).mul_(lr)
 
-            param_update.apply_parameter_update(self, p, group, update, lr)
+            param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 
-        compiled_muon_step_parameter(state, grad, group, group['lr'])
+        compiled_muon_step_parameter(state, grad, group, group['lr'], random_int_tensor)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
@@ -404,10 +404,15 @@ class Muon_adv(torch.optim.Optimizer):
 
         is_compiled = group.get('compiled_optimizer', False)
 
+        random_int_tensor = None
+        if p.dtype == torch.bfloat16 and self.stochastic_rounding and is_compiled:
+            # Pre-generate random tensor for stochastic rounding if needed.
+            random_int_tensor = param_update._get_random_int_for_sr(p)
+
         if not state['is_muon']: # AdamW path
-            Muon_AuxAdam._adam_step_parameter(self, p, grad, state, group, is_compiled)
+            Muon_AuxAdam._adam_step_parameter(self, p, grad, state, group, is_compiled, random_int_tensor)
         else: # Muon path
-            self._muon_step_parameter(p, grad, state, group, is_compiled)
+            self._muon_step_parameter(p, grad, state, group, is_compiled, random_int_tensor)
 
     @torch.no_grad()
     def step(self, closure=None):

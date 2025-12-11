@@ -44,7 +44,7 @@ def _init_auxadam_state(self, p, group):
 
 
 @torch.no_grad()
-def _adam_step_parameter(self, p, grad, state, group, is_compiled):
+def _adam_step_parameter(self, p, grad, state, group, is_compiled, random_int_tensor):
 
     step = state['step']
 
@@ -70,7 +70,7 @@ def _adam_step_parameter(self, p, grad, state, group, is_compiled):
     step_size = group['lr'] / bias_correction1
 
     @torch.compile(fullgraph=True, disable= not is_compiled)
-    def compiled_muon_step_parameter(state, grad, group, step_size, bias_correction2):
+    def compiled_muon_step_parameter(state, grad, group, step_size, bias_correction2, random_int_tensor):
         if grad.dtype != torch.float32 and state.get('factored', False):
             grad = grad.float()
         if group.get("adam_orthogonal_gradient"):
@@ -183,6 +183,6 @@ def _adam_step_parameter(self, p, grad, state, group, is_compiled):
 
             update.mul_(step_size)
 
-        param_update.apply_parameter_update(self, p, group, update, step_size, group["adam_weight_decay"])
+        param_update.apply_parameter_update(self, p, group, update, step_size, group["adam_weight_decay"], random_int_tensor=random_int_tensor)
 
-    compiled_muon_step_parameter(state, grad, group, step_size, bias_correction2)
+    compiled_muon_step_parameter(state, grad, group, step_size, bias_correction2, random_int_tensor)

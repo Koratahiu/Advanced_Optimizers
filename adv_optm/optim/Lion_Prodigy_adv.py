@@ -72,6 +72,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         cautious_mask: bool = False,
         clip_threshold: float = 0.0,
         nnmf_factor: bool = False,
+        compiled_optimizer: bool = False,
         # prodigy parameters
         beta3: float = None,
         d0: float = 1e-6,
@@ -119,6 +120,11 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
             for device in devices:
                 param_update.set_seed(device)
+
+        # Initialize compiled function
+        self._compiled_step_parameter = None
+        if compiled_optimizer:
+            self.compile(fullgraph=True)
 
     @property
     def supports_fused_back_pass(self) -> bool:
@@ -204,6 +210,20 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
 
         dlr = group['d'] * group['lr']
 
+        random_int_tensor = None
+
+        if group.get('compiled_optimizer', False):
+            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
+                # Pre-generate random tensor for stochastic rounding if needed.
+                random_int_tensor = param_update._get_random_int_for_sr(p)
+            step_param_fn = self._compiled_step_parameter
+        else:
+            step_param_fn = self._step_parameter
+
+        step_param_fn(p, grad, state, group, dlr, random_int_tensor)
+
+    def _step_parameter(self, p, grad, state, group, dlr, random_int_tensor):
+
         if state['factored']:
             # Factored Path
             d1, d2 = state['effective_shape']
@@ -281,7 +301,10 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             if 'p0' in state:
                 del state['p0']
 
-        param_update.apply_parameter_update(self, p, group, update, dlr)
+        param_update.apply_parameter_update(self, p, group, update, dlr, random_int_tensor=random_int_tensor)
+
+    def compile(self, *args, **kwargs):
+        self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def step(self, closure: Optional[callable] = None):
