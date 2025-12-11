@@ -1,5 +1,7 @@
 import torch
 
+torch._dynamo.config.cache_size_limit = 8000
+
 from ..util import param_update
 from ..util.Muon_util import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update, approx_mars
 from ..util.factorization_util import _get_effective_shape, _factorize_state, _reconstruct_state
@@ -337,7 +339,7 @@ class Muon_adv(torch.optim.Optimizer):
                 # Factored RMS-aligned scaling
                 rms_adjustment(update, group['rms_rescaling'])
 
-                update.reshape(p.shape).mul_(lr)
+                update = update.reshape(p.shape).mul_(lr)
 
                 state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True)
                 del mt_buf

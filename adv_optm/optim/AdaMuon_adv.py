@@ -332,7 +332,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     low_rank_ortho=group['low_rank_ortho'],
                     ortho_rank=group['ortho_rank']
                 )
-                del update
 
                 if group['normuon_variant']:
                     normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['eps'])
@@ -354,7 +353,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 # Factored RMS-aligned scaling
                 rms_adjustment(update, group['rms_rescaling'])
 
-                update.reshape(p.shape).mul_(lr)
+                update = update.reshape(p.shape).mul_(lr)
 
                 state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True)
                 del mt_buf
