@@ -167,6 +167,16 @@ class Lion_adv(torch.optim.Optimizer):
         step_param_fn(p, grad, state, group, lr, random_int_tensor)
 
     def _step_parameter(self, p, grad, state, group, lr, random_int_tensor):
+        # Lion-K Logic
+        kappa_p = group.get("kappa_p", 1.0)
+        if group.get("auto_kappa_p", False):
+            # Apply p=2.0 (Spherical) for 4D (Conv2D)
+            # Apply p=1.0 (Sign) for everything else (Linear/Embeddings)
+            if p.ndim == 4:
+                kappa_p = 2.0
+            else:
+                kappa_p = 1.0
+
         beta1, beta2 = group["betas"]
 
         if state['factored']:
@@ -178,7 +188,9 @@ class Lion_adv(torch.optim.Optimizer):
             exp_avg = _reconstruct_state(state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2)
 
             # Compute update term c_t
-            update = torch.lerp(grad_reshaped, exp_avg, beta1).sign_()
+            update = torch.lerp(grad_reshaped, exp_avg, beta1)
+
+            update = _get_lion_k_update(update, kappa_p)
 
             if self.cautious_mask:
                 mask = (update * grad_reshaped > 0).to(grad_reshaped.dtype)
@@ -204,7 +216,10 @@ class Lion_adv(torch.optim.Optimizer):
             if exp_avg.dtype != torch.float32 and self.factored:
                 exp_avg = exp_avg.float()
 
-            update = torch.lerp(grad, exp_avg, beta1).sign_()
+            # Compute update term c_t
+            update = torch.lerp(grad, exp_avg, beta1)
+
+            update = _get_lion_k_update(update, kappa_p)
 
             if self.cautious_mask:
                 mask = (update * grad > 0).to(grad.dtype)

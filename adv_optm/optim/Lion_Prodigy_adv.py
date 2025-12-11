@@ -260,7 +260,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             # Compute update term c_t = β1*m_{t-1} + (1-β1)*g_t*d
             update = torch.lerp(grad_scaled_reshaped, exp_avg, self.beta1)
 
-            update = _get_lion_k_update(self, update, kappa_p)
+            update = _get_lion_k_update(update, kappa_p)
 
             if self.cautious_mask:
                 mask = (update * grad_scaled_reshaped > 0).to(grad_scaled_reshaped.dtype)
@@ -290,7 +290,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             # Compute update term c_t
             update = torch.lerp(grad_scaled, exp_avg, self.beta1)
 
-            update = _get_lion_k_update(self, update, kappa_p)
+            update = _get_lion_k_update(update, kappa_p)
 
             if self.cautious_mask:
                 mask = (update * grad > 0).to(grad.dtype)
