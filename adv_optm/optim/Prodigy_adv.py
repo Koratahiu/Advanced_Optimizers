@@ -312,9 +312,10 @@ class Prodigy_adv(torch.optim.Optimizer):
                 state['p0'] = p.flatten()[::slice_p].detach().clone()
             else:
                 state['p0'] = torch.tensor(0, device=device, dtype=p.dtype)
-            if not hasattr(self, 'd_denom'):
-                self.d_denom = torch.tensor(0.0, device=device)
-                self.d_numerator = torch.tensor(group.get('d_numerator', 0.0) * self.beta3, device=device)
+
+        if not hasattr(self, 'd_denom'):
+            self.d_denom = torch.tensor(0.0, device=p.device)
+            self.d_numerator = torch.tensor(group.get('d_numerator', 0.0), device=p.device)
 
         current_step = state['step']
         if group.get('kourkoutas_beta', False):
