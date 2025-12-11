@@ -335,7 +335,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 del update
 
                 if group['normuon_variant']:
-                    normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['normuon_eps'])
+                    normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['eps'])
                 else:
                     # Reconstruct second momentum from previous step's factors
                     vt_buf = _reconstruct_state(state['mu_vbuf_nmf'], state['mv_vbuf_nmf'])
@@ -393,7 +393,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
                 # NorMuon Logic
                 if group['normuon_variant']:
-                    normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['normuon_eps'])
+                    normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['eps'])
                 else:
                     # Original AdaMuon Logic
                     update = update.view(original_shape)
