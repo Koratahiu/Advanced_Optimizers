@@ -1,7 +1,5 @@
 import torch
 
-torch._dynamo.config.cache_size_limit = 8000
-
 from ..util import param_update
 from ..util.Muon_util import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update, approx_mars
 from ..util.factorization_util import _get_effective_shape, _factorize_state, _reconstruct_state
