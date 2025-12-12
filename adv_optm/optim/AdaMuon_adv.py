@@ -1,7 +1,7 @@
 import torch
 
 from ..util import param_update
-from ..util.Muon_util import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update, approx_mars
+from ..util.Muon_util import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update, approx_mars, _auto_projection_for_adamuon
 from ..util.factorization_util import _get_effective_shape, _factorize_state, _reconstruct_state
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
@@ -61,6 +61,15 @@ class AdaMuon_adv(torch.optim.Optimizer):
             stability. (default: 100.0)
         vector_reshape (bool): whether to reshape 1D vectors into 2D
             matrices to apply low-rank compression (default: True).
+        kappa_p (float, optional): The p-value for the update geometry  (domain [1.0, 2.0]).
+            - 1.0: Standard (sign update).
+            - 2.0: Spherical (normalized L2 update).
+            - values between 1.0 and 2.0 interpolate behavior.
+            (default: 1.0).
+        auto_projection (bool): Automatically determines kappa_p based on parameter
+            dimensionality. Sets p=2.0 for 4D tensors (Conv2D) to use Spherical updates,
+            and p=1.0 for others (Linear/Embeddings) to use Sign updates. Overrides explicit
+            kappa_p value. (default: True).
         low_rank_ortho (bool): If True, enables low-rank orthogonalization, which
             projects the update to a lower rank before orthogonalization.
             (default: False)
@@ -114,6 +123,9 @@ class AdaMuon_adv(torch.optim.Optimizer):
         alpha_grad: float = 100.0,
         normuon_variant: bool = False,
         use_muon: bool | None = None,
+        # Update geometry parameters
+        kappa_p: float = 1.0,
+        auto_projection: bool = True,
         # Low-rank Muon
         low_rank_ortho: bool = False,
         ortho_rank: int = 128,
@@ -166,6 +178,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
             "Simplified_AdEMAMix": Simplified_AdEMAMix, "alpha_grad": alpha_grad,
             "normuon_variant": normuon_variant, "orthogonal_gradient": orthogonal_gradient, "compiled_optimizer":compiled_optimizer,
             "use_muon": use_muon,
+            # Lion-K
+            "kappa_p": kappa_p, "auto_projection": auto_projection,
             # Low-rank Ortho
             "low_rank_ortho": low_rank_ortho, "ortho_rank": ortho_rank,
             "compiled_optimizer":compiled_optimizer,
@@ -291,6 +305,17 @@ class AdaMuon_adv(torch.optim.Optimizer):
             Simplified_AdEMAMix = group['Simplified_AdEMAMix']
             alpha_grad = group['alpha_grad']
 
+            # Update geometry
+            kappa_p = group.get("kappa_p", 1.0)
+            if group.get("auto_projection", False):
+                # Auto projection depending on dimension
+                # Apply p=2.0 (Spherical) for 4D (Conv2D)
+                # Apply p=1.0 (Sign) for everything else (Linear/Embeddings)
+                if p.ndim == 4:
+                    kappa_p = 2.0
+                else:
+                    kappa_p = 1.0
+
             if grad.dtype != torch.float32 and state.get('factored', False):
                 grad = grad.float()
             if group.get("orthogonal_gradient"):
@@ -314,11 +339,14 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     mt_buf.mul_(beta1).add_(grad_reshaped)
 
                 if nesterov:
-                    update = torch.sign(grad_reshaped.lerp(mt_buf, beta1))
+                    update = grad_reshaped.lerp(mt_buf, beta1) 
                 elif Simplified_AdEMAMix:
-                    update = torch.sign(mt_buf.add(grad_reshaped, alpha=alpha_grad))
+                    update = mt_buf.add(grad_reshaped, alpha=alpha_grad)
                 else:
-                    update = torch.sign(mt_buf)
+                    update = mt_buf.clone()
+
+                # Apply projection transformation
+                update = _auto_projection_for_adamuon(update, kappa_p)
                 del grad_reshaped
 
                 # Orthogonalization step
@@ -369,11 +397,14 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     mt_buf.mul_(beta1).add_(grad)
 
                 if nesterov:
-                    update = torch.sign(grad.lerp(mt_buf, beta1))
+                    update = grad.lerp(mt_buf, beta1) 
                 elif Simplified_AdEMAMix:
-                    update = torch.sign(mt_buf.add(grad, alpha=alpha_grad))
+                    update = mt_buf.add(grad, alpha=alpha_grad)
                 else:
-                    update = torch.sign(mt_buf)
+                    update = mt_buf.clone()
+                
+                # Apply projection transformation
+                update = _auto_projection_for_adamuon(update, kappa_p)
 
                 # Flatten if necessary (e.g., for Conv layers)
                 update = update.flatten(1)

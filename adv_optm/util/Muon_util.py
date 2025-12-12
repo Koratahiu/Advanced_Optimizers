@@ -276,3 +276,43 @@ def rms_adjustment(update: torch.tensor, rms_rescaling: bool):
         r, c = update.size(-2), update.size(-1)
         scaling_factor = max(1, r / c) ** 0.5
         return update.mul_(scaling_factor)
+
+def _auto_projection_for_adamuon(raw_update: torch.Tensor, kappa_p: float) -> torch.Tensor:
+    """
+    Inspired from the paper "Lion Secretly Solves Constrained Optimization,
+    As Lyapunov Predicts". (https://arxiv.org/abs/2310.05898)
+
+    The core finding of the Lion-K paper is that the optimal "projection"
+    depends on the geometry of the parameters:
+    - Linear Layers / Transformers (p=1.0): These weights often benefit from
+    coordinate-wise uniformity. The "Sign" update (standard Lion/AdaMuon) works
+    best here because it treats every neuron/channel as equally important.
+    - Convolutional Layers / UNet (p=2.0): These weights often possess rotational
+    invariance. A hard "Sign" update distorts the direction of the gradient vector
+    in 4D space (Batch, Channel, H, W). A "Spherical" update (p=2) preserves the
+    direction while normalizing the magnitude.
+
+    We take those findings and apply it to AdaMuon raw update.
+    """
+    eps = 1e-12
+    x = raw_update
+    p = kappa_p
+
+    # Standard (p=1) - sign update
+    if p == 1.0:
+        return x.sign_()
+
+    # Spherical (p=2) - rotation invariant
+    if p == 2.0:
+        # Normalize (L2=1)
+        norm = x.norm(p=2).clamp_(min=eps)
+        x.div_(norm)
+        return x
+
+    # General p case - hybrid optimizer
+    # Calculate the 'Direction' Numerator: sign(x) * |x|^(p-1)
+    num = x.sign() * x.abs().pow_(p - 1)
+
+    # Denominator: ||x||_p^(p-1)
+    den = x.norm(p=p).pow_(p - 1).clamp_(min=eps)
+    return num.div_(den)
