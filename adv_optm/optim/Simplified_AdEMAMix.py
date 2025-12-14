@@ -82,15 +82,20 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         lr: float = 1e-5,
         betas: tuple[float, float] = (0.99, 0.999),
         eps: float = 1e-8,
+        # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
         cautious_wd: bool = False,
+        # Simplified_AdEMAMix params
         alpha_grad: float = 100.0,
         beta1_warmup: int | None = None,
         min_beta1: float | None = 0.9,
+        # Adam's Bias Correction
         use_bias_correction: bool = True,
-        vector_reshape: bool = False,
+        # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
+        # OrthoGrad
         orthogonal_gradient: bool = False,
+        # K-b (adaptive beta2)
         kourkoutas_beta: bool = False,
         beta2_min: float = 0.9,
         ema_alpha: float = 0.95,
@@ -98,7 +103,11 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         k_warmup_steps: int = 0,
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
+        # SMMF factorization
         nnmf_factor: bool = False,
+        vector_reshape: bool = False,
+        # torch.compile
+        compiled_optimizer: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -137,6 +146,11 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             for device in devices:
                 param_update.set_seed(device)
 
+        # Initialize compiled function
+        self._compiled_step_parameter = None
+        if compiled_optimizer:
+            self.compile(fullgraph=True)
+
     @property
     def supports_fused_back_pass(self):
         return True
@@ -155,10 +169,6 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             return
 
         grad = p.grad
-        if grad.dtype != torch.float32 and self.factored:
-            grad = grad.float()
-        if group["orthogonal_gradient"]:
-            grad = _orthogonalize_gradient(p, grad)
         state = self.state[p]
 
         # State Initialization
@@ -210,7 +220,6 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             beta2 = self.kourkoutas_helper.get_beta2(p, group)
 
         beta1_warmup = group["beta1_warmup"]
-        alpha_grad = group["alpha_grad"]
 
         if beta1_warmup is not None:
             step = state['step'] + 1
@@ -225,6 +234,33 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             else:
                 state['den_sum'] = beta2 * state['den_sum'] + (1.0 - beta2)
 
+        sqrt_den_eps = math.sqrt(state['den_sum']) * group['eps']
+        sqrt_den_num = math.sqrt(state['den_sum'] / state['num_sum'])
+
+        lr = group["lr"]
+
+        random_int_tensor = None
+
+        if group.get('compiled_optimizer', False):
+            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
+                # Pre-generate random tensor for stochastic rounding if needed.
+                random_int_tensor = param_update._get_random_int_for_sr(p)
+            step_param_fn = self._compiled_step_parameter
+        else:
+            step_param_fn = self._step_parameter
+
+        step_param_fn(p, grad, state, group, lr, beta1, beta2, sqrt_den_eps, sqrt_den_num, random_int_tensor)
+
+        state['step'] += 1
+
+    def _step_parameter(self, p, grad, state, group, lr, beta1, beta2, sqrt_den_eps, sqrt_den_num, random_int_tensor):
+        if grad.dtype != torch.float32 and self.factored:
+            grad = grad.float()
+        if group["orthogonal_gradient"]:
+            grad = _orthogonalize_gradient(p, grad)
+
+        alpha_grad = group["alpha_grad"]
+
         if state['factored']:
             d1, d2 = state['effective_shape']
             grad_reshaped = grad.view(d1, d2)
@@ -233,22 +269,23 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             mt = _reconstruct_state(state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2)
 
             # Update momentum in full-size
-            mt.mul_(beta1).add_(grad_reshaped, alpha=1.0)
+            mt.mul_(beta1).add_(grad_reshaped)
 
             vt = _reconstruct_state(state['mu_v_nmf'], state['mv_v_nmf'])
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
 
-            update = torch.add(mt, grad_reshaped, alpha=alpha_grad)
-            del grad_reshaped
+            # update = mt + (grad_reshaped * alpha_grad)
+            # We do this in-place to prevent reallocation
+            update = grad_reshaped.mul_(alpha_grad).add_(mt)
 
-            denom = vt.sqrt().add_(group['eps'] * math.sqrt(state['den_sum']))
+            denom = vt.sqrt().add_(sqrt_den_eps)
             update.div_(denom)
             del denom
 
             if group['use_bias_correction']:
-                update.mul_(math.sqrt(state['den_sum']) / state['num_sum'])
+                update.mul_(sqrt_den_num)
 
-            update = update.view(p.shape).mul_(group['lr'])
+            update = update.view(p.shape).mul_(lr)
 
             # Compress updated moments and store new factors
             state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
@@ -260,24 +297,25 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             exp_avg_sq = state['exp_avg_sq']
 
             exp_avg = state['exp_avg']
-            exp_avg.mul_(beta1).add_(grad, alpha=1.0)
+            exp_avg.mul_(beta1).add_(grad)
 
             update = torch.add(exp_avg, grad, alpha=alpha_grad)
 
             exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
-            denom = exp_avg_sq.sqrt().add_(group['eps'] * math.sqrt(state['den_sum']))
+            denom = exp_avg_sq.sqrt().add_(sqrt_den_eps)
             update.div_(denom)
             del denom
 
             if group['use_bias_correction']:
-                update.mul_(math.sqrt(state['den_sum']) / state['num_sum'])
+                update.mul_(sqrt_den_num)
 
-            update.mul_(group['lr'])
+            update.mul_(lr)
 
-        param_update.apply_parameter_update(self, p, group, update, group["lr"])
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 
-        state['step'] += 1
+    def compile(self, *args, **kwargs):
+        self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def step(self, closure=None):

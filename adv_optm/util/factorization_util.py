@@ -24,12 +24,12 @@ def _factorize_state(full_state: torch.tensor, signed: bool):
     """
     Compress full state to two rank-1 states and optionally 1-bit sign
     """
-    mu_factor, mv_factor = _nnmf(full_state.abs())
-
     if signed:
         sign = _pack_bools(full_state > 0)
+        mu_factor, mv_factor = _nnmf(full_state.abs_())
         return mu_factor, mv_factor, sign
 
+    mu_factor, mv_factor = _nnmf(full_state.abs_())
     return mu_factor, mv_factor
 
 # ------------------------------------------

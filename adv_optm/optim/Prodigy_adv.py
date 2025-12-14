@@ -117,20 +117,29 @@ class Prodigy_adv(torch.optim.Optimizer):
         lr: float = 1,
         betas: tuple[float, float] = (0.9, 0.999),
         eps: float = 1e-8,
+        # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
         cautious_wd: bool = False,
-        vector_reshape: bool = False,
+        # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
+        # Adam_atan2 (scale invariant)
         use_atan2: bool = False,
+        # Cautious and GRAMS
         cautious_mask: bool = False,
         grams_moment: bool = False,
+        # OrthoGrad
         orthogonal_gradient: bool = False,
+        # AdEMAMix (long-term momentum)
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
+        # One-EMA AdEMAMix
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
+        # SMMF factorization
         nnmf_factor: bool = False,
+        vector_reshape: bool = False,
+        # torch.compile
         compiled_optimizer: bool = False,
         # prodigy parameters
         beta3: float = None,
@@ -142,7 +151,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         slice_p: int = 11,
         prodigy_steps: int = 0,
         d_limiter: bool = False,
-        # K-b parameters
+        # K-b (adaptive beta2)
         kourkoutas_beta: bool = False,
         beta2_min: float = 0.9,
         ema_alpha: float = 0.95,

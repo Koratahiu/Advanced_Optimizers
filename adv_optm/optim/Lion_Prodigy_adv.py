@@ -73,16 +73,22 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         params,
         lr: float = 1,
         betas: Tuple[float, float] = (0.9, 0.99),
+        # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
         cautious_wd: bool = False,
-        vector_reshape: bool = False,
+        # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
+        # OrthoGrad
         orthogonal_gradient: bool = False,
         cautious_mask: bool = False,
         clip_threshold: float = 0.0,
+        # Lion-k
         kappa_p: float = 1.0,
         auto_kappa_p: bool = False,
+        # SMMF factorization
         nnmf_factor: bool = False,
+        vector_reshape: bool = False,
+        # torch.compile
         compiled_optimizer: bool = False,
         # prodigy parameters
         beta3: float = None,

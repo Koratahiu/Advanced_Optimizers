@@ -83,18 +83,25 @@ class AdamW_adv(torch.optim.Optimizer):
         lr: float = 1e-3,
         betas: tuple[float, float] = (0.9, 0.999),
         eps: float = 1e-8,
+        # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
         cautious_wd: bool = False,
+        # Adam's Bias Correction
         use_bias_correction: bool = True,
-        vector_reshape: bool = False,
+        # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
+        # Adam_atan2 (scale invariant)
         use_atan2: bool = False,
+        # Cautious and GRAMS
         cautious_mask: bool = False,
         grams_moment: bool = False,
+        # OrthoGrad
         orthogonal_gradient: bool = False,
+        # AdEMAMix (long-term momentum)
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
+        # K-b (adaptive beta2)
         kourkoutas_beta: bool = False,
         beta2_min: float = 0.9,
         ema_alpha: float = 0.95,
@@ -102,7 +109,10 @@ class AdamW_adv(torch.optim.Optimizer):
         k_warmup_steps: int = 0,
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
+        # SMMF factorization
         nnmf_factor: bool = False,
+        vector_reshape: bool = False,
+        # torch.compile
         compiled_optimizer: bool = False,
     ):
         if not (lr >= 0.0):
@@ -206,10 +216,13 @@ class AdamW_adv(torch.optim.Optimizer):
                 state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                 state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
             else:  # Fallback to standard AdamW for non-factored tensors
+                # First moment
                 if group['betas'][0] > 0:
                     state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
+                # AdEMAMix slow moment
                 if self.use_AdEMAMix:
                     state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
+                # Second moment (v)
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
         beta1, beta2 = group['betas']

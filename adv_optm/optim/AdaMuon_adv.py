@@ -108,20 +108,30 @@ class AdaMuon_adv(torch.optim.Optimizer):
         params,
         lr: float = 1e-3,
         betas: tuple[float, float] = (0.95, 0.95),
+        eps: float = 1e-8,
+        # Decoupled/cautious weight decay
         weight_decay: float = 0,
         cautious_wd: bool = False,
-        eps: float = 1e-8,
+        # Nesterov momentum
+        nesterov: bool = False,
+        # RMS Rescaling
         rms_rescaling: bool = True,
+        # Newton Schulz
         ns_steps: int = 5,
         ns_eps: float = 1e-7,
         ns_coeffs: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
+        # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
+        # OrthoGrad
         orthogonal_gradient: bool = False,
+        # Adam_atan2 (scale invariant)
         use_atan2: bool = False,
-        nesterov: bool = False,
+        # One-EMA AdEMAMix
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
+        # NorMuon
         normuon_variant: bool = False,
+        # Boolean to spilt param
         use_muon: bool | None = None,
         # Update geometry parameters
         kappa_p: float = 1.0,
@@ -129,7 +139,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         # Low-rank Muon
         low_rank_ortho: bool = False,
         ortho_rank: int = 128,
-        # Factored
+        # SMMF factorization
         vector_reshape: bool = False,
         nnmf_factor: bool = False,
         # CANS
@@ -138,7 +148,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         # MARS-M
         approx_mars: bool = False,
         mars_gamma: float = 0.025,
-        # Compiled
+        # torch.compile
         compiled_optimizer: bool = False,
         # --- AdamW_adv specific parameters ---
         adam_betas: tuple[float, float] = (0.9, 0.99),

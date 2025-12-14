@@ -4,7 +4,7 @@ import torch
 
 def _get_lion_k_update(raw_update: torch.Tensor, kappa_p: float, auto_scale: bool = True) -> torch.Tensor:
     """
-    Calculates the update of lionj-k proposed in the paper "Lion Secretly Solves Constrained
+    Calculates the update of lion-k proposed in the paper "Lion Secretly Solves Constrained
     Optimization, As Lyapunov Predicts". (https://arxiv.org/abs/2310.05898)
 
     Auto-Scale Logic:

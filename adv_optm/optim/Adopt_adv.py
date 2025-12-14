@@ -100,20 +100,28 @@ class Adopt_adv(torch.optim.Optimizer):
         lr: float = 1e-4,
         betas: tuple[float, float] = (0.9, 0.9999),
         eps: float = 1e-6,
+        # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
         cautious_wd: bool = False,
+        # ADOPT clipping
         clip_lambda: Optional[Callable[[int], float]] = lambda step: step**0.25,
-        vector_reshape: bool = False,
-        stochastic_rounding: bool = True,
+        # Adam_atan2 (scale invariant)
         use_atan2: bool = False,
+        # Stochastic Rounding for BF16
+        stochastic_rounding: bool = True,
+        # Cautious and GRAMS
         cautious_mask: bool = False,
         grams_moment: bool = False,
+        # OrthoGrad
         orthogonal_gradient: bool = False,
+        # AdEMAMix (long-term momentum)
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
+        # One-EMA AdEMAMix
         Simplified_AdEMAMix: bool = False,
         alpha_grad: float = 100.0,
+        # K-b (adaptive beta2)
         kourkoutas_beta: bool = False,
         beta2_min: float = 0.9,
         ema_alpha: float = 0.95,
@@ -121,7 +129,11 @@ class Adopt_adv(torch.optim.Optimizer):
         k_warmup_steps: int = 0,
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
+        # SMMF factorization
         nnmf_factor: bool = False,
+        vector_reshape: bool = False,
+        # torch.compile
+        compiled_optimizer: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -151,6 +163,7 @@ class Adopt_adv(torch.optim.Optimizer):
             "alpha_grad": alpha_grad,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
+            "compiled_optimizer": compiled_optimizer,
         }
         self.clip_lambda = clip_lambda
         self.stochastic_rounding = stochastic_rounding
@@ -175,6 +188,10 @@ class Adopt_adv(torch.optim.Optimizer):
             for device in devices:
                 param_update.set_seed(device)
 
+        self._compiled_step_parameter = None
+        if compiled_optimizer:
+            self.compile(fullgraph=True)
+
     @property
     def supports_fused_back_pass(self): return True
     @property
@@ -188,10 +205,6 @@ class Adopt_adv(torch.optim.Optimizer):
             return
 
         grad = p.grad
-        if self.factored and grad.dtype != torch.float32:
-            grad = grad.float()
-        if self.orthogonal_gradient:
-            grad = _orthogonalize_gradient(p, grad)
         state = self.state[p]
 
         # State Initialization
@@ -244,8 +257,6 @@ class Adopt_adv(torch.optim.Optimizer):
         if group.get('kourkoutas_beta', False):
             # Call prepare_step() once at the beginning of the step for all params
             self.kourkoutas_helper.maybe_prepare_step(current_step)
-            # Accumulate current grad's norm for the *next* step
-            self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
             # Get the dynamic beta2 calculated in prepare_step()
             beta2 = self.kourkoutas_helper.get_beta2(p, group)
 
@@ -254,11 +265,37 @@ class Adopt_adv(torch.optim.Optimizer):
             state['step'] += 1
             return
 
+        random_int_tensor = None
+
+        if group.get('compiled_optimizer', False):
+            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
+                # Pre-generate random tensor for stochastic rounding if needed.
+                random_int_tensor = param_update._get_random_int_for_sr(p)
+            step_param_fn = self._compiled_step_parameter
+        else:
+            step_param_fn = self._step_parameter
+
+        lr = group['lr']
+
+        step_param_fn(p, grad, state, group, lr, beta1, beta2, random_int_tensor)
+
+        state['step'] += 1
+
+    def _step_parameter(self, p, grad, state, group, lr, beta1, beta2, random_int_tensor):
+        if self.factored and grad.dtype != torch.float32:
+            grad = grad.float()
+        if self.orthogonal_gradient:
+            grad = _orthogonalize_gradient(p, grad)
+
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
             alpha = group['alpha']
         if self.Simplified_AdEMAMix:
             alpha_grad = group["alpha_grad"]
+
+        if group.get('kourkoutas_beta', False):
+            # Accumulate current grad's norm for the *next* step
+            self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
 
         if state['factored']:
             d1, d2 = state['effective_shape']
@@ -319,9 +356,9 @@ class Adopt_adv(torch.optim.Optimizer):
             update = update.view(p.shape)
 
             if self.use_atan2:
-                update.mul_(group['lr'] * 1.2732395447351628)
+                update.mul_(lr * 1.2732395447351628)
             else:
-                update.mul_(group['lr'])
+                update.mul_(lr)
 
             # Update second moment v_t for the *next* step using raw g_t
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
@@ -337,6 +374,7 @@ class Adopt_adv(torch.optim.Optimizer):
                 del mt_slow
 
             state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
+            del vt
 
         else: # Standard ADOPT logic for non-factored tensors
             vt = state['exp_avg_sq'] # v_{t-1}
@@ -384,7 +422,7 @@ class Adopt_adv(torch.optim.Optimizer):
                 else:
                     update = normalized_grad
 
-            update.mul_(group['lr'])
+            update.mul_(lr)
 
             if self.use_atan2:
                 update.mul_(1.2732395447351628)
@@ -393,9 +431,10 @@ class Adopt_adv(torch.optim.Optimizer):
             vt.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
 
         # Parameter Update
-        param_update.apply_parameter_update(self, p, group, update, group['lr'])
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 
-        state['step'] += 1
+    def compile(self, *args, **kwargs):
+        self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def step(self, closure=None):
