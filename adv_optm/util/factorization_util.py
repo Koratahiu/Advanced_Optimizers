@@ -20,7 +20,7 @@ def _reconstruct_state(mu_factor: torch.Tensor, mv_factor: torch.Tensor, sign: t
     return full_state
 
 @torch.no_grad()
-def _factorize_state(full_state: torch.tensor, signed: bool):
+def _factorize_state(full_state: torch.Tensor, signed: bool):
     """
     Compress full state to two rank-1 states and optionally 1-bit sign
     """

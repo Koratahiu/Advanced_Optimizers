@@ -237,7 +237,7 @@ def _is_suitable_for_muon(
 
     return True
 
-def approx_mars(current_grad: torch.tensor, last_grad: torch.tensor, mars_gamma, beta1):
+def approx_mars(current_grad: torch.Tensor, last_grad: torch.Tensor, mars_gamma, beta1):
     """
     The approximated version of MARS-M, proposed in the paper: "MARS-M: When Variance Reduction
     Meets Matrices" (https://arxiv.org/abs/2510.21800). A variance reduction technique that
@@ -253,7 +253,7 @@ def approx_mars(current_grad: torch.tensor, last_grad: torch.tensor, mars_gamma,
     # Use correction as the gradient for subsequent momentum updates
     return correction
 
-def normuon_update(update: torch.tensor, v_t: torch.tensor, beta2, eps):
+def normuon_update(update: torch.Tensor, v_t: torch.Tensor, beta2, eps):
     """
     The scalar state update of NorMuon variant, proposed in the paper: "NorMuon: Making Muon more
     efficient and scalable" (https://arxiv.org/abs/2510.05491). Implement a row-wise normalization
@@ -265,7 +265,7 @@ def normuon_update(update: torch.tensor, v_t: torch.tensor, beta2, eps):
     # Normalize update
     return update.div_(v_t.sqrt().unsqueeze(1).add_(eps))
 
-def rms_adjustment(update: torch.tensor, rms_rescaling: bool):
+def rms_adjustment(update: torch.Tensor, rms_rescaling: bool):
     if rms_rescaling: # RMS-aligned rescaling
         # This is slower due to norm calculations but it worked the best for t2i models.
         rms_target = 0.2 # default (Adam) value for RMS
