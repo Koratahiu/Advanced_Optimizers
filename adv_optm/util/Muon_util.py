@@ -256,7 +256,7 @@ def approx_mars(current_grad: torch.Tensor, last_grad: torch.Tensor, mars_gamma,
 def normuon_update(update: torch.Tensor, v_t: torch.Tensor, beta2, eps):
     """
     The scalar state update of NorMuon variant, proposed in the paper: "NorMuon: Making Muon more
-    efficient and scalable" (https://arxiv.org/abs/2510.05491). Implement a row-wise normalization
+    efficient and scalable" (https://arxiv.org/abs/2510.05491). Implement a row-wise normalization via
     2nd moment estimation to balance parameter utilization and retain Muon conditioning.
     """
     # Update 2nd moment estimate

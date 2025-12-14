@@ -353,11 +353,13 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 elif Simplified_AdEMAMix:
                     update = mt_buf.add(grad_reshaped, alpha=alpha_grad)
                 else:
-                    update = mt_buf.clone()
+                    update = mt_buf
 
-                # Apply projection transformation
+                state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True)
+                del mt_buf, grad_reshaped
+
+                # Apply update projection
                 update = _auto_projection_for_adamuon(update, kappa_p)
-                del grad_reshaped
 
                 # Orthogonalization step
                 update = newton_schulz(
@@ -388,13 +390,10 @@ class AdaMuon_adv(torch.optim.Optimizer):
                         update.div_(denom)
                     del denom
 
-                # Factored RMS-aligned scaling
+                # RMS-aligned scaling
                 rms_adjustment(update, group['rms_rescaling'])
 
                 update = update.reshape(p.shape).mul_(lr)
-
-                state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True)
-                del mt_buf
 
             else: # Standard AdaMuon logic for non-factored tensors
                 original_shape = p.shape
@@ -413,7 +412,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 else:
                     update = mt_buf.clone()
                 
-                # Apply projection transformation
+                # Apply update projection
                 update = _auto_projection_for_adamuon(update, kappa_p)
 
                 # Flatten if necessary (e.g., for Conv layers)

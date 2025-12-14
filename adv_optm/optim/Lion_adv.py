@@ -197,6 +197,15 @@ class Lion_adv(torch.optim.Optimizer):
             # Compute update term c_t
             update = torch.lerp(grad_reshaped, exp_avg, beta1)
 
+            # Standard Lion momentum update
+            # m_t = beta2 * m_{t-1} + (1-beta2) * g_t
+            exp_avg.lerp_(grad_reshaped, 1 - beta2)
+            del grad_reshaped
+
+            # Compress new momentum m_t and store factors
+            state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True)
+            del exp_avg
+
             update = _get_lion_k_update(update, kappa_p)
 
             if self.cautious_mask:
@@ -206,14 +215,6 @@ class Lion_adv(torch.optim.Optimizer):
                 del mask
 
             update = update.view(p.shape).mul_(lr)
-
-            # Standard Lion momentum update
-            # m_t = beta2 * m_{t-1} + (1-beta2) * g_t
-            exp_avg.lerp_(grad_reshaped, 1 - beta2)
-            del grad_reshaped
-
-            # Compress new momentum m_t and store factors
-            state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True)
 
         else:
             # Fallback to standard Lion logic

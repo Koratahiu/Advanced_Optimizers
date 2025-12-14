@@ -271,27 +271,31 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             # Update momentum in full-size
             mt.mul_(beta1).add_(grad_reshaped)
 
-            vt = _reconstruct_state(state['mu_v_nmf'], state['mv_v_nmf'])
-            vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
-
             # update = mt + (grad_reshaped * alpha_grad)
             # We do this in-place to prevent reallocation
             update = grad_reshaped.mul_(alpha_grad).add_(mt)
 
+            # Factorize
+            state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
+            del mt
+
+            vt = _reconstruct_state(state['mu_v_nmf'], state['mv_v_nmf'])
+            vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
+            del grad_reshaped
+
             denom = vt.sqrt().add_(sqrt_den_eps)
             update.div_(denom)
             del denom
+
+            # Factorize
+            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
+            del vt
 
             if group['use_bias_correction']:
                 update.mul_(sqrt_den_num)
 
             update = update.view(p.shape).mul_(lr)
 
-            # Compress updated moments and store new factors
-            state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
-            del mt
-            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
-            del vt
 
         else:  # Standard optimizer logic for non-factored tensors
             exp_avg_sq = state['exp_avg_sq']

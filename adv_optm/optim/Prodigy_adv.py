@@ -385,7 +385,11 @@ class Prodigy_adv(torch.optim.Optimizer):
                 elif self.cautious_mask:
                     update_mt = _cautious_update(mt, grad_scaled_reshaped)
                 else:
-                    update_mt = mt.clone()
+                    update_mt = mt
+
+                # Factorize
+                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
+                del mt
 
             vt = _reconstruct_state(state['mu_v_nmf'], state['mv_v_nmf'])
             vt.mul_(beta2).addcmul_(grad_scaled_reshaped, grad_scaled_reshaped, value=1.0 - beta2)
@@ -398,6 +402,9 @@ class Prodigy_adv(torch.optim.Optimizer):
                     update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
                     update = grad_scaled_reshaped.add_(mt_slow, alpha=alpha)
+                # Factorize
+                state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
+                del mt_slow
             elif self.Simplified_AdEMAMix:
                 update = update_mt.add_(grad_scaled_reshaped, alpha=alpha_grad)
             else:
@@ -416,18 +423,11 @@ class Prodigy_adv(torch.optim.Optimizer):
                 update.div_(denom.add_(group['d'] * group['eps']))
             del denom
 
-            update = update.view(p.shape).mul_(dlr)
-
-            # Compress updated moments and store new factors
-            if self.beta1 > 0:
-                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
-                del mt
-            if self.use_AdEMAMix:
-                state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
-                del mt_slow
+            # Factorize
             state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
             del vt
 
+            update = update.view(p.shape).mul_(dlr)
 
         else:  # Standard AdamW logic for non-factored tensors
             # Calculate scaled gradient for Prodigy step (g_t * d)

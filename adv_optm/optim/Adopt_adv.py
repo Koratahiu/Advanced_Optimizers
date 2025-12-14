@@ -336,7 +336,10 @@ class Adopt_adv(torch.optim.Optimizer):
                 elif self.cautious_mask:
                     update_mt = _cautious_update(mt, grad_reshaped)
                 else:
-                    update_mt = mt.clone()
+                    update_mt = mt
+                # Factorize
+                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
+                del mt
 
             if self.use_AdEMAMix:
                 mt_slow.lerp_(normalized_grad, 1.0 - beta3_ema)
@@ -344,6 +347,9 @@ class Adopt_adv(torch.optim.Optimizer):
                     update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
                     update = normalized_grad.add_(mt_slow, alpha=alpha)
+                # Factorize
+                state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
+                del mt_slow
             elif self.Simplified_AdEMAMix:
                 update = update_mt.add_(normalized_grad, alpha=alpha_grad)
             else:
@@ -364,15 +370,7 @@ class Adopt_adv(torch.optim.Optimizer):
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
             del grad_reshaped
 
-            # Compress and store new factors
-            if beta1 > 0:
-                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
-                del mt
-
-            if self.use_AdEMAMix:
-                state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
-                del mt_slow
-
+            # Factorize
             state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
             del vt
 

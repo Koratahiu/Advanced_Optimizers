@@ -325,8 +325,11 @@ class Muon_adv(torch.optim.Optimizer):
                     update = torch.add(mt_buf, grad_reshaped, alpha=alpha_grad)
                 else:
                     # Standard momentum
-                    update = mt_buf.clone()
-                del grad_reshaped
+                    update = mt_buf
+
+                # Factorize
+                state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True)
+                del mt_buf, grad_reshaped
 
                 # Orthogonalization step
                 update = newton_schulz(
@@ -347,9 +350,6 @@ class Muon_adv(torch.optim.Optimizer):
                 rms_adjustment(update, group['rms_rescaling'])
 
                 update = update.reshape(p.shape).mul_(lr)
-
-                state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True)
-                del mt_buf
 
             else: # Standard Muon logic for non-factored tensors
 
