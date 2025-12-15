@@ -362,7 +362,8 @@ class Adopt_adv(torch.optim.Optimizer):
             update = update.view(p.shape)
 
             if self.use_atan2:
-                update.mul_(lr * 1.2732395447351628)
+                update.mul_(lr)
+                update.mul_(1.2732395447351628)
             else:
                 update.mul_(lr)
 
