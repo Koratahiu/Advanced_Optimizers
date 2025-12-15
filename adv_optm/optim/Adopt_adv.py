@@ -361,11 +361,10 @@ class Adopt_adv(torch.optim.Optimizer):
 
             update = update.view(p.shape)
 
+            update.mul_(lr)
+
             if self.use_atan2:
-                update.mul_(lr)
                 update.mul_(1.2732395447351628)
-            else:
-                update.mul_(lr)
 
             # Update second moment v_t for the *next* step using raw g_t
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
