@@ -22,7 +22,7 @@ def _reconstruct_state(mu_factor: torch.Tensor, mv_factor: torch.Tensor, sign: t
 @torch.no_grad()
 def _factorize_state(full_state: torch.Tensor, signed: bool):
     """
-    Compress full state to two rank-1 states and optionally 1-bit sign
+    Compress a full state to its two rank-1 factors and optionally 1-bit sign
     """
     if signed:
         sign = _pack_bools(full_state > 0)
@@ -67,10 +67,10 @@ def _nnmf(matrix: torch.Tensor):
     EPSILON = 1e-12
     if M < N:
         scale = mu_factor.sum()
-        mu_factor.div_(scale.clamp_(min=EPSILON))
+        mu_factor.div_(scale.clamp_min(EPSILON))
     else:
         scale = mv_factor.sum()
-        mv_factor.div_(scale.clamp_(min=EPSILON))
+        mv_factor.div_(scale.clamp_min(EPSILON))
 
     return mu_factor, mv_factor
 

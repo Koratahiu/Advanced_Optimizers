@@ -1,5 +1,7 @@
 import torch
 
+import math
+
 from ..util import param_update
 from ..util.Muon_util import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update, approx_mars, _auto_projection_for_adamuon
 from ..util.factorization_util import _get_effective_shape, _factorize_state, _reconstruct_state
@@ -382,9 +384,9 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
                     # Apply second momentum update (adaptive scaling)
                     if group['use_atan2']:
-                        a = 1.2732395
+                        A = 4 / math.pi
                         denom = vt_buf.sqrt()
-                        update.atan2_(denom).mul_(a)
+                        update.atan2_(denom).mul_(A)
                     else:
                         denom = vt_buf.sqrt().add_(group['eps'])
                         update.div_(denom)
@@ -440,9 +442,9 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
                     # Apply second momentum update (adaptive scaling)
                     if group['use_atan2']:
-                        a = 1.2732395
+                        A = 4 / math.pi
                         denom = vt_buf.sqrt()
-                        update.atan2_(denom).mul_(a)
+                        update.atan2_(denom).mul_(A)
                     else:
                         denom = vt_buf.sqrt().add_(group['eps'])
                         update.div_(denom)

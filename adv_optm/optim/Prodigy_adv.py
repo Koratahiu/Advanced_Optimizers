@@ -415,9 +415,9 @@ class Prodigy_adv(torch.optim.Optimizer):
                     update = grad_scaled_reshaped
 
             if group['use_atan2']:
-                a = 1.2732395
+                A = 4 / math.pi
                 denom = vt.sqrt()
-                update.atan2_(denom).mul_(a)
+                update.atan2_(denom).mul_(A)
             else:
                 denom = vt.sqrt()
                 update.div_(denom.add_(group['d'] * group['eps']))
@@ -468,9 +468,9 @@ class Prodigy_adv(torch.optim.Optimizer):
                     update = grad_scaled
 
             if group['use_atan2']:
-                a = 1.2732395
+                A = 4 / math.pi
                 denom = exp_avg_sq.sqrt()
-                update.atan2_(denom).mul_(a)
+                update.atan2_(denom).mul_(A)
             else:
                 denom = exp_avg_sq.sqrt()
                 update.div_(denom.add_(group['d'] * group['eps']))

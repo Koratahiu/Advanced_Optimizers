@@ -1,6 +1,8 @@
 import torch
 from typing import Callable, Optional
 
+import math
+
 from ..util import param_update
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state, _nnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -364,7 +366,8 @@ class Adopt_adv(torch.optim.Optimizer):
             update.mul_(lr)
 
             if self.use_atan2:
-                update.mul_(1.2732395447351628)
+                A = 4 / math.pi
+                update.mul_(A)
 
             # Update second moment v_t for the *next* step using raw g_t
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
@@ -423,7 +426,8 @@ class Adopt_adv(torch.optim.Optimizer):
             update.mul_(lr)
 
             if self.use_atan2:
-                update.mul_(1.2732395447351628)
+                A = 4 / math.pi
+                update.mul_(A)
 
             # Update second moment v_t for the next step using raw g_t
             vt.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)

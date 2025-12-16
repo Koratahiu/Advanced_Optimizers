@@ -1,4 +1,7 @@
 import torch
+
+import math
+
 from typing import Optional, Callable
 
 from ..util import param_update
@@ -320,10 +323,10 @@ class AdamW_adv(torch.optim.Optimizer):
                     update = grad_reshaped
 
             if group['use_atan2']:
-                a = 1.2732395
+                A = 4 / math.pi
                 denom = vt.sqrt()
                 denom.div_(bias_correction2)
-                update.atan2_(denom).mul_(a)
+                update.atan2_(denom).mul_(A)
             else:
                 denom = vt.sqrt()
                 denom.div_(bias_correction2).add_(group['eps'])
@@ -363,10 +366,10 @@ class AdamW_adv(torch.optim.Optimizer):
             exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
 
             if group['use_atan2']:
-                a = 1.2732395
+                A = 4 / math.pi
                 denom = exp_avg_sq.sqrt()
                 denom.div_(bias_correction2)
-                update.atan2_(denom).mul_(a)
+                update.atan2_(denom).mul_(A)
             else:
                 denom = exp_avg_sq.sqrt()
                 denom.div_(bias_correction2).add_(group['eps'])
