@@ -27,9 +27,8 @@ def _init_auxadam_state(self, p, group):
         if group['adam_betas'][0] > 0:
             state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
             state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
-            if not group.get('adam_grams_moment'):
-                packed_d2 = (d2 + 7) // 8
-                state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+            packed_d2 = (d2 + 7) // 8
+            state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
         if group.get('adam_use_AdEMAMix'):
             state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
             state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
