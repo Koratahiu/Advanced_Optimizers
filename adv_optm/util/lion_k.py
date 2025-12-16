@@ -32,7 +32,7 @@ def _get_lion_k_update(raw_update: torch.Tensor, kappa_p: float, auto_scale: boo
         # Scale (L2=√N) if needed
         if auto_scale:
             x.mul_(math.sqrt(N))
-        
+
         return x
 
     # General p case - hybrid optimizer

@@ -54,7 +54,7 @@ def _newton_schulz_iteration(
     # We also reuse C for CNS updates to be efficient
     C = torch.empty_like(X)
     if not cns:
-        B = torch.empty_like(A) 
+        B = torch.empty_like(A)
 
     if cns:
         # Chebyshev-accelerated Newton-Schulz (CANS) from
@@ -105,7 +105,7 @@ def _newton_schulz_iteration(
             # A = X @ X.mT
             mm_fn(A, X, X.mT, beta=0.0, alpha=1.0, out=A)
             # B = b * A + c * (A @ A)
-            mm_fn(A, A, A, beta=b, alpha=c, out=B) 
+            mm_fn(A, A, A, beta=b, alpha=c, out=B)
             # X = a * X + B @ X
             mm_fn(X, B, X, beta=a, alpha=1.0, out=C)
             X, C = C, X  # swap refs to avoid copy

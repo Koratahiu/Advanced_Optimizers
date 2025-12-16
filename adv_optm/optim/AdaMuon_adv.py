@@ -188,13 +188,13 @@ class AdaMuon_adv(torch.optim.Optimizer):
             "vector_reshape": vector_reshape,
             "nesterov":nesterov, "use_atan2":use_atan2,
             "Simplified_AdEMAMix": Simplified_AdEMAMix, "alpha_grad": alpha_grad,
-            "normuon_variant": normuon_variant, "orthogonal_gradient": orthogonal_gradient, "compiled_optimizer":compiled_optimizer,
+            "normuon_variant": normuon_variant, "orthogonal_gradient": orthogonal_gradient,
+            "compiled_optimizer":compiled_optimizer,
             "use_muon": use_muon,
             # Lion-K
             "kappa_p": kappa_p, "auto_projection": auto_projection,
             # Low-rank Ortho
             "low_rank_ortho": low_rank_ortho, "ortho_rank": ortho_rank,
-            "compiled_optimizer":compiled_optimizer,
             # CANS
             "accelerated_ns": accelerated_ns, "cns_a_bound": cns_a_bound,
             # MARS-M
@@ -351,7 +351,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     mt_buf.mul_(beta1).add_(grad_reshaped)
 
                 if nesterov:
-                    update = grad_reshaped.lerp(mt_buf, beta1) 
+                    update = grad_reshaped.lerp(mt_buf, beta1)
                 elif Simplified_AdEMAMix:
                     update = mt_buf.add(grad_reshaped, alpha=alpha_grad)
                 else:
@@ -408,12 +408,12 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     mt_buf.mul_(beta1).add_(grad)
 
                 if nesterov:
-                    update = grad.lerp(mt_buf, beta1) 
+                    update = grad.lerp(mt_buf, beta1)
                 elif Simplified_AdEMAMix:
                     update = mt_buf.add(grad, alpha=alpha_grad)
                 else:
                     update = mt_buf.clone()
-                
+
                 # Apply update projection
                 update = _auto_projection_for_adamuon(update, kappa_p)
 
