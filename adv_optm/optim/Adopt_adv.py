@@ -250,9 +250,9 @@ class Adopt_adv(torch.optim.Optimizer):
                 del vt_init
             else: # Fallback for non-factored tensors
                 if group['betas'][0] > 0:
-                    state['exp_avg'] = torch.zeros_like(p, dtype=dtype)
+                    state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
                 if self.use_AdEMAMix:
-                    state['exp_avg_slow'] = torch.zeros_like(p, dtype=dtype)
+                    state['exp_avg_slow'] = torch.zeros_like(p, device=p.device, dtype=dtype)
                 state['exp_avg_sq'] = grad.to(dtype).square()
 
         beta1, beta2 = group['betas']
