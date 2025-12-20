@@ -288,17 +288,14 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             # Fallback to standard Lion logic
             exp_avg = state["exp_avg"]
 
-            # Calculate scaled gradient for Prodigy step (g_t * d)
-            grad_scaled = grad * group['d']
-
             # Compute update term and sign for the update
             if exp_avg.dtype != torch.float32 and self.factored:
                 exp_avg = exp_avg.float()
 
             # Compute update term c_t
-            update = torch.lerp(grad_scaled, exp_avg, self.beta1)
+            raw_update = exp_avg.mul(self.beta1).add_(grad, alpha=group['d'] * (1-self.beta1))
 
-            update = _get_lion_k_update(update, kappa_p)
+            update = _get_lion_k_update(raw_update, kappa_p)
 
             if self.cautious_mask:
                 mask = (update * grad > 0).to(grad.dtype)
@@ -309,8 +306,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             update.mul_(dlr)
 
             # Update momentum using fused lerp
-            exp_avg.lerp_(grad_scaled, 1 - self.beta2)
-            del grad_scaled
+            exp_avg.mul_(self.beta2).add_(grad, alpha=group['d'] * (1 - self.beta2))
 
         prodigy_steps = group['prodigy_steps']
         if prodigy_steps <= 0 or group['k'] < prodigy_steps:

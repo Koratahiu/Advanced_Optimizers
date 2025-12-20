@@ -245,6 +245,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
+            sqrt_den_num = torch.as_tensor(sqrt_den_num)
             step_param_fn = self._compiled_step_parameter
         else:
             step_param_fn = self._step_parameter
@@ -271,17 +272,16 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             # Update momentum in full-size
             mt.mul_(beta1).add_(grad_reshaped)
 
+            vt = _reconstruct_state(state['mu_v_nmf'], state['mv_v_nmf'])
+            vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
+
             # update = mt + (grad_reshaped * alpha_grad)
             # We do this in-place to prevent reallocation
-            update = grad_reshaped.mul_(alpha_grad).add_(mt)
+            update = torch.add(mt, grad_reshaped, alpha=alpha_grad, out=grad_reshaped)
 
             # Factorize
             state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
             del mt
-
-            vt = _reconstruct_state(state['mu_v_nmf'], state['mv_v_nmf'])
-            vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
-            del grad_reshaped
 
             denom = vt.sqrt().add_(sqrt_den_eps)
             update.div_(denom)
@@ -295,7 +295,6 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
                 update.mul_(sqrt_den_num)
 
             update = update.view(p.shape).mul_(lr)
-
 
         else:  # Standard optimizer logic for non-factored tensors
             exp_avg_sq = state['exp_avg_sq']
@@ -311,10 +310,8 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             update.div_(denom)
             del denom
 
-            if group['use_bias_correction']:
-                update.mul_(sqrt_den_num)
-
-            update.mul_(lr)
+            update_scaling = lr * sqrt_den_num if group['use_bias_correction'] else lr
+            update.mul_(update_scaling)
 
         param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 

@@ -124,17 +124,18 @@ def _adam_step_parameter(self, p, grad, state, group, is_compiled, random_int_te
                     update = grad_reshaped
 
             if group['adam_use_atan2']:
-                A = 4 / math.pi
+                A = torch.as_tensor(4 / math.pi)
                 denom = vt.sqrt()
                 denom.div_(sqrt_bias_correction2)
-                update.atan2_(denom).mul_(A)
+                update.atan2_(denom)
             else:
                 denom = vt.sqrt()
                 denom.div_(sqrt_bias_correction2).add_(group['adam_eps'])
                 update.div_(denom)
             del denom
 
-            update = update.view(p.shape).mul_(step_size)
+            update_scaling = step_size * A if group['adam_use_atan2'] else step_size
+            update = update.view(p.shape).mul_(update_scaling)
 
             # Compress updated moments and store new factors
             if beta1_adam > 0:
@@ -173,17 +174,18 @@ def _adam_step_parameter(self, p, grad, state, group, is_compiled, random_int_te
             exp_avg_sq.mul_(beta2_adam).addcmul_(grad, grad, value=1 - beta2_adam)
 
             if group.get('adam_use_atan2'):
-                A = 4 / math.pi
+                A = torch.as_tensor(4 / math.pi)
                 denom = exp_avg_sq.sqrt()
                 denom.div_(sqrt_bias_correction2)
-                update.atan2_(denom).mul_(A)
+                update.atan2_(denom)
             else:
                 denom = exp_avg_sq.sqrt()
                 denom.div_(sqrt_bias_correction2).add_(group['adam_eps'])
                 update.div_(denom)
             del denom
 
-            update.mul_(step_size)
+            update_scaling = step_size * A if group['adam_use_atan2'] else step_size
+            update.mul_(update_scaling)
 
         param_update.apply_parameter_update(self, p, group, update, step_size, group["adam_weight_decay"], random_int_tensor=random_int_tensor)
 

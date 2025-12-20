@@ -379,16 +379,17 @@ class Prodigy_adv(torch.optim.Optimizer):
                 else:
                     mt.lerp_(grad_scaled_reshaped, 1 - self.beta1)
 
-                if self.grams_moment:
-                    update_mt = _grams_update(mt, grad_scaled_reshaped)
-                elif self.cautious_mask:
-                    update_mt = _cautious_update(mt, grad_scaled_reshaped)
-                else:
-                    update_mt = mt
-
                 # Factorize
                 state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
-                del mt
+
+                if self.grams_moment:
+                    update_mt = _grams_update(mt, grad_scaled_reshaped)
+                    del mt
+                elif self.cautious_mask:
+                    update_mt = _cautious_update(mt, grad_scaled_reshaped)
+                    del mt
+                else:
+                    update_mt = mt
 
             vt = _reconstruct_state(state['mu_v_nmf'], state['mv_v_nmf'])
             vt.mul_(beta2).addcmul_(grad_scaled_reshaped, grad_scaled_reshaped, value=1.0 - beta2)
@@ -398,6 +399,7 @@ class Prodigy_adv(torch.optim.Optimizer):
 
                 mt_slow.lerp_(grad_scaled_reshaped, 1 - beta3_ema)
                 if self.beta1 > 0:
+                    del grad_scaled_reshaped
                     update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
                     update = grad_scaled_reshaped.add_(mt_slow, alpha=alpha)
@@ -406,6 +408,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 del mt_slow
             elif self.Simplified_AdEMAMix:
                 update = update_mt.add_(grad_scaled_reshaped, alpha=alpha_grad)
+                del grad_scaled_reshaped
             else:
                 if self.beta1 > 0:
                     update = update_mt
@@ -414,9 +417,9 @@ class Prodigy_adv(torch.optim.Optimizer):
                     update = grad_scaled_reshaped
 
             if group['use_atan2']:
-                A = 4 / math.pi
+                A = torch.as_tensor(4 / math.pi)
                 denom = vt.sqrt()
-                update.atan2_(denom).mul_(A)
+                update.atan2_(denom)
             else:
                 denom = vt.sqrt()
                 update.div_(denom.add_(group['d'] * group['eps']))
@@ -426,56 +429,57 @@ class Prodigy_adv(torch.optim.Optimizer):
             state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
             del vt
 
-            update = update.view(p.shape).mul_(dlr)
+            update_scaling = dlr * A if group['use_atan2'] else dlr
+            update = update.view(p.shape).mul_(update_scaling)
 
         else:  # Standard AdamW logic for non-factored tensors
-            # Calculate scaled gradient for Prodigy step (g_t * d)
-            grad_scaled = grad * group['d']
-
             if self.beta1 > 0:
                 exp_avg = state['exp_avg']
 
                 if self.Simplified_AdEMAMix:
-                    exp_avg.mul_(self.beta1).add_(grad_scaled)
+                    alpha = group['d']
                 else:
-                    exp_avg.lerp_(grad_scaled, 1 - self.beta1)
+                    alpha = group['d'] * (1.0 - self.beta1)
+
+                exp_avg.mul_(self.beta1).add_(grad, alpha=alpha)
 
                 if self.grams_moment:
-                    update_mt = _grams_update(exp_avg, grad_scaled)
+                    update_mt = _grams_update(exp_avg, grad)
                 elif self.cautious_mask:
-                    update_mt = _cautious_update(exp_avg, grad_scaled)
+                    update_mt = _cautious_update(exp_avg, grad)
                 else:
                     update_mt = exp_avg.clone()
 
-            exp_avg_sq = state['exp_avg_sq']
-            exp_avg_sq.mul_(beta2).addcmul_(grad_scaled, grad_scaled, value=1.0 - beta2)
 
             if self.use_AdEMAMix:
                 exp_avg_slow = state['exp_avg_slow']
-                exp_avg_slow.lerp_(grad_scaled, 1 - beta3_ema)
+                exp_avg_slow.lerp_(grad, 1 - beta3_ema)
                 if self.beta1 > 0:
                     update = update_mt.add_(exp_avg_slow, alpha=alpha)
                 else:
-                    update = grad_scaled.add_(exp_avg_slow, alpha=alpha)
+                    update = grad.add(exp_avg_slow, alpha=alpha)
             elif self.Simplified_AdEMAMix:
-                update = update_mt.add_(grad_scaled, alpha=alpha_grad)
+                update = update_mt.add_(grad, alpha=alpha_grad)
             else:
                 if self.beta1 > 0:
                     update = update_mt
-                    del grad_scaled
                 else:
-                    update = grad_scaled
+                    update = grad
+
+            exp_avg_sq = state['exp_avg_sq']
+            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=group['d'] * group['d'] * (1.0 - beta2))
 
             if group['use_atan2']:
-                A = 4 / math.pi
+                A = torch.as_tensor(4 / math.pi)
                 denom = exp_avg_sq.sqrt()
-                update.atan2_(denom).mul_(A)
+                update.atan2_(denom)
             else:
                 denom = exp_avg_sq.sqrt()
                 update.div_(denom.add_(group['d'] * group['eps']))
             del denom
 
-            update.mul_(dlr)
+            update_scaling = dlr * A if group['use_atan2'] else dlr
+            update.mul_(update_scaling)
 
         # --- Accumulate Prodigy stats ---
         prodigy_steps = group['prodigy_steps']

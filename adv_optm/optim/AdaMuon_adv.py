@@ -351,14 +351,14 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     mt_buf.mul_(beta1).add_(grad_reshaped)
 
                 if nesterov:
-                    update = grad_reshaped.lerp(mt_buf, beta1)
+                    update = grad_reshaped.lerp_(mt_buf, beta1)
                 elif Simplified_AdEMAMix:
-                    update = mt_buf.add(grad_reshaped, alpha=alpha_grad)
+                    update = torch.add(mt_buf, grad_reshaped, alpha=alpha_grad, out=grad_reshaped)
                 else:
                     update = mt_buf
+                    del grad_reshaped
 
                 state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True)
-                del mt_buf, grad_reshaped
 
                 # Apply update projection
                 update = _auto_projection_for_adamuon(update, kappa_p)
@@ -374,6 +374,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     low_rank_ortho=group['low_rank_ortho'],
                     ortho_rank=group['ortho_rank']
                 )
+                del mt_buf
 
                 if group['normuon_variant']:
                     normuon_update(update, state['normuon_v'], beta2, group['eps'])
@@ -384,18 +385,20 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
                     # Apply second momentum update (adaptive scaling)
                     if group['use_atan2']:
-                        A = 4 / math.pi
+                        A = torch.as_tensor(4 / math.pi)
                         denom = vt_buf.sqrt()
-                        update.atan2_(denom).mul_(A)
+                        update.atan2_(denom)
                     else:
                         denom = vt_buf.sqrt().add_(group['eps'])
                         update.div_(denom)
-                    del denom
+                    state['mu_vbuf_nmf'], state['mv_vbuf_nmf'] = _factorize_state(vt_buf, signed=False)
+                    del denom, vt_buf
 
                 # RMS-aligned scaling
-                rms_adjustment(update, group['rms_rescaling'])
+                step_scale = lr * A if group['use_atan2'] else lr
+                rms_adjustment(update, group['rms_rescaling'], step_scale)
 
-                update = update.reshape(p.shape).mul_(lr)
+                update = update.reshape(p.shape)
 
             else: # Standard AdaMuon logic for non-factored tensors
                 original_shape = p.shape
@@ -442,18 +445,19 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
                     # Apply second momentum update (adaptive scaling)
                     if group['use_atan2']:
-                        A = 4 / math.pi
+                        A = torch.as_tensor(4 / math.pi)
                         denom = vt_buf.sqrt()
-                        update.atan2_(denom).mul_(A)
+                        update.atan2_(denom)
                     else:
                         denom = vt_buf.sqrt().add_(group['eps'])
                         update.div_(denom)
                     del denom
 
                 # RMS-aligned rescaling
-                rms_adjustment(update, group['rms_rescaling'])
+                step_scale = lr * A if group['use_atan2'] else lr
+                rms_adjustment(update, group['rms_rescaling'], step_scale)
 
-                update = update.reshape(original_shape).mul_(lr)
+                update = update.reshape(original_shape)
 
             param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 

@@ -322,14 +322,14 @@ class Muon_adv(torch.optim.Optimizer):
                     # Nesterov momentum
                     update = grad_reshaped.lerp_(mt_buf, beta1)
                 elif Simplified_AdEMAMix:
-                    update = torch.add(mt_buf, grad_reshaped, alpha=alpha_grad)
+                    update = torch.add(mt_buf, grad_reshaped, alpha=alpha_grad, out=grad_reshaped)
                 else:
                     # Standard momentum
                     update = mt_buf
+                    del grad_reshaped
 
                 # Factorize
                 state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True)
-                del mt_buf, grad_reshaped
 
                 # Orthogonalization step
                 update = newton_schulz(
@@ -342,14 +342,15 @@ class Muon_adv(torch.optim.Optimizer):
                     low_rank_ortho=group['low_rank_ortho'],
                     ortho_rank=group['ortho_rank']
                 )
+                del mt_buf
 
                 if group['normuon_variant']:
                     normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['normuon_eps'])
 
                 # Factored RMS-aligned scaling
-                rms_adjustment(update, group['rms_rescaling'])
+                rms_adjustment(update, group['rms_rescaling'], lr)
 
-                update = update.reshape(p.shape).mul_(lr)
+                update = update.reshape(p.shape)
 
             else: # Standard Muon logic for non-factored tensors
 
@@ -393,9 +394,9 @@ class Muon_adv(torch.optim.Optimizer):
                         normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['normuon_eps'])
 
                     # RMS-aligned rescaling
-                    rms_adjustment(update, group['rms_rescaling'])
+                    rms_adjustment(update, group['rms_rescaling'], lr)
 
-                    update = update.reshape(original_shape).mul_(lr)
+                    update = update.reshape(original_shape)
 
             param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 

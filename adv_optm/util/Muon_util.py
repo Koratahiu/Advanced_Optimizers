@@ -265,17 +265,17 @@ def normuon_update(update: torch.Tensor, v_t: torch.Tensor, beta2, eps):
     # Normalize update
     return update.div_(v_t.sqrt().unsqueeze(1).add_(eps))
 
-def rms_adjustment(update: torch.Tensor, rms_rescaling: bool):
+def rms_adjustment(update: torch.Tensor, rms_rescaling: bool, lr):
     if rms_rescaling: # RMS-aligned rescaling
         # This is slower due to norm calculations but it worked the best for t2i models.
         rms_target = 0.2 # default (Adam) value for RMS
         update_norm = torch.linalg.vector_norm(update)
-        return update.mul_(rms_target * (update.numel()**0.5) / update_norm.clamp_min(1e-8))
+        return update.mul_(lr * rms_target * (update.numel()**0.5) / update_norm.clamp_min(1e-8))
     else:
         # Original Muon scaling
         r, c = update.size(-2), update.size(-1)
         scaling_factor = max(1, r / c) ** 0.5
-        return update.mul_(scaling_factor)
+        return update.mul_(lr * scaling_factor)
 
 def _auto_projection_for_adamuon(raw_update: torch.Tensor, kappa_p: float) -> torch.Tensor:
     """

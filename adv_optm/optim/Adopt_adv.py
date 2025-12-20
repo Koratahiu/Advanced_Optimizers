@@ -1,5 +1,6 @@
 import torch
 from typing import Callable, Optional
+A = torch.as_tensor(4 / math.pi)
 
 import math
 
@@ -239,7 +240,7 @@ class Adopt_adv(torch.optim.Optimizer):
                     packed_d2 = (d2 + 7) // 8
                     state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
                 # Second moment (v)
-                vt_init = grad.view(d1, d2).square_()
+                vt_init = grad.to(dtype).view(d1, d2).square()
                 # Allocate NMF factors for vt
                 state['mu_v_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
                 state['mv_v_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
@@ -251,7 +252,7 @@ class Adopt_adv(torch.optim.Optimizer):
                     state['exp_avg'] = torch.zeros_like(p, dtype=dtype)
                 if self.use_AdEMAMix:
                     state['exp_avg_slow'] = torch.zeros_like(p, dtype=dtype)
-                state['exp_avg_sq'] = grad.square()
+                state['exp_avg_sq'] = grad.to(dtype).square()
 
         beta1, beta2 = group['betas']
 
@@ -309,14 +310,20 @@ class Adopt_adv(torch.optim.Optimizer):
             # ADOPT Step A: Decorrelate g_t using v_{t-1}
             denom = vt.sqrt()
 
+            # Update second moment v_t for the *next* step using raw g_t
+            vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
+            # Factorize
+            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
+            del vt
+
             if self.use_atan2:
-                normalized_grad = torch.atan2(grad_reshaped, denom)
+                A = torch.as_tensor(4 / math.pi)
+                normalized_grad = torch.atan2(grad_reshaped, denom, out=denom)
             else:
-                normalized_grad = grad_reshaped / denom.add_(group['eps'])
+                normalized_grad = torch.div(grad_reshaped, denom.add_(group['eps']), out=denom)
                 if self.clip_lambda is not None:
                     clip_val = self.clip_lambda(state['step'])
                     normalized_grad.clamp_(-clip_val, clip_val)
-            del denom
 
             # ADOPT Step B: Update momentum m_t using normalized gradient
             if beta1 > 0:
@@ -327,23 +334,19 @@ class Adopt_adv(torch.optim.Optimizer):
                 else:
                     mt.lerp_(normalized_grad, 1.0 - beta1)
 
-                if self.grams_moment:
-                    update_mt = _grams_update(mt, grad_reshaped)
-                elif self.cautious_mask:
-                    update_mt = _cautious_update(mt, grad_reshaped)
-                else:
-                    update_mt = mt
                 # Factorize
                 state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
-                del mt
 
-            # Update second moment v_t for the *next* step using raw g_t
-            vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
+                if self.grams_moment:
+                    update_mt = _grams_update(mt, grad_reshaped)
+                    del mt
+                elif self.cautious_mask:
+                    update_mt = _cautious_update(mt, grad_reshaped)
+                    del mt
+                else:
+                    update_mt = mt
+
             del grad_reshaped
-
-            # Factorize
-            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
-            del vt
 
             if self.use_AdEMAMix:
                 # Reconstruct AdEMAMix EMA
@@ -351,6 +354,7 @@ class Adopt_adv(torch.optim.Optimizer):
                 mt_slow.lerp_(normalized_grad, 1.0 - beta3_ema)
                 if beta1 > 0:
                     update = update_mt.add_(mt_slow, alpha=alpha)
+                    del normalized_grad
                 else:
                     update = normalized_grad.add_(mt_slow, alpha=alpha)
                 # Factorize
@@ -358,6 +362,7 @@ class Adopt_adv(torch.optim.Optimizer):
                 del mt_slow
             elif self.Simplified_AdEMAMix:
                 update = update_mt.add_(normalized_grad, alpha=alpha_grad)
+                del normalized_grad
             else:
                 if beta1 > 0:
                     update = update_mt
@@ -367,11 +372,8 @@ class Adopt_adv(torch.optim.Optimizer):
 
             update = update.view(p.shape)
 
-            update.mul_(lr)
-
-            if self.use_atan2:
-                A = 4 / math.pi
-                update.mul_(A)
+            update_scaling = lr * A if self.use_atan2 else lr
+            update.mul_(update_scaling)
 
         else: # Standard ADOPT logic for non-factored tensors
             vt = state['exp_avg_sq'] # v_{t-1}
@@ -380,13 +382,13 @@ class Adopt_adv(torch.optim.Optimizer):
             denom = vt.sqrt()
 
             if self.use_atan2:
-                normalized_grad = torch.atan2(grad, denom)
+                A = torch.as_tensor(4 / math.pi)
+                normalized_grad = torch.atan2(grad, denom, out=denom)
             else:
-                normalized_grad = grad / denom.add_(group['eps'])
+                normalized_grad = torch.div(grad, denom.add_(group['eps']), out=denom)
                 if self.clip_lambda is not None:
                     clip_val = self.clip_lambda(state['step'])
                     normalized_grad.clamp_(-clip_val, clip_val)
-            del denom
 
             # ADOPT Step B: Update momentum m_t
             if beta1 > 0:
@@ -419,11 +421,8 @@ class Adopt_adv(torch.optim.Optimizer):
                 else:
                     update = normalized_grad
 
-            update.mul_(lr)
-
-            if self.use_atan2:
-                A = 4 / math.pi
-                update.mul_(A)
+            update_scaling = lr * A if self.use_atan2 else lr
+            update.mul_(update_scaling)
 
             # Update second moment v_t for the next step using raw g_t
             vt.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)

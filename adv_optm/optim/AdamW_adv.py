@@ -240,14 +240,10 @@ class AdamW_adv(torch.optim.Optimizer):
         if group['use_bias_correction']:
             step = current_step + 1
             bias_correction1 = 1.0 - beta1 ** step
-            if group.get('kourkoutas_beta', False):
-                bias_correction2 = (1.0 - group['betas'][1] ** step) ** 0.5
-                # Use beta2_max for bias correction
-            else:
-                bias_correction2 = 1.0 - beta2 ** step
+            sqrt_bias_correction2 = (1.0 - group['betas'][1] ** step) ** 0.5
         else:
             bias_correction1 = 1
-            bias_correction2 = 1
+            sqrt_bias_correction2 = 1
         step_size = group['lr'] / bias_correction1
 
         random_int_tensor = None
@@ -260,11 +256,11 @@ class AdamW_adv(torch.optim.Optimizer):
         else:
             step_param_fn = self._step_parameter
 
-        step_param_fn(p, grad, state, group, step_size, beta1, beta2, bias_correction2, random_int_tensor)
+        step_param_fn(p, grad, state, group, step_size, beta1, beta2, sqrt_bias_correction2, random_int_tensor)
 
         state['step'] += 1
 
-    def _step_parameter(self, p, grad, state, group, step_size, beta1, beta2, bias_correction2, random_int_tensor):
+    def _step_parameter(self, p, grad, state, group, step_size, beta1, beta2, sqrt_bias_correction2, random_int_tensor):
         if grad.dtype != torch.float32 and self.factored:
             grad = grad.float()
         if group["orthogonal_gradient"]:
@@ -289,16 +285,17 @@ class AdamW_adv(torch.optim.Optimizer):
                 # Update momentum in full-size
                 mt.lerp_(grad_reshaped, 1.0 - beta1)
 
-                if self.grams_moment:
-                    update_mt = _grams_update(mt, grad_reshaped)
-                elif self.cautious_mask:
-                    update_mt = _cautious_update(mt, grad_reshaped)
-                else:
-                    update_mt = mt
-
                 # Factorize
                 state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
-                del mt
+
+                if self.grams_moment:
+                    update_mt = _grams_update(mt, grad_reshaped)
+                    del mt
+                elif self.cautious_mask:
+                    update_mt = _cautious_update(mt, grad_reshaped)
+                    del mt
+                else:
+                    update_mt = mt
 
             vt = _reconstruct_state(state['mu_v_nmf'], state['mv_v_nmf'])
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
@@ -310,6 +307,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
                 if beta1 > 0:
                     update = update_mt.add_(mt_slow, alpha=alpha)
+                    del grad_reshaped
                 else:
                     update = grad_reshaped.add_(mt_slow, alpha=alpha)
                 # Factorize
@@ -323,21 +321,22 @@ class AdamW_adv(torch.optim.Optimizer):
                     update = grad_reshaped
 
             if group['use_atan2']:
-                A = 4 / math.pi
+                A = torch.as_tensor(4 / math.pi)
                 denom = vt.sqrt()
-                denom.div_(bias_correction2)
-                update.atan2_(denom).mul_(A)
+                denom.div_(sqrt_bias_correction2)
+                update.atan2_(denom)
             else:
                 denom = vt.sqrt()
-                denom.div_(bias_correction2).add_(group['eps'])
+                denom.div_(sqrt_bias_correction2).add_(group['eps'])
                 update.div_(denom)
             del denom
 
             # Factorize
             state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
             del vt
-
-            update = update.view(p.shape).mul_(step_size)
+            
+            update_scaling = step_size * A if group['use_atan2'] else step_size
+            update = update.view(p.shape).mul_(update_scaling)
 
         else:  # Standard AdamW logic for non-factored tensors
             if beta1 > 0:
@@ -366,17 +365,18 @@ class AdamW_adv(torch.optim.Optimizer):
             exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
 
             if group['use_atan2']:
-                A = 4 / math.pi
+                A = torch.as_tensor(4 / math.pi)
                 denom = exp_avg_sq.sqrt()
-                denom.div_(bias_correction2)
-                update.atan2_(denom).mul_(A)
+                denom.div_(sqrt_bias_correction2)
+                update.atan2_(denom)
             else:
                 denom = exp_avg_sq.sqrt()
-                denom.div_(bias_correction2).add_(group['eps'])
+                denom.div_(sqrt_bias_correction2).add_(group['eps'])
                 update.div_(denom)
             del denom
 
-            update.mul_(step_size)
+            update_scaling = step_size * A if group['use_atan2'] else step_size
+            update.mul_(update_scaling)
 
         param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor)
 

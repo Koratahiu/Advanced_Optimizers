@@ -146,11 +146,6 @@ class KourkoutasHelper:
         layer_key = self.optimizer.layer_key_fn(p)
 
         if layer_key in self.layer_info:
-            # Initialize the transient state for this layer if it's the first time in the step.
-            if layer_key not in self.layer_state:
-                    self.layer_state[layer_key] = {
-                    'sum_sq_accumulator': torch.tensor(0.0, device=p.device, dtype=torch.float32)
-                }
             # Accumulate for the *next* step's prepare_step call
             self.layer_state[layer_key]['sum_sq_accumulator'] += torch.sum(grad.detach().pow(2)).float()
 
