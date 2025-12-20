@@ -7,6 +7,8 @@ from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.update_util import _grams_update, _cautious_update
 
+A = torch.as_tensor(4 / math.pi)
+
 @torch.no_grad()
 def _init_auxadam_state(self, p, group):
     state = self.state[p]
@@ -124,7 +126,6 @@ def _adam_step_parameter(self, p, grad, state, group, is_compiled, random_int_te
                     update = grad_reshaped
 
             if group['adam_use_atan2']:
-                A = torch.as_tensor(4 / math.pi)
                 denom = vt.sqrt()
                 denom.div_(sqrt_bias_correction2)
                 update.atan2_(denom)
@@ -174,7 +175,6 @@ def _adam_step_parameter(self, p, grad, state, group, is_compiled, random_int_te
             exp_avg_sq.mul_(beta2_adam).addcmul_(grad, grad, value=1 - beta2_adam)
 
             if group.get('adam_use_atan2'):
-                A = torch.as_tensor(4 / math.pi)
                 denom = exp_avg_sq.sqrt()
                 denom.div_(sqrt_bias_correction2)
                 update.atan2_(denom)

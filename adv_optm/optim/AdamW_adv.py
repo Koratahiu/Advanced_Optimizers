@@ -10,6 +10,8 @@ from ..util.update_util import _grams_update, _cautious_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 
+A = torch.as_tensor(4 / math.pi)
+
 class AdamW_adv(torch.optim.Optimizer):
     """
     Implements an advanced AdamW algorithm.
@@ -321,7 +323,6 @@ class AdamW_adv(torch.optim.Optimizer):
                     update = grad_reshaped
 
             if group['use_atan2']:
-                A = torch.as_tensor(4 / math.pi)
                 denom = vt.sqrt()
                 denom.div_(sqrt_bias_correction2)
                 update.atan2_(denom)
@@ -334,7 +335,7 @@ class AdamW_adv(torch.optim.Optimizer):
             # Factorize
             state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
             del vt
-            
+
             update_scaling = step_size * A if group['use_atan2'] else step_size
             update = update.view(p.shape).mul_(update_scaling)
 
@@ -365,7 +366,6 @@ class AdamW_adv(torch.optim.Optimizer):
             exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
 
             if group['use_atan2']:
-                A = torch.as_tensor(4 / math.pi)
                 denom = exp_avg_sq.sqrt()
                 denom.div_(sqrt_bias_correction2)
                 update.atan2_(denom)

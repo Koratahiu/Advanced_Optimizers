@@ -1,6 +1,5 @@
 import torch
 from typing import Callable, Optional
-A = torch.as_tensor(4 / math.pi)
 
 import math
 
@@ -9,6 +8,8 @@ from ..util.factorization_util import _get_effective_shape, _reconstruct_state, 
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.update_util import _grams_update, _cautious_update
+
+A = torch.as_tensor(4 / math.pi)
 
 class Adopt_adv(torch.optim.Optimizer):
     """
@@ -317,7 +318,6 @@ class Adopt_adv(torch.optim.Optimizer):
             del vt
 
             if self.use_atan2:
-                A = torch.as_tensor(4 / math.pi)
                 normalized_grad = torch.atan2(grad_reshaped, denom, out=denom)
             else:
                 normalized_grad = torch.div(grad_reshaped, denom.add_(group['eps']), out=denom)
@@ -382,7 +382,6 @@ class Adopt_adv(torch.optim.Optimizer):
             denom = vt.sqrt()
 
             if self.use_atan2:
-                A = torch.as_tensor(4 / math.pi)
                 normalized_grad = torch.atan2(grad, denom, out=denom)
             else:
                 normalized_grad = torch.div(grad, denom.add_(group['eps']), out=denom)

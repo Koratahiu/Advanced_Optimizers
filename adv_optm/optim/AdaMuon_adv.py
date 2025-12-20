@@ -9,6 +9,8 @@ from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util import Muon_AuxAdam
 
+A = torch.as_tensor(4 / math.pi)
+
 class AdaMuon_adv(torch.optim.Optimizer):
     """
     Implements an advanced AdaMuon optimizer algorithm.
@@ -385,7 +387,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
                     # Apply second momentum update (adaptive scaling)
                     if group['use_atan2']:
-                        A = torch.as_tensor(4 / math.pi)
                         denom = vt_buf.sqrt()
                         update.atan2_(denom)
                     else:
@@ -445,7 +446,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
                     # Apply second momentum update (adaptive scaling)
                     if group['use_atan2']:
-                        A = torch.as_tensor(4 / math.pi)
                         denom = vt_buf.sqrt()
                         update.atan2_(denom)
                     else:

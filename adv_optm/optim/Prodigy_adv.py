@@ -11,6 +11,8 @@ from ..util.Kourkoutas import KourkoutasHelper
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.update_util import _grams_update, _cautious_update
 
+A = torch.as_tensor(4 / math.pi)
+
 class Prodigy_adv(torch.optim.Optimizer):
     """
     Implements an advanced Prodigy algorithm.
@@ -417,7 +419,6 @@ class Prodigy_adv(torch.optim.Optimizer):
                     update = grad_scaled_reshaped
 
             if group['use_atan2']:
-                A = torch.as_tensor(4 / math.pi)
                 denom = vt.sqrt()
                 update.atan2_(denom)
             else:
@@ -470,7 +471,6 @@ class Prodigy_adv(torch.optim.Optimizer):
             exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=group['d'] * group['d'] * (1.0 - beta2))
 
             if group['use_atan2']:
-                A = torch.as_tensor(4 / math.pi)
                 denom = exp_avg_sq.sqrt()
                 update.atan2_(denom)
             else:
