@@ -325,7 +325,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 # Auto projection depending on dimension
                 # Apply p=2.0 (Spherical) for 4D (Conv2D)
                 # Apply p=1.0 (Sign) for everything else (Linear/Embeddings)
-                if p.ndim == 4:
+                if p.ndim >= 4:
                     kappa_p = 2.0
                 else:
                     kappa_p = 1.0
