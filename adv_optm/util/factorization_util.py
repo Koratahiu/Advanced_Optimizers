@@ -17,7 +17,8 @@ def _reconstruct_state(mu_factor: torch.Tensor, mv_factor: torch.Tensor, sign: t
         torch.where(unpacked_sign, full_state, -full_state, out=full_state)
         del unpacked_sign
 
-    return full_state
+    # We cast here to FP32 to prevent issues where the states are saved in 16-bit
+    return full_state.float()
 
 @torch.no_grad()
 def _factorize_state(full_state: torch.Tensor, signed: bool):

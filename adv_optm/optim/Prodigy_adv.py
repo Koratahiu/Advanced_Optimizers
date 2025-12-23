@@ -438,11 +438,11 @@ class Prodigy_adv(torch.optim.Optimizer):
                 exp_avg = state['exp_avg']
 
                 if self.Simplified_AdEMAMix:
-                    alpha = group['d']
+                    alpha_mt = group['d']
                 else:
-                    alpha = group['d'] * (1.0 - self.beta1)
+                    alpha_mt = group['d'] * (1.0 - self.beta1)
 
-                exp_avg.mul_(self.beta1).add_(grad, alpha=alpha)
+                exp_avg.mul_(self.beta1).add_(grad, alpha=alpha_mt)
 
                 if self.grams_moment:
                     update_mt = _grams_update(exp_avg, grad)
