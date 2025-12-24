@@ -405,6 +405,7 @@ class Adopt_adv(torch.optim.Optimizer):
                 m_slow.lerp_(normalized_grad, 1.0 - beta3_ema)
                 if beta1 > 0:
                     update = update_mt.add_(m_slow, alpha=alpha)
+                    del normalized_grad
                 else:
                     update = normalized_grad.add_(m_slow, alpha=alpha)
             elif self.Simplified_AdEMAMix:
