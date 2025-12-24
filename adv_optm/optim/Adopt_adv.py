@@ -94,6 +94,8 @@ class Adopt_adv(torch.optim.Optimizer):
             and returns a unique, hashable key representing its "layer" or "bucket".
             If `None`, parameters are bucketed by their memory ID (tensor-wise).
             (default: None)
+        vector_adam (bool): whether to use VectorAdam logic for the second moment,
+            scaling updates by the vector norm rather than element-wise. (default: False)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
     """
@@ -133,6 +135,8 @@ class Adopt_adv(torch.optim.Optimizer):
         k_warmup_steps: int = 0,
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
+        # VectorAdam
+        vector_adam: bool = False,
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
@@ -167,6 +171,7 @@ class Adopt_adv(torch.optim.Optimizer):
             "alpha_grad": alpha_grad,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
+            "vector_adam": vector_adam,
             "nnmf_factor": nnmf_factor,
             "compiled_optimizer": compiled_optimizer,
         }
@@ -310,7 +315,13 @@ class Adopt_adv(torch.optim.Optimizer):
             denom = vt.sqrt()
 
             # Update second moment v_t for the *next* step using raw g_t
-            vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
+            if group.get('vector_adam', True) and grad_reshaped.ndim > 1:
+                # VectorAdam Logic (factored)
+                # Calculate squared norm along the vector dimension (last dim), keeping dim for broadcasting
+                grad_sq_norm = grad_reshaped.norm(dim=-1, keepdim=True).square_()
+                vt.lerp_(grad_sq_norm, 1 - beta2)
+            else:
+                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
             # Factorize
             state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
             del vt
@@ -422,7 +433,14 @@ class Adopt_adv(torch.optim.Optimizer):
             update.mul_(update_scaling)
 
             # Update second moment v_t for the next step using raw g_t
-            vt.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
+            if group.get('vector_adam', True) and grad.ndim > 1:
+                # VectorAdam Logic (standard)
+                # Calculate squared norm along the last dimension, keeping dim for broadcasting.
+                # This treats the last dimension as the "vector" to preserve direction.
+                grad_sq_norm = grad.norm(dim=-1, keepdim=True).square_()
+                vt.lerp_(grad_sq_norm, 1 - beta2)
+            else:
+                vt.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
         # Parameter Update
         param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
