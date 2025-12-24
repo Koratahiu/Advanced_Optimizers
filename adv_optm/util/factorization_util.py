@@ -32,9 +32,9 @@ def _factorize_state(full_state: torch.Tensor, signed: bool):
         sign = _pack_bools(full_state > 0)
         mu_factor, mv_factor = _nnmf(full_state.abs_())
         return mu_factor, mv_factor, sign
-
-    mu_factor, mv_factor = _nnmf(full_state.abs_())
-    return mu_factor, mv_factor
+    else:
+        mu_factor, mv_factor = _nnmf(full_state.abs_())
+        return mu_factor, mv_factor
 
 # ------------------------------------------
 # SMMF rank-1 NNMF factorization, logic modified from:
