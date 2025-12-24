@@ -325,11 +325,12 @@ class Muon_adv(torch.optim.Optimizer):
                     update = torch.add(mt_buf, grad_reshaped, alpha=alpha_grad, out=grad_reshaped)
                 else:
                     # Standard momentum
-                    update = mt_buf
+                    update = mt_buf.clone()
                     del grad_reshaped
 
                 # Factorize
                 state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True)
+                del mt_buf
 
                 # Orthogonalization step
                 update = newton_schulz(
@@ -342,7 +343,6 @@ class Muon_adv(torch.optim.Optimizer):
                     low_rank_ortho=group['low_rank_ortho'],
                     ortho_rank=group['ortho_rank']
                 )
-                del mt_buf
 
                 if group['normuon_variant']:
                     normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['normuon_eps'])

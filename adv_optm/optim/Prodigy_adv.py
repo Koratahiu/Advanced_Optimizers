@@ -385,7 +385,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                     mt.lerp_(grad_scaled_reshaped, 1 - self.beta1)
 
                 # Factorize
-                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
+                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
 
                 if self.grams_moment:
                     update_mt = _grams_update(mt, grad_scaled_reshaped, inplace=True)
