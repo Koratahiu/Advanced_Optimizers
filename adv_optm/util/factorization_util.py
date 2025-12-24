@@ -61,8 +61,8 @@ def _nnmf(matrix: torch.Tensor):
     # Calculate the initial factors (sums)
     # mu_factor is the sum along dim=1 (rows), shape (M)
     # mv_factor is the sum along dim=0 (columns), shape (N)
-    mu_factor = torch.sum(matrix, dim=1)
-    mv_factor = torch.sum(matrix, dim=0)
+    mu_factor = torch.sum(matrix, dim=1, dtype=torch.float32)
+    mv_factor = torch.sum(matrix, dim=0, dtype=torch.float32)
 
     # Normalize one of the factors for stability
     EPSILON = 1e-12
