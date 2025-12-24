@@ -266,12 +266,12 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct momentum from previous step's factors
-            mt = _reconstruct_state(state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2)
+            mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
             # Update momentum in full-size
             mt.mul_(beta1).add_(grad_reshaped)
 
-            vt = _reconstruct_state(state['mu_v_nmf'], state['mv_v_nmf'])
+            vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
 
             # update = mt + (grad_reshaped * alpha_grad)

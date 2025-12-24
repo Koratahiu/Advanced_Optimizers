@@ -304,7 +304,7 @@ class Adopt_adv(torch.optim.Optimizer):
             grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct v_{t-1}
-            vt = _reconstruct_state(state['mu_v_nmf'], state['mv_v_nmf'])
+            vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
 
             # ADOPT Step A: Decorrelate g_t using v_{t-1}
             denom = vt.sqrt()
@@ -326,7 +326,7 @@ class Adopt_adv(torch.optim.Optimizer):
             # ADOPT Step B: Update momentum m_t using normalized gradient
             if beta1 > 0:
                 # Reconstruct m_{t-1}
-                mt = _reconstruct_state(state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2)
+                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
                 if self.Simplified_AdEMAMix:
                     mt.mul_(beta1).add_(normalized_grad, alpha=1.0)
                 else:
@@ -346,7 +346,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
             if self.use_AdEMAMix:
                 # Reconstruct AdEMAMix EMA
-                mt_slow = _reconstruct_state(state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2)
+                mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
                 mt_slow.lerp_(normalized_grad, 1.0 - beta3_ema)
                 if beta1 > 0:
                     update = update_mt.add_(mt_slow, alpha=alpha)

@@ -344,7 +344,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 grad_reshaped = grad.view(d1, d2)
 
                 # Reconstruct momentum from previous step's factors & sign
-                mt_buf = _reconstruct_state(state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'], d2)
+                mt_buf = _reconstruct_state((state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'], d2), signed=True)
 
                 # Update momentum in full-size
                 if not Simplified_AdEMAMix:
@@ -383,7 +383,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     normuon_update(update, state['normuon_v'], beta2, group['eps'])
                 else:
                     # Reconstruct second momentum from previous step's factors
-                    vt_buf = _reconstruct_state(state['mu_vbuf_nmf'], state['mv_vbuf_nmf'])
+                    vt_buf = _reconstruct_state((state['mu_vbuf_nmf'], state['mv_vbuf_nmf']), signed=False)
                     # Update second momentum in full-size
                     vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
                     # Apply second momentum update (adaptive scaling)

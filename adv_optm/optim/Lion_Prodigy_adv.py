@@ -259,7 +259,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             grad_scaled_reshaped = grad.view(d1, d2) * group['d']
 
             # Reconstruct momentum m_{t-1}
-            exp_avg = _reconstruct_state(state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2)
+            exp_avg = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
             # Compute update term c_t = β1*m_{t-1} + (1-β1)*g_t*d
             update = torch.lerp(grad_scaled_reshaped, exp_avg, self.beta1)

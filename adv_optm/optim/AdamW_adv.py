@@ -280,7 +280,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
             # Reconstruct momentum from previous step's factors
             if beta1 > 0:
-                mt = _reconstruct_state(state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2)
+                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
                 # Update momentum in full-size
                 mt.lerp_(grad_reshaped, 1.0 - beta1)
@@ -295,11 +295,11 @@ class AdamW_adv(torch.optim.Optimizer):
                 else:
                     update_mt = mt
 
-            vt = _reconstruct_state(state['mu_v_nmf'], state['mv_v_nmf'])
+            vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
 
             if self.use_AdEMAMix:
-                mt_slow = _reconstruct_state(state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2)
+                mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
 
                 mt_slow.lerp_(grad_reshaped, 1.0 - beta3_ema)
 

@@ -376,7 +376,7 @@ class Prodigy_adv(torch.optim.Optimizer):
 
             # Reconstruct momentum from previous step's factors
             if self.beta1 > 0:
-                mt = _reconstruct_state(state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2)
+                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
                 # Update momentum in full-size
                 if self.Simplified_AdEMAMix:
@@ -394,11 +394,11 @@ class Prodigy_adv(torch.optim.Optimizer):
                 else:
                     update_mt = mt
 
-            vt = _reconstruct_state(state['mu_v_nmf'], state['mv_v_nmf'])
+            vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
             vt.mul_(beta2).addcmul_(grad_scaled_reshaped, grad_scaled_reshaped, value=1.0 - beta2)
 
             if self.use_AdEMAMix:
-                mt_slow = _reconstruct_state(state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2)
+                mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
 
                 mt_slow.lerp_(grad_scaled_reshaped, 1 - beta3_ema)
                 if self.beta1 > 0:

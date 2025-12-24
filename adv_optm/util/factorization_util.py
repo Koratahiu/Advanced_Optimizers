@@ -6,19 +6,22 @@ import torch
 # ------------------------------------------
 
 @torch.no_grad()
-def _reconstruct_state(mu_factor: torch.Tensor, mv_factor: torch.Tensor, sign: torch.Tensor | None = None, d2: int | None = None):
+def _reconstruct_state(factors: tuple, signed: bool):
     """
     Reconstruct full state from its factors and optionally sign
     """
-    full_state = _unnmf((mu_factor, mv_factor))
-
-    if sign is not None:
+    if signed:
+        mu_factor, mv_factor, sign, d2 = factors
+        full_state = _unnmf((mu_factor, mv_factor))
         unpacked_sign = _unpack_bools(sign, original_m=d2)
         torch.where(unpacked_sign, full_state, -full_state, out=full_state)
         del unpacked_sign
-
-    # We cast here to FP32 to prevent issues where the states are saved in 16-bit
-    return full_state.float()
+        # We cast here to FP32 to prevent issues where the states are saved in 16-bit
+        return full_state.float()
+    else:
+        # mu_factor, mv_factor = factors
+        full_state = _unnmf(factors)
+        return full_state.float()
 
 @torch.no_grad()
 def _factorize_state(full_state: torch.Tensor, signed: bool):
