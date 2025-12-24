@@ -263,7 +263,7 @@ def normuon_update(update: torch.Tensor, v_t: torch.Tensor, beta2, eps):
     mean_squared_update = torch.mean(update.square(), dim=1, dtype=v_t.dtype)
     v_t.lerp_(mean_squared_update, 1 - beta2)
     # Normalize update
-    return update.div_(v_t.sqrt().unsqueeze(1).add_(eps))
+    return update.div_(v_t.sqrt().unsqueeze_(1).add_(eps))
 
 def rms_adjustment(update: torch.Tensor, rms_rescaling: bool, lr):
     if rms_rescaling: # RMS-aligned rescaling
