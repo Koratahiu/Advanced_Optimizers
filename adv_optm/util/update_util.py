@@ -6,7 +6,7 @@ def _grams_update(mt: torch.Tensor, grad: torch.Tensor, inplace: bool=False):
     (https://arxiv.org/abs/2412.17107).
     """
     if inplace:
-        return mt.mul_(grad.sign())
+        return mt.abs_().mul_(grad.sign())
     return grad.sign().mul_(mt.abs())
 
 def _cautious_update(mt: torch.Tensor, grad: torch.Tensor, inplace: bool=False):
