@@ -276,7 +276,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
 
             if self.cautious_mask:
                 mask = (update * grad_scaled_reshaped > 0).to(grad_scaled_reshaped.dtype)
-                mask.div_(mask.mean().clamp_(min=1e-3))
+                mask.div_(mask.mean().clamp_min_(1e-3))
                 update.mul_(mask)
                 del mask
 
@@ -293,7 +293,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
 
             if self.cautious_mask:
                 mask = (update * grad > 0).to(grad.dtype)
-                mask.div_(mask.mean().clamp_(min=1e-3))
+                mask.div_(mask.mean().clamp_min_(1e-3))
                 update.mul_(mask)
                 del mask
 

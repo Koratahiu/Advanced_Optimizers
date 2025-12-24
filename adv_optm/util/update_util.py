@@ -15,7 +15,7 @@ def _cautious_update(mt: torch.Tensor, grad: torch.Tensor, inplace: bool=False):
     Line of Code" (https://arxiv.org/abs/2411.16085).
     """
     mask = (mt * grad > 0).to(grad.dtype)
-    mask.div_(mask.mean().clamp_(min=1e-3))
+    mask.div_(mask.mean().clamp_min_(1e-3))
     if inplace:
         update_mt = mt.mul_(mask)
     else:

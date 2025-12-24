@@ -71,10 +71,10 @@ def _nnmf(matrix: torch.Tensor):
     EPSILON = 1e-12
     if M < N:
         scale = mu_factor.sum()
-        mu_factor.div_(scale.clamp_min(EPSILON))
+        mu_factor.div_(scale.clamp_min_(EPSILON))
     else:
         scale = mv_factor.sum()
-        mv_factor.div_(scale.clamp_min(EPSILON))
+        mv_factor.div_(scale.clamp_min_(EPSILON))
 
     return mu_factor, mv_factor
 

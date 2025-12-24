@@ -42,7 +42,7 @@ def _newton_schulz_iteration(
         X = X.mT
 
     # Normalize spectral norm to at most 1
-    X.div_(X.norm(dim=(-2, -1), keepdim=True).clamp_min(eps))
+    X.div_(X.norm(dim=(-2, -1), keepdim=True).clamp_min_(eps))
 
     # Select matrix multiplication function based on dimension (Batched vs Standard)
     mm_fn = torch.baddbmm if X.ndim > 2 else torch.addmm
@@ -270,7 +270,7 @@ def rms_adjustment(update: torch.Tensor, rms_rescaling: bool, lr):
         # This is slower due to norm calculations but it worked the best for t2i models.
         rms_target = 0.2 # default (Adam) value for RMS
         update_norm = torch.linalg.vector_norm(update)
-        return update.mul_(lr * rms_target * (update.numel()**0.5) / update_norm.clamp_min(1e-8))
+        return update.mul_(lr * rms_target * (update.numel()**0.5) / update_norm.clamp_min_(1e-8))
     else:
         # Original Muon scaling
         r, c = update.size(-2), update.size(-1)
@@ -305,7 +305,7 @@ def _auto_projection_for_adamuon(raw_update: torch.Tensor, kappa_p: float) -> to
     # Spherical (p=2) - rotation invariant
     if p == 2.0:
         # Normalize (L2=1)
-        norm = x.norm(p=2).clamp_(min=EPS)
+        norm = x.norm(p=2).clamp_min_(EPS)
         x.div_(norm)
         return x
 
@@ -314,5 +314,5 @@ def _auto_projection_for_adamuon(raw_update: torch.Tensor, kappa_p: float) -> to
     num = x.sign() * x.abs().pow_(p - 1)
 
     # Denominator: ||x||_p^(p-1)
-    den = x.norm(p=p).pow_(p - 1).clamp_(min=EPS)
+    den = x.norm(p=p).pow_(p - 1).clamp_min_(EPS)
     return num.div_(den)

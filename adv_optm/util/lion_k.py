@@ -14,7 +14,7 @@ def _get_lion_k_update(raw_update: torch.Tensor, kappa_p: float, auto_scale: boo
     To allow the same Learning Rate to be used for both, we scale p!=1 methods
     by √N so they match the magnitude of Standard Lion.
     """
-    eps = 1e-12
+    EPS = 1e-12
     x = raw_update
     p = kappa_p
     N = x.numel()
@@ -26,7 +26,7 @@ def _get_lion_k_update(raw_update: torch.Tensor, kappa_p: float, auto_scale: boo
     # Spherical Lion (p=2) - rotation invariant
     if p == 2.0:
         # Normalize (L2=1)
-        norm = x.norm(p=2).clamp_(min=eps)
+        norm = x.norm(p=2).clamp_min_(EPS)
         x.div_(norm)
 
         # Scale (L2=√N) if needed
@@ -41,7 +41,7 @@ def _get_lion_k_update(raw_update: torch.Tensor, kappa_p: float, auto_scale: boo
 
     if auto_scale:
         # Force global L2 norm to be √N
-        l2_norm = num.norm(p=2).clamp_(min=eps)
+        l2_norm = num.norm(p=2).clamp_min_(EPS)
         scale_factor = math.sqrt(N)
         # Result = Direction / Current_L2 * Target_L2
         return num.div_(l2_norm).mul_(scale_factor)
@@ -49,5 +49,5 @@ def _get_lion_k_update(raw_update: torch.Tensor, kappa_p: float, auto_scale: boo
     else:
         # Mathematical definition without scaling
         # Denominator: ||x||_p^(p-1)
-        norm_term = x.norm(p=p).pow_(p - 1).clamp_(min=eps)
+        norm_term = x.norm(p=p).pow_(p - 1).clamp_min_(EPS)
         return num.div_(norm_term)
