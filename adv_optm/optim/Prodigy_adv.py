@@ -343,13 +343,18 @@ class Prodigy_adv(torch.optim.Optimizer):
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
-            self._compiled_step_parameter(p, grad, state, group, beta2, dlr, random_int_tensor)
+            # TODO, workaround until pytorch#169634 is fixed
+            d = torch.as_tensor(group['d'])
+            step_fn = self._compiled_step_parameter(p, grad, state, group, beta2, dlr, random_int_tensor)
         else:
-            self._step_parameter(p, grad, state, group, beta2, dlr, random_int_tensor)
+            d = group['d']
+            step_fn = self._step_parameter
+
+        step_fn(p, grad, state, group, beta2, d, dlr, random_int_tensor)
 
         state['step'] += 1
 
-    def _step_parameter(self, p, grad, state, group, beta2, dlr, random_int_tensor):
+    def _step_parameter(self, p, grad, state, group, beta2, d, dlr, random_int_tensor):
         if grad.dtype != torch.float32 and self.factored:
             grad = grad.float()
         if group["orthogonal_gradient"]:
@@ -369,7 +374,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             d1, d2 = state['effective_shape']
 
             # Calculate scaled reshaped gradient for factored Prodigy step (g_t * d)
-            grad_scaled_reshaped = grad.view(d1, d2) * group['d']
+            grad_scaled_reshaped = grad.view(d1, d2) * d
 
             # Reconstruct momentum from previous step's factors
             if self.beta1 > 0:
@@ -423,7 +428,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 update.atan2_(denom)
             else:
                 denom = vt.sqrt()
-                update.div_(denom.add_(group['d'] * group['eps']))
+                update.div_(denom.add_(d * group['eps']))
             del denom
 
             # Factorize
@@ -438,9 +443,9 @@ class Prodigy_adv(torch.optim.Optimizer):
                 exp_avg = state['exp_avg']
 
                 if self.Simplified_AdEMAMix:
-                    alpha_mt = group['d']
+                    alpha_mt = d
                 else:
-                    alpha_mt = group['d'] * (1.0 - self.beta1)
+                    alpha_mt = d * (1.0 - self.beta1)
 
                 exp_avg.mul_(self.beta1).add_(grad, alpha=alpha_mt)
 
@@ -468,14 +473,14 @@ class Prodigy_adv(torch.optim.Optimizer):
                     update = grad
 
             exp_avg_sq = state['exp_avg_sq']
-            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=group['d'] * group['d'] * (1.0 - beta2))
+            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=d * d * (1.0 - beta2))
 
             if group['use_atan2']:
                 denom = exp_avg_sq.sqrt()
                 update.atan2_(denom)
             else:
                 denom = exp_avg_sq.sqrt()
-                update.div_(denom.add_(group['d'] * group['eps']))
+                update.div_(denom.add_(d * group['eps']))
             del denom
 
             update_scaling = dlr * A if group['use_atan2'] else dlr
@@ -491,9 +496,9 @@ class Prodigy_adv(torch.optim.Optimizer):
             p_slice = p.flatten()[::slice_p].float()
             p0 = p0.float()
 
-            self.d_numerator.add_((group['d'] / d0) * dlr * torch.dot(grad_slice, p0 - p_slice))
+            self.d_numerator.add_((d / d0) * dlr * torch.dot(grad_slice, p0 - p_slice))
 
-            alpha = ((group['d'] / d0) * group['d']) if safeguard_warmup else ((group['d'] / d0) * dlr)
+            alpha = ((d / d0) * d) if safeguard_warmup else ((d / d0) * dlr)
             s.mul_(self.beta3).add_(grad_slice, alpha=alpha)
             self.d_denom.add_(s.abs().sum())
 
