@@ -129,7 +129,7 @@ class Muon_adv(torch.optim.Optimizer):
         approx_mars: bool = False,
         mars_gamma: float = 0.025,
         # torch.compile
-        compiled_optimizer: bool = True,
+        compiled_optimizer: bool = False,
         # --- AdamW_adv specific parameters ---
         adam_betas: tuple[float, float] = (0.9, 0.99),
         adam_eps: float = 1e-8,
