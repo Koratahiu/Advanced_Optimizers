@@ -345,7 +345,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 random_int_tensor = param_update._get_random_int_for_sr(p)
             # TODO, workaround until pytorch#169634 is fixed
             d = torch.as_tensor(group['d'])
-            step_fn = self._compiled_step_parameter(p, grad, state, group, beta2, dlr, random_int_tensor)
+            step_fn = self._compiled_step_parameter
         else:
             d = group['d']
             step_fn = self._step_parameter
