@@ -294,7 +294,7 @@ def _auto_projection_for_adamuon(raw_update: torch.Tensor, kappa_p: float) -> to
 
     We take those findings and apply it to AdaMuon raw update.
     """
-    eps = 1e-12
+    EPS = 1e-12
     x = raw_update
     p = kappa_p
 
@@ -305,7 +305,7 @@ def _auto_projection_for_adamuon(raw_update: torch.Tensor, kappa_p: float) -> to
     # Spherical (p=2) - rotation invariant
     if p == 2.0:
         # Normalize (L2=1)
-        norm = x.norm(p=2).clamp_(min=eps)
+        norm = x.norm(p=2).clamp_(min=EPS)
         x.div_(norm)
         return x
 
@@ -314,5 +314,5 @@ def _auto_projection_for_adamuon(raw_update: torch.Tensor, kappa_p: float) -> to
     num = x.sign() * x.abs().pow_(p - 1)
 
     # Denominator: ||x||_p^(p-1)
-    den = x.norm(p=p).pow_(p - 1).clamp_(min=eps)
+    den = x.norm(p=p).pow_(p - 1).clamp_(min=EPS)
     return num.div_(den)
