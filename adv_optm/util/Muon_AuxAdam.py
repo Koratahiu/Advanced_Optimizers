@@ -99,12 +99,15 @@ def _adam_step_parameter(self, p, grad, state, group, is_compiled, random_int_te
                 # Update momentum in full-size
                 mt.lerp_(grad_reshaped, 1.0 - beta1_adam)
 
+                # Factorize
+                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
+
                 if group.get('adam_grams_moment'):
-                    update_mt = _grams_update(mt, grad_reshaped)
+                    update_mt = _grams_update(mt, grad_reshaped, inplace=True)
                 elif group.get('adam_cautious_mask'):
-                    update_mt = _cautious_update(mt, grad_reshaped)
+                    update_mt = _cautious_update(mt, grad_reshaped, inplace=True)
                 else:
-                    update_mt = mt.clone()
+                    update_mt = mt
 
             vt = _reconstruct_state(state['mu_v_nmf'], state['mv_v_nmf'])
             vt.mul_(beta2_adam).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2_adam)
@@ -116,8 +119,12 @@ def _adam_step_parameter(self, p, grad, state, group, is_compiled, random_int_te
 
                 if beta1_adam > 0:
                     update = update_mt.add_(mt_slow, alpha=alpha)
+                    del grad_reshaped
                 else:
                     update = grad_reshaped.add_(mt_slow, alpha=alpha)
+                # Factorize
+                state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
+                del mt_slow
             else:
                 if beta1_adam > 0:
                     update = update_mt
@@ -135,18 +142,12 @@ def _adam_step_parameter(self, p, grad, state, group, is_compiled, random_int_te
                 update.div_(denom)
             del denom
 
-            update_scaling = step_size * A if group['adam_use_atan2'] else step_size
-            update = update.view(p.shape).mul_(update_scaling)
-
-            # Compress updated moments and store new factors
-            if beta1_adam > 0:
-                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
-                del mt
-            if group.get('adam_use_AdEMAMix'):
-                state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
-                del mt_slow
+            # Factorize
             state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
             del vt
+
+            update_scaling = step_size * A if group['use_atan2'] else step_size
+            update = update.view(p.shape).mul_(update_scaling)
 
         else:  # Standard AdamW logic for non-factored tensors
             if beta1_adam > 0:

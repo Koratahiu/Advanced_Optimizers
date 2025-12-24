@@ -388,11 +388,9 @@ class Prodigy_adv(torch.optim.Optimizer):
                 state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
 
                 if self.grams_moment:
-                    update_mt = _grams_update(mt, grad_scaled_reshaped)
-                    del mt
+                    update_mt = _grams_update(mt, grad_scaled_reshaped, inplace=True)
                 elif self.cautious_mask:
-                    update_mt = _cautious_update(mt, grad_scaled_reshaped)
-                    del mt
+                    update_mt = _cautious_update(mt, grad_scaled_reshaped, inplace=True)
                 else:
                     update_mt = mt
 
