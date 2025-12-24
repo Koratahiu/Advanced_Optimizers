@@ -123,10 +123,10 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             fsdp_in_use=fsdp_in_use,
             prodigy_steps=prodigy_steps,
             d_limiter=d_limiter,
+            nnmf_factor=nnmf_factor,
         )
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
-        self.factored = nnmf_factor
         self.fsdp_in_use = fsdp_in_use
         super().__init__(params, defaults)
 
@@ -180,29 +180,18 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             self.fsdp_in_use = True
 
         grad = p.grad
-        if grad.dtype != torch.float32 and self.factored:
-            grad = grad.float()
-        if group["clip_threshold"] > 0.0:
-            grad_norm = torch.norm(grad.detach())
-            if grad_norm > group["clip_threshold"]:
-                clip_coef = group["clip_threshold"] / grad_norm
-                grad.mul_(clip_coef)
-        if group["orthogonal_gradient"]:
-            grad = _orthogonalize_gradient(p, grad)
         state = self.state[p]
 
         # State Initialization
         if 'step' not in state:
             state['step'] = 0
 
-            should_factor = (
-                self.factored and
+            state['factored'] = (
+                group['nnmf_factor'] and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
             )
 
-            state['factored'] = should_factor
-
-            dtype = torch.float32 if self.factored else p.dtype
+            dtype = torch.float32 if state['factored'] else p.dtype
 
             slice_p = group['slice_p']
 
@@ -242,6 +231,15 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         step_param_fn(p, grad, state, group, dlr, random_int_tensor)
 
     def _step_parameter(self, p, grad, state, group, dlr, random_int_tensor):
+        if grad.dtype != torch.float32 and state['factored']:
+            grad = grad.float()
+        if group["clip_threshold"] > 0.0:
+            grad_norm = torch.norm(grad.detach())
+            if grad_norm > group["clip_threshold"]:
+                clip_coef = group["clip_threshold"] / grad_norm
+                grad.mul_(clip_coef)
+        if group["orthogonal_gradient"]:
+            grad = _orthogonalize_gradient(p, grad)
 
         # Lion-K Logic
         kappa_p = group.get("kappa_p", 1.0)
@@ -288,11 +286,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             # Fallback to standard Lion logic
             exp_avg = state["exp_avg"]
 
-            # Compute update term and sign for the update
-            if exp_avg.dtype != torch.float32 and self.factored:
-                exp_avg = exp_avg.float()
-
-            # Compute update term c_t
+            # Compute update term
             raw_update = exp_avg.mul(self.beta1).add_(grad, alpha=group['d'] * (1-self.beta1))
 
             update = _get_lion_k_update(raw_update, kappa_p)

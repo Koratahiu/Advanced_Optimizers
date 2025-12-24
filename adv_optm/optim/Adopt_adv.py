@@ -167,6 +167,7 @@ class Adopt_adv(torch.optim.Optimizer):
             "alpha_grad": alpha_grad,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
+            "nnmf_factor": nnmf_factor,
             "compiled_optimizer": compiled_optimizer,
         }
         self.clip_lambda = clip_lambda
@@ -177,7 +178,6 @@ class Adopt_adv(torch.optim.Optimizer):
         self.orthogonal_gradient = orthogonal_gradient
         self.use_AdEMAMix = use_AdEMAMix and not Simplified_AdEMAMix
         self.Simplified_AdEMAMix = Simplified_AdEMAMix
-        self.factored = nnmf_factor
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
         super().__init__(params, defaults)
@@ -215,14 +215,12 @@ class Adopt_adv(torch.optim.Optimizer):
         if 'step' not in state:
             state['step'] = 0
 
-            should_factor = (
-                self.factored and
+            state['factored'] = (
+                group['nnmf_factor'] and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
             )
 
-            state['factored'] = should_factor
-
-            dtype = torch.float32 if self.factored else p.dtype
+            dtype = torch.float32 if state['factored'] else p.dtype
 
             if state['factored']:
                 state['effective_shape'] = _get_effective_shape(p.numel())
@@ -286,7 +284,7 @@ class Adopt_adv(torch.optim.Optimizer):
         state['step'] += 1
 
     def _step_parameter(self, p, grad, state, group, lr, beta1, beta2, random_int_tensor):
-        if self.factored and grad.dtype != torch.float32:
+        if state['factored'] and grad.dtype != torch.float32:
             grad = grad.float()
         if self.orthogonal_gradient:
             grad = _orthogonalize_gradient(p, grad)

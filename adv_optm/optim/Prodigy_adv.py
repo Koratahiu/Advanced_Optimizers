@@ -203,13 +203,13 @@ class Prodigy_adv(torch.optim.Optimizer):
             "alpha_grad": alpha_grad,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
+            "nnmf_factor": nnmf_factor,
         }
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask and not Simplified_AdEMAMix
         self.grams_moment = grams_moment and not Simplified_AdEMAMix
         self.use_AdEMAMix = use_AdEMAMix and not Simplified_AdEMAMix
         self.Simplified_AdEMAMix = Simplified_AdEMAMix
-        self.factored = nnmf_factor
         self.fsdp_in_use = fsdp_in_use
 
         self.kourkoutas_beta = kourkoutas_beta
@@ -278,16 +278,14 @@ class Prodigy_adv(torch.optim.Optimizer):
         if 'step' not in state:
             state['step'] = 0
 
-            should_factor = (
-                self.factored and
+            state['factored'] = (
+                group['nnmf_factor'] and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
             )
 
-            state['factored'] = should_factor
-
             slice_p = group['slice_p']
 
-            dtype = torch.float32 if self.factored else p.dtype
+            dtype = torch.float32 if state['factored'] else p.dtype
             device = p.device
 
             if state['factored']:
@@ -355,7 +353,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         state['step'] += 1
 
     def _step_parameter(self, p, grad, state, group, beta2, d, dlr, random_int_tensor):
-        if grad.dtype != torch.float32 and self.factored:
+        if grad.dtype != torch.float32 and state['factored']:
             grad = grad.float()
         if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)

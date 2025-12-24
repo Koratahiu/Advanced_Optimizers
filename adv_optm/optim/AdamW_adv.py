@@ -142,12 +142,12 @@ class AdamW_adv(torch.optim.Optimizer):
             "beta3_ema": beta3_ema, "alpha": alpha, "compiled_optimizer": compiled_optimizer,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
+            "nnmf_factor": nnmf_factor
         }
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
         self.grams_moment = grams_moment
         self.use_AdEMAMix = use_AdEMAMix
-        self.factored = nnmf_factor
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
         super().__init__(params, defaults)
@@ -191,14 +191,12 @@ class AdamW_adv(torch.optim.Optimizer):
         if 'step' not in state:
             state['step'] = 0
 
-            should_factor = (
-                self.factored and
+            state['factored'] = (
+                group['nnmf_factor'] and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
             )
 
-            state['factored'] = should_factor
-
-            dtype = torch.float32 if self.factored else p.dtype
+            dtype = torch.float32 if state['factored'] else p.dtype
             device = p.device
 
             if state['factored']:
@@ -263,7 +261,7 @@ class AdamW_adv(torch.optim.Optimizer):
         state['step'] += 1
 
     def _step_parameter(self, p, grad, state, group, step_size, beta1, beta2, sqrt_bias_correction2, random_int_tensor):
-        if grad.dtype != torch.float32 and self.factored:
+        if grad.dtype != torch.float32 and state['factored']:
             grad = grad.float()
         if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)
