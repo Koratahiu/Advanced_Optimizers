@@ -320,13 +320,12 @@ class Muon_adv(torch.optim.Optimizer):
 
                 if nesterov:
                     # Nesterov momentum
-                    update = grad_reshaped.lerp_(mt_buf, beta1)
+                    update = grad_reshaped.lerp(mt_buf, beta1)
                 elif Simplified_AdEMAMix:
-                    update = torch.add(mt_buf, grad_reshaped, alpha=alpha_grad, out=grad_reshaped)
+                    update = torch.add(mt_buf, grad_reshaped, alpha=alpha_grad)
                 else:
                     # Standard momentum
                     update = mt_buf.clone()
-                    del grad_reshaped
 
                 # Factorize
                 state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True)

@@ -275,8 +275,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
 
             # update = mt + (grad_reshaped * alpha_grad)
-            # We do this in-place to prevent reallocation
-            update = torch.add(mt, grad_reshaped, alpha=alpha_grad, out=grad_reshaped)
+            update = torch.add(mt, grad_reshaped, alpha=alpha_grad)
 
             # Factorize
             state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)

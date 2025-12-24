@@ -342,8 +342,6 @@ class Adopt_adv(torch.optim.Optimizer):
                 else:
                     update_mt = mt
 
-            del grad_reshaped
-
             if self.use_AdEMAMix:
                 # Reconstruct AdEMAMix EMA
                 mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)

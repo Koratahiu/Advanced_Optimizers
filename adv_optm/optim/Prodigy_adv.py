@@ -370,9 +370,7 @@ class Prodigy_adv(torch.optim.Optimizer):
 
         if state['factored']:
             d1, d2 = state['effective_shape']
-
-            # Calculate scaled reshaped gradient for factored Prodigy step (g_t * d)
-            grad_scaled_reshaped = grad.view(d1, d2) * d
+            grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct momentum from previous step's factors
             if self.beta1 > 0:
@@ -380,44 +378,43 @@ class Prodigy_adv(torch.optim.Optimizer):
 
                 # Update momentum in full-size
                 if self.Simplified_AdEMAMix:
-                    mt.mul_(self.beta1).add_(grad_scaled_reshaped)
+                    alpha_mt = d
                 else:
-                    mt.lerp_(grad_scaled_reshaped, 1 - self.beta1)
+                    alpha_mt = d * (1.0 - self.beta1)
+
+                mt.mul_(self.beta1).add_(grad_reshaped, alpha=alpha_mt)
 
                 # Factorize
                 state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
 
                 if self.grams_moment:
-                    update_mt = _grams_update(mt, grad_scaled_reshaped, inplace=True)
+                    update_mt = _grams_update(mt, grad_reshaped, inplace=True)
                 elif self.cautious_mask:
-                    update_mt = _cautious_update(mt, grad_scaled_reshaped, inplace=True)
+                    update_mt = _cautious_update(mt, grad_reshaped, inplace=True)
                 else:
                     update_mt = mt
 
             vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
-            vt.mul_(beta2).addcmul_(grad_scaled_reshaped, grad_scaled_reshaped, value=1.0 - beta2)
+            vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=d * d * (1.0 - beta2))
 
             if self.use_AdEMAMix:
                 mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
 
-                mt_slow.lerp_(grad_scaled_reshaped, 1 - beta3_ema)
+                mt_slow.lerp_(grad_reshaped, 1 - beta3_ema)
                 if self.beta1 > 0:
-                    del grad_scaled_reshaped
                     update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
-                    update = grad_scaled_reshaped.add_(mt_slow, alpha=alpha)
+                    update = grad_reshaped.add(mt_slow, alpha=alpha)
                 # Factorize
                 state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
                 del mt_slow
             elif self.Simplified_AdEMAMix:
-                update = update_mt.add_(grad_scaled_reshaped, alpha=alpha_grad)
-                del grad_scaled_reshaped
+                update = update_mt.add_(grad_reshaped, alpha=alpha_grad)
             else:
                 if self.beta1 > 0:
                     update = update_mt
-                    del grad_scaled_reshaped
                 else:
-                    update = grad_scaled_reshaped
+                    update = grad_reshaped.clone()
 
             if group['use_atan2']:
                 denom = vt.sqrt()
@@ -452,7 +449,6 @@ class Prodigy_adv(torch.optim.Optimizer):
                 else:
                     update_mt = exp_avg.clone()
 
-
             if self.use_AdEMAMix:
                 exp_avg_slow = state['exp_avg_slow']
                 exp_avg_slow.lerp_(grad, 1 - beta3_ema)
@@ -466,7 +462,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 if self.beta1 > 0:
                     update = update_mt
                 else:
-                    update = grad
+                    update = grad.clone()
 
             exp_avg_sq = state['exp_avg_sq']
             exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=d * d * (1.0 - beta2))

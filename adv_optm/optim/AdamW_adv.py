@@ -305,18 +305,16 @@ class AdamW_adv(torch.optim.Optimizer):
 
                 if beta1 > 0:
                     update = update_mt.add_(mt_slow, alpha=alpha)
-                    del grad_reshaped
                 else:
-                    update = grad_reshaped.add_(mt_slow, alpha=alpha)
+                    update = grad_reshaped.add(mt_slow, alpha=alpha)
                 # Factorize
                 state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
                 del mt_slow
             else:
                 if beta1 > 0:
                     update = update_mt
-                    del grad_reshaped
                 else:
-                    update = grad_reshaped
+                    update = grad_reshaped.clone()
 
             if group['use_atan2']:
                 denom = vt.sqrt()

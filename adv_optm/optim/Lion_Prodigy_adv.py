@@ -254,19 +254,16 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
         if state['factored']:
             # Factored Path
             d1, d2 = state['effective_shape']
-
-            # Calculate scaled reshaped gradient for factored Prodigy step (g_t * d)
-            grad_scaled_reshaped = grad.view(d1, d2) * group['d']
+            grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct momentum m_{t-1}
             exp_avg = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
-            # Compute update term c_t = β1*m_{t-1} + (1-β1)*g_t*d
-            update = torch.lerp(grad_scaled_reshaped, exp_avg, self.beta1)
+            # Compute update term
+            update = exp_avg.mul(self.beta1).add_(grad_reshaped, alpha=group['d'] * (1-self.beta1))
 
             # Update momentum m_t = β2*m_{t-1} + (1-β2)*d*g_t
-            exp_avg.lerp_(grad_scaled_reshaped, 1 - self.beta2)
-            del grad_scaled_reshaped
+            exp_avg.lerp_(grad_reshaped, 1 - self.beta2)
 
             # Compress new momentum m_t and store factors
             state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True)
@@ -275,7 +272,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             update = _get_lion_k_update(update, kappa_p)
 
             if self.cautious_mask:
-                mask = (update * grad_scaled_reshaped > 0).to(grad_scaled_reshaped.dtype)
+                mask = (update * grad_reshaped > 0).to(grad_reshaped.dtype)
                 mask.div_(mask.mean().clamp_min_(1e-3))
                 update.mul_(mask)
                 del mask

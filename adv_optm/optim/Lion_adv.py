@@ -199,7 +199,6 @@ class Lion_adv(torch.optim.Optimizer):
             # Standard Lion momentum update
             # m_t = beta2 * m_{t-1} + (1-beta2) * g_t
             exp_avg.lerp_(grad_reshaped, 1 - beta2)
-            del grad_reshaped
 
             # Compress new momentum m_t and store factors
             state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True)
