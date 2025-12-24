@@ -224,13 +224,16 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
+            # TODO, workaround until pytorch#169634 is fixed
+            d = torch.as_tensor(group['d'])
             step_param_fn = self._compiled_step_parameter
         else:
+            d = group['d']
             step_param_fn = self._step_parameter
 
-        step_param_fn(p, grad, state, group, dlr, random_int_tensor)
+        step_param_fn(p, grad, state, group, d, dlr, random_int_tensor)
 
-    def _step_parameter(self, p, grad, state, group, dlr, random_int_tensor):
+    def _step_parameter(self, p, grad, state, group, d, dlr, random_int_tensor):
         if grad.dtype != torch.float32 and state['factored']:
             grad = grad.float()
         if group["clip_threshold"] > 0.0:
@@ -260,7 +263,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             exp_avg = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
             # Compute update term
-            update = exp_avg.mul(self.beta1).add_(grad_reshaped, alpha=group['d'] * (1-self.beta1))
+            update = exp_avg.mul(self.beta1).add_(grad_reshaped, alpha=d * (1-self.beta1))
 
             # Update momentum m_t = β2*m_{t-1} + (1-β2)*d*g_t
             exp_avg.lerp_(grad_reshaped, 1 - self.beta2)
@@ -284,7 +287,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             exp_avg = state["exp_avg"]
 
             # Compute update term
-            raw_update = exp_avg.mul(self.beta1).add_(grad, alpha=group['d'] * (1-self.beta1))
+            raw_update = exp_avg.mul(self.beta1).add_(grad, alpha=d * (1-self.beta1))
 
             update = _get_lion_k_update(raw_update, kappa_p)
 
@@ -297,7 +300,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             update.mul_(dlr)
 
             # Update momentum using fused lerp
-            exp_avg.mul_(self.beta2).add_(grad, alpha=group['d'] * (1 - self.beta2))
+            exp_avg.mul_(self.beta2).add_(grad, alpha=d * (1 - self.beta2))
 
         prodigy_steps = group['prodigy_steps']
         if prodigy_steps <= 0 or group['k'] < prodigy_steps:
@@ -309,9 +312,9 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             p_slice = p.flatten()[::slice_p].float()
             p0 = p0.float()
 
-            self.d_numerator.add_((group['d'] / d0) * dlr * torch.dot(grad_slice, p0 - p_slice))
+            self.d_numerator.add_((d / d0) * dlr * torch.dot(grad_slice, p0 - p_slice))
 
-            alpha = ((group['d'] / d0) * group['d']) if safeguard_warmup else ((group['d'] / d0) * dlr)
+            alpha = ((d / d0) * d) if safeguard_warmup else ((d / d0) * dlr)
             s.mul_(self.beta3).add_(grad_slice, alpha=alpha)
             self.d_denom.add_(s.abs().sum())
 
