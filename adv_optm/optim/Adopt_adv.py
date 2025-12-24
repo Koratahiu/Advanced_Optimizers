@@ -421,7 +421,7 @@ class Adopt_adv(torch.optim.Optimizer):
             update.mul_(update_scaling)
 
             # Update second moment v_t for the next step using raw g_t
-            vt.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
+            vt.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
         # Parameter Update
         param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)

@@ -359,7 +359,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 update = update_mt if beta1 > 0 else grad.clone()
 
             exp_avg_sq = state['exp_avg_sq']
-            exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
+            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
             if group['use_atan2']:
                 denom = exp_avg_sq.sqrt()
