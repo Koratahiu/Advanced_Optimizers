@@ -56,7 +56,7 @@ def _adam_step_parameter(self, p, grad, state, group, is_compiled, random_int_te
 
     if self.kourkoutas_helper:
         # Prepare Kourkoutas-β once per optimizer step.
-        self.kourkoutas_helper.maybe_prepare_step(step)
+        self.kourkoutas_helper.maybe_prepare_step(step, p.device)
         # Get the dynamic beta2_adam calculated in prepare_step()
         beta2_adam = self.kourkoutas_helper.get_beta2(p, group)
 
