@@ -399,7 +399,8 @@ class Muon_adv(torch.optim.Optimizer):
 
             param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 
-        compiled_muon_step_parameter(state, grad, group, group['lr'], random_int_tensor)
+        lr = torch.as_tensor(group['lr'])
+        compiled_muon_step_parameter(state, grad, group, lr, random_int_tensor)
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
