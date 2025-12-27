@@ -52,19 +52,65 @@ class KourkoutasHelper:
 
         self._layer_info_built = True
 
-    def prepare_step(self, current_step: int):
+    def _get_or_init_layer_ema_tensor(self, layer_key, layer_params, device):
+        """
+        Retrieves the EMA tensor for this layer.
+        It handles synchronization between the internal layer_state and 
+        the external optimizer.state (which is required for state_dict saving/loading).
+        """
+        # Initialize container in layer_state if missing
+        if layer_key not in self.layer_state:
+            self.layer_state[layer_key] = {
+                'sum_sq_accumulator': torch.tensor(0.0, device=device, dtype=torch.float32)
+            }
+
+        internal_ema = self.layer_state[layer_key].get('kourkoutas_r_ema')
+
+        # Check optimizer.state for any existing state (e.g. from a loaded checkpoint)
+        # We check the first parameter in the list to see if it has state.
+        # If a checkpoint was loaded, optimizer.state[p] will contain the tensor.
+        representative_p = layer_params[0]
+        external_ema = self.optimizer.state[representative_p].get('kourkoutas_r_ema')
+
+        # Case A: Desync detected (Optimizer has state, but Internal doesn't, or they differ).
+        # This usually happens after load_state_dict(). We trust the optimizer.state.
+        if external_ema is not None and (internal_ema is None or internal_ema is not external_ema):
+            # Adopt the external tensor as our working tensor
+            self.layer_state[layer_key]['kourkoutas_r_ema'] = external_ema
+
+            # Ensure ALL params in this layer point to this exact tensor object
+            # (Fixes any fragmentation if only some params had state)
+            for p in layer_params:
+                self.optimizer.state[p]['kourkoutas_r_ema'] = external_ema
+
+            return external_ema
+
+        # Case B: No state anywhere. Create new.
+        if internal_ema is None:
+            new_ema = torch.tensor(0.0, device=device, dtype=torch.float32)
+            self.layer_state[layer_key]['kourkoutas_r_ema'] = new_ema
+
+            # Register this tensor in optimizer.state for ALL params so it gets saved
+            for p in layer_params:
+                self.optimizer.state[p]['kourkoutas_r_ema'] = new_ema
+
+            return new_ema
+
+        # Case C: Internal state exists and looks valid.
+        # We just need to ensure the link to optimizer.state is maintained (just in case).
+        # This is a cheap reference assignment.
+        for p in layer_params:
+            if 'kourkoutas_r_ema' not in self.optimizer.state[p]:
+                 self.optimizer.state[p]['kourkoutas_r_ema'] = internal_ema
+
+        return internal_ema
+
+    def prepare_step(self, current_step: int, device):
         """
         Calculates dynamic beta2 for all layers using the completed scalar accumulators
         from the PREVIOUS step. Should be called once at the start of an optimizer step.
         """
-
         beta2_log = []
-        # These are just for the sample log, initialize them
-        sun, pooled_grad_norm, r_ema_tensor = (torch.tensor(0.0),)*3
-
-        # The optimizer that owns this helper holds the master defaults for K-b.
-        # This is crucial in hybrid optimizers where some param_groups might not
-        # have all K-b keys populated, preventing KeyErrors.
         master_defaults = self.optimizer.defaults
 
         for layer_key, info in self.layer_info.items():
@@ -73,16 +119,13 @@ class KourkoutasHelper:
             if not group.get('kourkoutas_beta', False) and not group.get('adam_kourkoutas_beta', False):
                 continue
 
-            first_param_in_layer = info['params'][0]
-            param_state = self.optimizer.state[first_param_in_layer]
+            # Retrieve the EMA tensor. This function ensures the tensor is present
+            # in self.optimizer.state[p] for all parameters, ensuring state_dict support.
+            r_ema_tensor = self._get_or_init_layer_ema_tensor(layer_key, info['params'], device)
 
-            if layer_key not in self.layer_state:
-                self.layer_state[layer_key] = {
-                    'sum_sq_accumulator': torch.tensor(0.0, device=first_param_in_layer.device, dtype=torch.float32)
-                }
-
-            if 'kourkoutas_r_ema' not in param_state:
-                param_state['kourkoutas_r_ema'] = torch.tensor(0.0, device=first_param_in_layer.device, dtype=torch.float32)
+            # Get accumulator
+            accumulator = self.layer_state[layer_key]['sum_sq_accumulator']
+            pooled_grad_norm = torch.sqrt(accumulator)
 
             # Use group-specific K-b settings, falling back to the optimizer's master defaults.
             # This makes the helper robust against param groups that enable kourkoutas_beta
@@ -99,16 +142,10 @@ class KourkoutasHelper:
             tiny_spike = group.get(f'{prefix}tiny_spike', master_defaults[f'{prefix}tiny_spike'])
             k_warmup_steps = group.get(f'{prefix}k_warmup_steps', master_defaults[f'{prefix}k_warmup_steps'])
 
-            r_ema_tensor = param_state['kourkoutas_r_ema']
-            accumulator = self.layer_state[layer_key]['sum_sq_accumulator']
-
-            pooled_grad_norm = torch.sqrt(accumulator)
-
             # Update the persistent EMA tensor in-place.
             r_ema_tensor.mul_(ema_alpha).add_(pooled_grad_norm, alpha=1.0 - ema_alpha)
 
-            sun = torch.tensor(0.0, device=r_ema_tensor.device) # Default sun to 0 for warmup
-
+            # Calculate Beta2
             if current_step < k_warmup_steps:
                 beta2 = beta2_max
             else:
@@ -117,26 +154,26 @@ class KourkoutasHelper:
                 beta2 = beta2_max - (beta2_max - beta2_min) * sun
 
             # Store the final calculated beta2 in the helper's transient state for this step.
-            self.layer_state[layer_key]['dynamic_beta2'] = beta2.item() if isinstance(beta2, torch.Tensor) else beta2
+            self.layer_state[layer_key]['dynamic_beta2'] = beta2.item() if isinstance(beta2, torch.Tensor) and not group.get('compiled_optimizer', False) else beta2
 
             # Reset the accumulator for the next optimizer step.
             accumulator.zero_()
 
             beta2_log.append(self.layer_state[layer_key]['dynamic_beta2'])
 
-        # Always compute stats for TensorBoard
+        # Compute stats for TensorBoard
         if beta2_log:
-            beta2_tensor = torch.tensor(beta2_log, device='cpu')
+            beta2_tensor = torch.as_tensor(beta2_log, device='cpu')
             self.last_beta2_stats = {
-                'mean': beta2_tensor.mean().item(),
-            }
+                'mean': beta2_tensor.mean().item()
+                }
 
-    def maybe_prepare_step(self, current_step: int):
+    def maybe_prepare_step(self, current_step: int, device):
         """
         A universal guard that calls prepare_step() exactly once per training step.
         """
         if self._current_step_prepared < current_step:
-            self.prepare_step(current_step)
+            self.prepare_step(current_step, device)
             self._current_step_prepared = current_step
 
     def accumulate_gradient_sq_norm(self, p: torch.Tensor, grad: torch.Tensor):

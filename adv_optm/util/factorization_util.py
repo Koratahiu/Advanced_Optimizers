@@ -16,12 +16,11 @@ def _reconstruct_state(factors: tuple, signed: bool):
         unpacked_sign = _unpack_bools(sign, original_m=d2)
         torch.where(unpacked_sign, full_state, -full_state, out=full_state)
         del unpacked_sign
-        # We cast here to FP32 to prevent issues where the states are saved in 16-bit
-        return full_state.float()
+        return full_state
     else:
         # mu_factor, mv_factor = factors
         full_state = _unnmf(factors)
-        return full_state.float()
+        return full_state
 
 @torch.no_grad()
 def _factorize_state(full_state: torch.Tensor, signed: bool):
@@ -53,7 +52,9 @@ def _get_effective_shape(numel: int) -> tuple[int, int]:
 @torch.no_grad()
 def _unnmf(row_col: tuple) -> torch.Tensor:
     """Reconstructs a matrix from its rank-1 factors (outer product)."""
-    return torch.outer(row_col[0], row_col[1])
+    row, col = row_col
+    # Ensure both tensors are float32
+    return torch.outer(row.float(), col.float())
 
 @torch.no_grad()
 def _nnmf(matrix: torch.Tensor):

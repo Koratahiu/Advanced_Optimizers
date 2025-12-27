@@ -258,7 +258,7 @@ class Adopt_adv(torch.optim.Optimizer):
         current_step = state['step']
         if group.get('kourkoutas_beta', False):
             # Call prepare_step() once at the beginning of the step for all params
-            self.kourkoutas_helper.maybe_prepare_step(current_step)
+            self.kourkoutas_helper.maybe_prepare_step(current_step, p.device)
             # Get the dynamic beta2 calculated in prepare_step()
             beta2 = self.kourkoutas_helper.get_beta2(p, group)
 

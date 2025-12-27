@@ -211,7 +211,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         current_step = state['step']
         if group.get('kourkoutas_beta', False):
             # Call prepare_step() once at the beginning of the step for all params
-            self.kourkoutas_helper.maybe_prepare_step(current_step)
+            self.kourkoutas_helper.maybe_prepare_step(current_step, p.device)
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
             # Get the dynamic beta2 calculated in prepare_step()
