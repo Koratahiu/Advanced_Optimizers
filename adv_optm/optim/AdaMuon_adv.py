@@ -396,7 +396,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     del denom, vt_buf
 
                 # RMS-aligned scaling
-                step_scale = lr * A if group['use_atan2'] else lr
+                step_scale = lr * A if group['use_atan2'] and not group['normuon_variant'] else lr
                 rms_adjustment(update, group['rms_rescaling'], step_scale)
 
                 update = update.reshape(p.shape)
@@ -454,7 +454,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     del denom
 
                 # RMS-aligned rescaling
-                step_scale = lr * A if group['use_atan2'] else lr
+                step_scale = lr * A if group['use_atan2'] and not group['normuon_variant'] else lr
                 rms_adjustment(update, group['rms_rescaling'], step_scale)
 
                 update = update.reshape(original_shape)
