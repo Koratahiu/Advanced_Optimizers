@@ -182,7 +182,7 @@ class KourkoutasHelper:
         """
         layer_key = self.optimizer.layer_key_fn(p)
 
-        if layer_key in self.layer_info:
+        if layer_key in self.layer_info and layer_key in self.layer_state:
             # Accumulate for the *next* step's prepare_step call
             self.layer_state[layer_key]['sum_sq_accumulator'] += torch.sum(grad.detach().pow(2)).float()
 
