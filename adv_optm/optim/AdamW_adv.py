@@ -10,7 +10,7 @@ from ..util.update_util import _grams_update, _cautious_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 
-A = torch.as_tensor(4 / math.pi)
+A = 4 / math.pi
 
 class AdamW_adv(torch.optim.Optimizer):
     """
@@ -249,6 +249,7 @@ class AdamW_adv(torch.optim.Optimizer):
         random_int_tensor = None
 
         if group.get('compiled_optimizer', False):
+            step_size = torch.as_tensor(step_size)
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)

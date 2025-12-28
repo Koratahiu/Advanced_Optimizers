@@ -11,7 +11,7 @@ from ..util.Kourkoutas import KourkoutasHelper
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.update_util import _grams_update, _cautious_update
 
-A = torch.as_tensor(4 / math.pi)
+A = 4 / math.pi
 
 class Prodigy_adv(torch.optim.Optimizer):
     """
@@ -343,6 +343,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 random_int_tensor = param_update._get_random_int_for_sr(p)
             # TODO, workaround until pytorch#169634 is fixed
             d = torch.as_tensor(group['d'])
+            dlr = torch.as_tensor(dlr)
             step_param_fn = self._compiled_step_parameter
         else:
             d = group['d']

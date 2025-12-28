@@ -7,7 +7,7 @@ from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.update_util import _grams_update, _cautious_update
 
-A = torch.as_tensor(4 / math.pi)
+A = 4 / math.pi
 
 @torch.no_grad()
 def _init_auxadam_state(self, p, group):
@@ -72,6 +72,9 @@ def _adam_step_parameter(self, p, grad, state, group, is_compiled, random_int_te
     state['step'] += 1
 
     step_size = group['lr'] / bias_correction1
+
+    if group.get('compiled_optimizer', False):
+        step_size = torch.as_tensor(step_size)
 
     @torch.compile(fullgraph=True, disable= not is_compiled)
     def compiled_muon_step_parameter(state, grad, group, step_size, sqrt_bias_correction2, random_int_tensor):

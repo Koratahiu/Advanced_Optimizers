@@ -9,7 +9,7 @@ from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.update_util import _grams_update, _cautious_update
 
-A = torch.as_tensor(4 / math.pi)
+A = 4 / math.pi
 
 class Adopt_adv(torch.optim.Optimizer):
     """
@@ -270,14 +270,15 @@ class Adopt_adv(torch.optim.Optimizer):
         random_int_tensor = None
 
         if group.get('compiled_optimizer', False):
+            lr = torch.as_tensor(group['lr'])
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
             step_param_fn = self._compiled_step_parameter
         else:
+            lr = group['lr']
             step_param_fn = self._step_parameter
 
-        lr = group['lr']
 
         step_param_fn(p, grad, state, group, lr, beta1, beta2, random_int_tensor)
 

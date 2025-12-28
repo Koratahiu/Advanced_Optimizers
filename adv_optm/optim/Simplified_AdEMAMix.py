@@ -244,7 +244,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
             # TODO, workaround until pytorch#169634 is fixed
-            sqrt_den_num = torch.as_tensor(sqrt_den_num)
+            lr = torch.as_tensor(lr)
             step_param_fn = self._compiled_step_parameter
         else:
             step_param_fn = self._step_parameter
@@ -289,10 +289,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
             del vt
 
-            if group['use_bias_correction']:
-                update.mul_(sqrt_den_num)
-
-            update = update.view(p.shape).mul_(lr)
+            update = update.view(p.shape).mul_(lr * sqrt_den_num)
 
         else:  # Standard optimizer logic for non-factored tensors
             exp_avg_sq = state['exp_avg_sq']
@@ -308,8 +305,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             update.div_(denom)
             del denom
 
-            update_scaling = lr * sqrt_den_num if group['use_bias_correction'] else lr
-            update.mul_(update_scaling)
+            update.mul_(lr * sqrt_den_num)
 
         param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 
