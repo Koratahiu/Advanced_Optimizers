@@ -226,7 +226,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
                 random_int_tensor = param_update._get_random_int_for_sr(p)
             # TODO, workaround until pytorch#169634 is fixed
             d = torch.as_tensor(group['d'])
-            dlr = torch.as_tensor(group['dlr'])
+            dlr = torch.as_tensor(dlr)
             step_param_fn = self._compiled_step_parameter
         else:
             d = group['d']

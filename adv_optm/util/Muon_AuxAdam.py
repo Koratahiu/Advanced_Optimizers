@@ -147,7 +147,7 @@ def _adam_step_parameter(self, p, grad, state, group, is_compiled, random_int_te
             state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
             del vt
 
-            update_scaling = step_size * A if group['use_atan2'] else step_size
+            update_scaling = step_size * A if group['adam_use_atan2'] else step_size
             update = update.view(p.shape).mul_(update_scaling)
 
         else:  # Standard AdamW logic for non-factored tensors

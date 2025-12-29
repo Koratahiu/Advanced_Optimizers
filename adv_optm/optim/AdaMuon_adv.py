@@ -332,12 +332,13 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             if grad.dtype != torch.float32 and state.get('factored', False):
                 grad = grad.float()
-            if group.get("orthogonal_gradient"):
-                grad = _orthogonalize_gradient(p, grad)
 
             # MARS-M Approximated (Variance Reduction)
             if group.get('approx_mars', False):
                 grad = approx_mars(grad, state['last_grad'], group['mars_gamma'], beta1)
+
+            if group.get("orthogonal_gradient"):
+                grad = _orthogonalize_gradient(p, grad)
 
             if state['factored']: # Factored Muon
                 d1, d2 = state['effective_shape']
