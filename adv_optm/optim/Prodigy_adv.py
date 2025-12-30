@@ -188,9 +188,6 @@ class Prodigy_adv(torch.optim.Optimizer):
             use_atan2 = False
         if kourkoutas_beta and not (betas[1] > beta2_min):
             raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
-        if Simplified_AdEMAMix and alpha_grad > 0 and not d_limiter:
-            # scales d_coef by alpha_grad, this force prodigy to behave well with Simplified_AdEMAMix.
-            d_coef = d_coef/alpha_grad
 
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
@@ -342,8 +339,8 @@ class Prodigy_adv(torch.optim.Optimizer):
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
             # TODO, workaround until pytorch#169634 is fixed
-            d = torch.as_tensor(group['d'])
-            dlr = torch.as_tensor(dlr)
+            d = torch.as_tensor(group['d'], dtype=torch.float64)
+            dlr = torch.as_tensor(dlr, dtype=torch.float64)
             step_param_fn = self._compiled_step_parameter
         else:
             d = group['d']
@@ -401,21 +398,21 @@ class Prodigy_adv(torch.optim.Optimizer):
             if self.use_AdEMAMix:
                 mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
 
-                mt_slow.lerp_(grad_reshaped, 1 - beta3_ema)
+                mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=d * (1.0 - beta3_ema))
                 if self.beta1 > 0:
                     update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
-                    update = grad_reshaped.add(mt_slow, alpha=alpha)
+                    update = grad_reshaped.mul(d).add_(mt_slow, alpha=alpha)
                 # Factorize
                 state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
                 del mt_slow
             elif self.Simplified_AdEMAMix:
-                update = update_mt.add_(grad_reshaped, alpha=alpha_grad)
+                update = update_mt.add_(grad_reshaped, alpha=alpha_grad * d)
             else:
                 if self.beta1 > 0:
                     update = update_mt
                 else:
-                    update = grad_reshaped.clone()
+                    update = grad_reshaped.mul(d)
 
             if group['use_atan2']:
                 denom = vt.sqrt()
@@ -452,18 +449,18 @@ class Prodigy_adv(torch.optim.Optimizer):
 
             if self.use_AdEMAMix:
                 exp_avg_slow = state['exp_avg_slow']
-                exp_avg_slow.lerp_(grad, 1 - beta3_ema)
+                exp_avg_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=d * (1.0 - beta3_ema))
                 if self.beta1 > 0:
                     update = update_mt.add_(exp_avg_slow, alpha=alpha)
                 else:
-                    update = grad.add(exp_avg_slow, alpha=alpha)
+                    update = grad.mul(d).add_(exp_avg_slow, alpha=alpha)
             elif self.Simplified_AdEMAMix:
-                update = update_mt.add_(grad, alpha=alpha_grad)
+                update = update_mt.add_(grad, alpha=alpha_grad * d)
             else:
                 if self.beta1 > 0:
                     update = update_mt
                 else:
-                    update = grad.clone()
+                    update = grad.mul(d)
 
             exp_avg_sq = state['exp_avg_sq']
             exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=d * d * (1.0 - beta2))
@@ -533,6 +530,11 @@ class Prodigy_adv(torch.optim.Optimizer):
 
         if prodigy_active:
             d_max, d_coef, growth_rate = g_group['d_max'], g_group['d_coef'], g_group['growth_rate']
+            if self.Simplified_AdEMAMix:
+                # Scale Prodigy math to align with Simplified AdEMAMix
+                mt_size = 1.0 / (1.0 - g_group['betas'][0])
+                grad_size = g_group['alpha_grad']
+                d_coef = d_coef / (mt_size + grad_size)
 
             if self.fsdp_in_use and dist.is_available() and dist.is_initialized():
                 dist_tensor = torch.stack([self.d_numerator, self.d_denom])

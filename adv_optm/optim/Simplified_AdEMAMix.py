@@ -244,7 +244,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
             # TODO, workaround until pytorch#169634 is fixed
-            lr = torch.as_tensor(lr)
+            lr = torch.as_tensor(lr, dtype=torch.float64)
             step_param_fn = self._compiled_step_parameter
         else:
             step_param_fn = self._step_parameter
