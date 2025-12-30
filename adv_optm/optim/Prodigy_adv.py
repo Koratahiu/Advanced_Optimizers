@@ -188,6 +188,9 @@ class Prodigy_adv(torch.optim.Optimizer):
             use_atan2 = False
         if kourkoutas_beta and not (betas[1] > beta2_min):
             raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
+        if Simplified_AdEMAMix and alpha_grad > 0 and not d_limiter:
+            # scales d_coef by alpha_grad, this force prodigy to behave well with Simplified_AdEMAMix.
+            d_coef = d_coef/alpha_grad
 
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
@@ -530,11 +533,6 @@ class Prodigy_adv(torch.optim.Optimizer):
 
         if prodigy_active:
             d_max, d_coef, growth_rate = g_group['d_max'], g_group['d_coef'], g_group['growth_rate']
-            if self.Simplified_AdEMAMix:
-                # Scale Prodigy math to align with Simplified AdEMAMix
-                mt_size = 1.0 / (1.0 - g_group['betas'][0])
-                grad_size = g_group['alpha_grad']
-                d_coef = d_coef / (mt_size + grad_size)
 
             if self.fsdp_in_use and dist.is_available() and dist.is_initialized():
                 dist_tensor = torch.stack([self.d_numerator, self.d_denom])
