@@ -182,7 +182,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         if Simplified_AdEMAMix and nesterov:
             print("Warning: nesterov is incompatible with Simplified_AdEMAMix, Disabling nesterov.")
             nesterov = False
-        if Simplified_AdEMAMix and nesterov:
+        if normuon_variant and use_atan2:
             print("Warning: AdaMuon atan2 is incompatible with NorMuon, Disabling AdaMuon atan2.")
             use_atan2 = False
 
