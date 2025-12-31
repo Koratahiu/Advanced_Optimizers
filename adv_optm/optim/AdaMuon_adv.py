@@ -307,7 +307,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             # MARS-M state initialization
             if group.get('approx_mars', False):
                 # Note: This requires full-rank memory even if factored
-                state['last_grad'] = torch.zeros_like(p, device=device, dtype=dtype)
+                state['last_grad'] = torch.zeros_like(p, device=device, dtype=p.dtype)
 
             group['adam_kourkoutas_beta'] = False
             state['is_muon'] = True # Workaround as group was acting weirdly; passing muon params in adam path
@@ -397,12 +397,12 @@ class AdaMuon_adv(torch.optim.Optimizer):
             else:
                 kappa_p = 1.0
 
-        if grad.dtype != torch.float32 and state.get('factored', False):
-            grad = grad.float()
-
         # MARS-M Approximated (Variance Reduction)
         if group.get('approx_mars', False):
             grad = approx_mars(grad, state['last_grad'], group['mars_gamma'], beta1)
+
+        if grad.dtype != torch.float32 and state.get('factored', False):
+            grad = grad.float()
 
         if group.get("orthogonal_gradient"):
             grad = _orthogonalize_gradient(p, grad)

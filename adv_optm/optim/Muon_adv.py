@@ -275,7 +275,7 @@ class Muon_adv(torch.optim.Optimizer):
             # MARS-M state initialization
             if group.get('approx_mars', False):
                 # Note: This requires full-rank memory even if factored
-                state['last_grad'] = torch.zeros_like(p, device=device, dtype=dtype)
+                state['last_grad'] = torch.zeros_like(p, device=device, dtype=p.dtype)
 
             # NorMuon state initialization
             if group['normuon_variant']:
@@ -363,12 +363,12 @@ class Muon_adv(torch.optim.Optimizer):
         Simplified_AdEMAMix = group['Simplified_AdEMAMix']
         alpha_grad = group['alpha_grad']
 
-        if grad.dtype != torch.float32 and state.get('factored', False):
-            grad = grad.float()
-
         # MARS-M Approximated (Variance Reduction)
         if group.get('approx_mars', False):
             grad = approx_mars(grad, state['last_grad'], group['mars_gamma'], beta1)
+
+        if grad.dtype != torch.float32 and state.get('factored', False):
+            grad = grad.float()
 
         if group.get("orthogonal_gradient"):
             grad = _orthogonalize_gradient(p, grad)
