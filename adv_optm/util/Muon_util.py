@@ -237,14 +237,17 @@ def _is_suitable_for_muon(
 
     return True
 
-def approx_mars(current_grad: torch.Tensor, last_grad: torch.Tensor, mars_gamma, beta1):
+def approx_mars(current_grad: torch.Tensor, last_grad: torch.Tensor, mars_gamma:float, beta1:float, Simplified_AdEMAMix:bool=False):
     """
     The approximated version of MARS-M, proposed in the paper: "MARS-M: When Variance Reduction
     Meets Matrices" (https://arxiv.org/abs/2510.21800). A variance reduction technique that
     incorporates the changes in gradients into the momentum gradient.
     Formula: c_t = g_t + gamma * beta / (1 - beta) * (g_t - g_{t-1}
     """
-    mars_factor = mars_gamma * beta1 / (1.0 - beta1)
+    if Simplified_AdEMAMix:
+        mars_factor = mars_gamma * beta1
+    else:
+        mars_factor = mars_gamma * beta1 / (1.0 - beta1)
     # Compute corrected gradient c_t
     # c_t = current_grad + mars_factor * (current_grad - last_grad)
     correction = current_grad.sub(last_grad).mul_(mars_factor).add_(current_grad)

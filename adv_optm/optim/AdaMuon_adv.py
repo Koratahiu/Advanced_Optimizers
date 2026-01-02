@@ -399,7 +399,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
         # MARS-M Approximated (Variance Reduction)
         if group.get('approx_mars', False):
-            grad = approx_mars(grad, state['last_grad'], group['mars_gamma'], beta1)
+            grad = approx_mars(grad, state['last_grad'], group['mars_gamma'], beta1, Simplified_AdEMAMix=Simplified_AdEMAMix)
 
         if grad.dtype != torch.float32 and state.get('factored', False):
             grad = grad.float()
