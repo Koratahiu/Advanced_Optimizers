@@ -129,7 +129,7 @@ class SignSGD(torch.optim.Optimizer):
         state = self.state[p]
 
         # State Initialization
-        if 'step' not in state and group["momentum"] > 0:
+        if group["momentum"] > 0 and len(state) == 0:
             state['factored'] = (
                 group['nnmf_factor'] and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
