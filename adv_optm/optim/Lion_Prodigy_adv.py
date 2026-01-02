@@ -267,7 +267,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
             update = exp_avg.mul(self.beta1).add_(grad_reshaped, alpha=d * (1-self.beta1))
 
             # Update momentum m_t = β2*m_{t-1} + (1-β2)*d*g_t
-            exp_avg.lerp_(grad_reshaped, 1 - self.beta2)
+            exp_avg.mul_(self.beta1).add_(grad_reshaped, alpha=d * (1-self.beta1))
 
             # Compress new momentum m_t and store factors
             state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True)
