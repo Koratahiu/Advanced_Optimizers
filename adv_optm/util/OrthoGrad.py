@@ -1,7 +1,11 @@
 import torch
 
 def _orthogonalize_gradient(p: torch.Tensor, grad: torch.Tensor) -> torch.Tensor:
-    """Projects the gradient `grad` to be orthogonal to the parameter `p`."""
+    """
+    Projects the gradient `grad` to be orthogonal to the parameter `p`.
+    Modified from:
+    https://github.com/LucasPrietoAl/grokking-at-the-edge-of-numerical-stability/blob/720d2444df12b851d6cb417ab08cf125c822b2ae/orthograd.py
+    """
     if grad.is_sparse:
         raise RuntimeError("OrthoGrad logic does not support sparse gradients.")
     original_shape = grad.shape
