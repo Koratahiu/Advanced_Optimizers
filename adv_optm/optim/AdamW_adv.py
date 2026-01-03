@@ -317,19 +317,18 @@ class AdamW_adv(torch.optim.Optimizer):
                 else:
                     update = grad_reshaped.clone()
 
+            # Factorize
+            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
+
             if group['use_atan2']:
-                denom = vt.sqrt()
+                denom = vt.sqrt_()
                 denom.div_(sqrt_bias_correction2)
                 update.atan2_(denom)
             else:
-                denom = vt.sqrt()
+                denom = vt.sqrt_()
                 denom.div_(sqrt_bias_correction2).add_(group['eps'])
                 update.div_(denom)
-            del denom
-
-            # Factorize
-            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
-            del vt
+            del denom, vt
 
             update_scaling = step_size * A if group['use_atan2'] else step_size
             update = update.view(p.shape).mul_(update_scaling)
