@@ -328,7 +328,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 denom = vt.sqrt_()
                 denom.div_(sqrt_bias_correction2).add_(group['eps'])
                 update.div_(denom)
-            del denom, vt
+            del vt
 
             update_scaling = step_size * A if group['use_atan2'] else step_size
             update = update.view(p.shape).mul_(update_scaling)
