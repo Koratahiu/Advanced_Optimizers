@@ -417,16 +417,15 @@ class Prodigy_adv(torch.optim.Optimizer):
                 else:
                     update = grad_reshaped.mul(d)
 
-            if group['use_atan2']:
-                denom = vt.sqrt()
-                update.atan2_(denom)
-            else:
-                denom = vt.sqrt()
-                update.div_(denom.add_(d * group['eps']))
-            del denom
-
             # Factorize
             state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
+
+            if group['use_atan2']:
+                denom = vt.sqrt_()
+                update.atan2_(denom)
+            else:
+                denom = vt.sqrt_()
+                update.div_(denom.add_(d * group['eps']))
             del vt
 
             update_scaling = dlr * A if group['use_atan2'] else dlr

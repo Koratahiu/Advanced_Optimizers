@@ -281,12 +281,11 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
             del mt
 
-            denom = vt.sqrt().add_(sqrt_den_eps)
-            update.div_(denom)
-            del denom
-
             # Factorize
             state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
+
+            denom = vt.sqrt_().add_(sqrt_den_eps)
+            update.div_(denom)
             del vt
 
             update = update.view(p.shape).mul_(lr * sqrt_den_num)
