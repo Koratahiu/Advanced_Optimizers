@@ -300,7 +300,7 @@ class Lion_Prodigy_adv(torch.optim.Optimizer):
 
             update.mul_(dlr)
 
-            # Update momentum using fused lerp
+            # Update momentum
             exp_avg.mul_(self.beta2).add_(grad, alpha=d * (1 - self.beta2))
 
         prodigy_steps = group['prodigy_steps']
