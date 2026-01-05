@@ -451,7 +451,7 @@ class Prodigy_adv(torch.optim.Optimizer):
 
             if self.use_AdEMAMix:
                 exp_avg_slow = state['exp_avg_slow']
-                exp_avg_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=d * (1.0 - beta3_ema))
+                exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=d * (1.0 - beta3_ema))
                 if self.beta1 > 0:
                     update = update_mt.add_(exp_avg_slow, alpha=alpha)
                 else:

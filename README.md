@@ -4,8 +4,15 @@ A comprehensive, all-in-one collection of optimization algorithms for deep learn
 
 [![PyPI](https://img.shields.io/pypi/v/adv_optm)](https://pypi.org/project/adv_optm/)
 
-## 🔥 What's New in 1.2.x
+## 🔥 What's New
 
+### in 2.0.x
+
+* Implemented torch.compile for all advanced optimizers. Enabled via (compiled_optimizer=True) to fuse and optimize the optimizer step path.
+* Better and improved 1-bit factored mode via (nnmf_factor=True).
+* Various improvements across the optimizers.
+
+### in 1.2.x
 * Added **advanced variants** of [Muon optimizer](https://kellerjordan.github.io/posts/muon/) with **features** and **settings** from recent papers.
 
 | Optimizer | Description |

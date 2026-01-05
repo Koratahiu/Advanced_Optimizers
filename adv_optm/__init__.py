@@ -22,4 +22,4 @@ __all__ = [
     "SignSGD",
 ]
 
-__version__ = "2.1.dev5"
+__version__ = "2.0.1"
