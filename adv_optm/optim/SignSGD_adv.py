@@ -8,7 +8,7 @@ from ..util.factorization_util import _get_effective_shape, _reconstruct_state, 
 from ..util.lion_k import _get_lion_k_update
 
 
-class SignSGD(torch.optim.Optimizer):
+class SignSGD_adv(torch.optim.Optimizer):
     """
     Implements an advanced SignSGD algorithm.
 
