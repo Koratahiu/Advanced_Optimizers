@@ -1,12 +1,16 @@
 import torch
+
+import math
+
 from typing import Optional, Callable
 
 from ..util import param_update
-from ..util.Effective_Shape import _get_effective_shape
-from ..util.NNMF import _nnmf, _unnmf
+from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
+from ..util.update_util import _grams_update, _cautious_update
 from ..util.OrthoGrad import _orthogonalize_gradient
-from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
 from ..util.Kourkoutas import KourkoutasHelper
+
+A = 4 / math.pi
 
 class AdamW_adv(torch.optim.Optimizer):
     """
@@ -84,18 +88,25 @@ class AdamW_adv(torch.optim.Optimizer):
         lr: float = 1e-3,
         betas: tuple[float, float] = (0.9, 0.999),
         eps: float = 1e-8,
+        # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
         cautious_wd: bool = False,
+        # Adam's Bias Correction
         use_bias_correction: bool = True,
-        vector_reshape: bool = False,
+        # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
+        # Adam_atan2 (scale invariant)
         use_atan2: bool = False,
+        # Cautious and GRAMS
         cautious_mask: bool = False,
         grams_moment: bool = False,
+        # OrthoGrad
         orthogonal_gradient: bool = False,
+        # AdEMAMix (long-term momentum)
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
+        # K-b (adaptive beta2)
         kourkoutas_beta: bool = False,
         beta2_min: float = 0.9,
         ema_alpha: float = 0.95,
@@ -103,7 +114,11 @@ class AdamW_adv(torch.optim.Optimizer):
         k_warmup_steps: int = 0,
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
+        # SMMF factorization
         nnmf_factor: bool = False,
+        vector_reshape: bool = False,
+        # torch.compile
+        compiled_optimizer: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -124,15 +139,15 @@ class AdamW_adv(torch.optim.Optimizer):
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
             "vector_reshape": vector_reshape, "use_atan2": use_atan2,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
-            "beta3_ema": beta3_ema, "alpha": alpha,
+            "beta3_ema": beta3_ema, "alpha": alpha, "compiled_optimizer": compiled_optimizer,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
+            "nnmf_factor": nnmf_factor
         }
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
         self.grams_moment = grams_moment
         self.use_AdEMAMix = use_AdEMAMix
-        self.factored = nnmf_factor
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
         super().__init__(params, defaults)
@@ -146,6 +161,11 @@ class AdamW_adv(torch.optim.Optimizer):
             devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
             for device in devices:
                 param_update.set_seed(device)
+
+        # Initialize compiled function
+        self._compiled_step_parameter = None
+        if compiled_optimizer:
+            self.compile(fullgraph=True)
 
     @property
     def supports_fused_back_pass(self):
@@ -165,24 +185,18 @@ class AdamW_adv(torch.optim.Optimizer):
             return
 
         grad = p.grad
-        if grad.dtype != torch.float32 and self.factored:
-            grad = grad.float()
-        if group["orthogonal_gradient"]:
-            grad = _orthogonalize_gradient(p, grad)
         state = self.state[p]
 
         # State Initialization
         if 'step' not in state:
             state['step'] = 0
 
-            should_factor = (
-                self.factored and
+            state['factored'] = (
+                group['nnmf_factor'] and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
             )
 
-            state['factored'] = should_factor
-
-            dtype = torch.float32 if self.factored else p.dtype
+            dtype = torch.float32 if state['factored'] else p.dtype
             device = p.device
 
             if state['factored']:
@@ -193,9 +207,9 @@ class AdamW_adv(torch.optim.Optimizer):
                 if group['betas'][0] > 0:
                     state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                     state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
-                    if not self.grams_moment:
-                        packed_d2 = (d2 + 7) // 8
-                        state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                    packed_d2 = (d2 + 7) // 8
+                    state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                # AdEMAMix slow moment (m_slow)
                 if self.use_AdEMAMix:
                     state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
                     state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
@@ -205,10 +219,13 @@ class AdamW_adv(torch.optim.Optimizer):
                 state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                 state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
             else:  # Fallback to standard AdamW for non-factored tensors
+                # First moment
                 if group['betas'][0] > 0:
                     state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
+                # AdEMAMix slow moment
                 if self.use_AdEMAMix:
                     state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
+                # Second moment (v)
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
         beta1, beta2 = group['betas']
@@ -216,28 +233,47 @@ class AdamW_adv(torch.optim.Optimizer):
         current_step = state['step']
         if group.get('kourkoutas_beta', False):
             # Call prepare_step() once at the beginning of the step for all params
-            self.kourkoutas_helper.maybe_prepare_step(current_step)
-            # Accumulate current grad's norm for the *next* step
-            self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
+            self.kourkoutas_helper.maybe_prepare_step(current_step, p.device)
             # Get the dynamic beta2 calculated in prepare_step()
             beta2 = self.kourkoutas_helper.get_beta2(p, group)
 
-        step = state['step'] + 1
         if group['use_bias_correction']:
+            step = current_step + 1
             bias_correction1 = 1.0 - beta1 ** step
-            if group.get('kourkoutas_beta', False):
-                bias_correction2 = 1.0 - group['betas'][1] ** step
-                # Use beta2_max for bias correction
-            else:
-                bias_correction2 = 1.0 - beta2 ** step
+            sqrt_bias_correction2 = (1.0 - group['betas'][1] ** step) ** 0.5
         else:
             bias_correction1 = 1
-            bias_correction2 = 1
+            sqrt_bias_correction2 = 1
         step_size = group['lr'] / bias_correction1
+
+        random_int_tensor = None
+
+        if group.get('compiled_optimizer', False):
+            step_size = torch.as_tensor(step_size, dtype=torch.float64)
+            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
+                # Pre-generate random tensor for stochastic rounding if needed.
+                random_int_tensor = param_update._get_random_int_for_sr(p)
+            step_param_fn = self._compiled_step_parameter
+        else:
+            step_param_fn = self._step_parameter
+
+        step_param_fn(p, grad, state, group, step_size, beta1, beta2, sqrt_bias_correction2, random_int_tensor)
+
+        state['step'] += 1
+
+    def _step_parameter(self, p, grad, state, group, step_size, beta1, beta2, sqrt_bias_correction2, random_int_tensor):
+        if grad.dtype != torch.float32 and state['factored']:
+            grad = grad.float()
+        if group["orthogonal_gradient"]:
+            grad = _orthogonalize_gradient(p, grad)
 
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
             alpha = group['alpha']
+
+        if group.get('kourkoutas_beta', False):
+            # Accumulate current grad's norm for the *next* step
+            self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
 
         if state['factored']:
             d1, d2 = state['effective_shape']
@@ -245,87 +281,67 @@ class AdamW_adv(torch.optim.Optimizer):
 
             # Reconstruct momentum from previous step's factors
             if beta1 > 0:
-                mt = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
-                if not self.grams_moment:
-                    unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
-                    torch.where(unpacked_sign, mt, -mt, out=mt)
-                    del unpacked_sign
+                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
                 # Update momentum in full-size
                 mt.lerp_(grad_reshaped, 1.0 - beta1)
 
-                if self.grams_moment:
-                    update_mt = (grad_reshaped.sign().mul_(mt.abs()))
-                elif self.cautious_mask:
-                    mask = (mt * grad_reshaped > 0).to(grad_reshaped.dtype)
-                    mask.div_(mask.mean().clamp_(min=1e-3))
-                    update_mt = mt.mul(mask)
-                    del mask
-                else:
-                    update_mt = mt.clone()
+                # Factorize
+                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
 
-            vt = _unnmf((state['mu_v_nmf'], state['mv_v_nmf']))
+                if self.grams_moment:
+                    update_mt = _grams_update(mt, grad_reshaped, inplace=True)
+                elif self.cautious_mask:
+                    update_mt = _cautious_update(mt, grad_reshaped, inplace=True)
+                else:
+                    update_mt = mt
+
+            vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
 
             if self.use_AdEMAMix:
-                mt_slow = _unnmf((state['mu_m_slow_nmf'], state['mv_m_slow_nmf']))
-                if state['sign_slow'].dtype != torch.uint8:
-                    state['sign_slow'] = state['sign_slow'].to(torch.uint8)
-                unpacked_sign_slow = _unpack_bools(state['sign_slow'], original_m=d2)
-                torch.where(unpacked_sign_slow, mt_slow, -mt_slow, out=mt_slow)
-                del unpacked_sign_slow
+                mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
 
                 mt_slow.lerp_(grad_reshaped, 1.0 - beta3_ema)
 
                 if beta1 > 0:
                     update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
-                    update = grad_reshaped.add_(mt_slow, alpha=alpha)
+                    update = grad_reshaped.add(mt_slow, alpha=alpha)
+                # Factorize
+                state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
+                del mt_slow
             else:
                 if beta1 > 0:
                     update = update_mt
-                    del grad_reshaped
                 else:
-                    update = grad_reshaped
+                    update = grad_reshaped.clone()
+
+            # Factorize
+            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
 
             if group['use_atan2']:
-                a = 1.2732395
-                denom = (vt.sqrt() / (bias_correction2**0.5))
-                update.atan2_(denom).mul_(a)
+                denom = vt.sqrt_()
+                denom.div_(sqrt_bias_correction2)
+                update.atan2_(denom)
             else:
-                denom = (vt.sqrt() / (bias_correction2**0.5)).add_(group['eps'])
+                denom = vt.sqrt_()
+                denom.div_(sqrt_bias_correction2).add_(group['eps'])
                 update.div_(denom)
-            del denom
-
-            update = update.view(p.shape).mul_(step_size)
-
-            # Compress updated moments and store new factors
-            if beta1 > 0:
-                if not self.grams_moment:
-                    state['sign'] = _pack_bools(mt > 0)
-                _nnmf(mt.abs(), out=(state['mu_m_nmf'], state['mv_m_nmf']))
-                del mt
-            if self.use_AdEMAMix:
-                state['sign_slow'] = _pack_bools(mt_slow > 0)
-                _nnmf(mt_slow.abs(), out=(state['mu_m_slow_nmf'], state['mv_m_slow_nmf']))
-                del mt_slow
-            _nnmf(vt, out=(state['mu_v_nmf'], state['mv_v_nmf']))
             del vt
 
-        else:  # Standard AdamW logic for non-factored tensors
-            exp_avg_sq = state['exp_avg_sq']
+            update_scaling = step_size * A if group['use_atan2'] else step_size
+            update = update.view(p.shape).mul_(update_scaling)
 
+        else:  # Standard AdamW logic for non-factored tensors
             if beta1 > 0:
                 exp_avg = state['exp_avg']
                 exp_avg.lerp_(grad, 1.0 - beta1)
 
                 if self.grams_moment:
-                    update_mt = grad.sign().mul_(exp_avg.abs())
+                    update_mt = _grams_update(exp_avg, grad)
                 elif self.cautious_mask:
-                    mask = (exp_avg * grad > 0).to(grad.dtype)
-                    mask.div_(mask.mean().clamp_(min=1e-3))
-                    update_mt = exp_avg.mul(mask)
-                    del mask
+                    update_mt = _cautious_update(exp_avg, grad)
                 else:
                     update_mt = exp_avg.clone()
 
@@ -340,22 +356,26 @@ class AdamW_adv(torch.optim.Optimizer):
             else:
                 update = update_mt if beta1 > 0 else grad.clone()
 
-            exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
+            exp_avg_sq = state['exp_avg_sq']
+            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
             if group['use_atan2']:
-                a = 1.2732395
-                denom = (exp_avg_sq.sqrt() / (bias_correction2**0.5))
-                update.atan2_(denom).mul_(a)
+                denom = exp_avg_sq.sqrt()
+                denom.div_(sqrt_bias_correction2)
+                update.atan2_(denom)
             else:
-                denom = (exp_avg_sq.sqrt() / (bias_correction2**0.5)).add_(group['eps'])
+                denom = exp_avg_sq.sqrt()
+                denom.div_(sqrt_bias_correction2).add_(group['eps'])
                 update.div_(denom)
             del denom
 
-            update.mul_(step_size)
+            update_scaling = step_size * A if group['use_atan2'] else step_size
+            update.mul_(update_scaling)
 
-        param_update.apply_parameter_update(self, p, group, update, group["lr"])
+        param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor)
 
-        state['step'] += 1
+    def compile(self, *args, **kwargs):
+        self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def step(self, closure=None):

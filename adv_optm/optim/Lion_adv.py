@@ -3,11 +3,10 @@ import torch
 from typing import Tuple, Optional
 
 from ..util import param_update
-from ..util.Effective_Shape import _get_effective_shape
-from ..util.NNMF import _nnmf,_unnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
-from ..util.One_Bit_Boolean import _pack_bools, _unpack_bools
+from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.lion_k import _get_lion_k_update
+
 
 class Lion_adv(torch.optim.Optimizer):
     """
@@ -52,16 +51,24 @@ class Lion_adv(torch.optim.Optimizer):
         params,
         lr: float = 1e-4,
         betas: Tuple[float, float] = (0.9, 0.99),
+        # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
         cautious_wd: bool = False,
-        vector_reshape: bool = False,
+        # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
+        # OrthoGrad
         orthogonal_gradient: bool = False,
+        # Cautious variant
         cautious_mask: bool = False,
         clip_threshold: float = 0.0,
+        # Lion-k
         kappa_p: float = 1.0,
         auto_kappa_p: bool = False,
+        # SMMF factorization
         nnmf_factor: bool = False,
+        vector_reshape: bool = False,
+        # torch.compile
+        compiled_optimizer: bool = False,
     ):
         if not lr > 0.0:
             raise ValueError(f"Learning rate must be > 0.0, but got {lr}")
@@ -80,10 +87,10 @@ class Lion_adv(torch.optim.Optimizer):
             clip_threshold=clip_threshold,
             kappa_p=kappa_p,
             auto_kappa_p=auto_kappa_p,
+            nnmf_factor=nnmf_factor,
         )
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
-        self.factored = nnmf_factor
         super().__init__(params, defaults)
 
         if self.stochastic_rounding:
@@ -92,6 +99,11 @@ class Lion_adv(torch.optim.Optimizer):
             devices = {p.device for group in self.param_groups for p in group['params'] if p.dtype == torch.bfloat16}
             for device in devices:
                 param_update.set_seed(device)
+
+        # Initialize compiled function
+        self._compiled_step_parameter = None
+        if compiled_optimizer:
+            self.compile(fullgraph=True)
 
     @property
     def supports_fused_back_pass(self) -> bool:
@@ -112,29 +124,18 @@ class Lion_adv(torch.optim.Optimizer):
             return
 
         grad = p.grad
-        if grad.dtype != torch.float32 and self.factored:
-            grad = grad.float()
-        if group["clip_threshold"] > 0.0:
-            grad_norm = torch.norm(grad.detach())
-            if grad_norm > group["clip_threshold"]:
-                clip_coef = group["clip_threshold"] / grad_norm
-                grad.mul_(clip_coef)
-        if group["orthogonal_gradient"]:
-            grad = _orthogonalize_gradient(p, grad)
         state = self.state[p]
 
         # State Initialization
         if 'step' not in state:
             state['step'] = 0
 
-            should_factor = (
-                self.factored and
+            state['factored'] = (
+                group['nnmf_factor'] and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
             )
 
-            state['factored'] = should_factor
-
-            dtype = torch.float32 if self.factored else p.dtype
+            dtype = torch.float32 if state['factored'] else p.dtype
 
             if state['factored']:
                 state['effective_shape'] = _get_effective_shape(p.numel())
@@ -147,18 +148,43 @@ class Lion_adv(torch.optim.Optimizer):
                 state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
 
         state['step'] += 1
-        beta1, beta2 = group["betas"]
         lr = group["lr"]
+
+        random_int_tensor = None
+
+        if group.get('compiled_optimizer', False):
+            if p.dtype == torch.bfloat16 and self.stochastic_rounding:
+                # Pre-generate random tensor for stochastic rounding if needed.
+                random_int_tensor = param_update._get_random_int_for_sr(p)
+            lr = torch.as_tensor(lr, dtype=torch.float64)
+            step_param_fn = self._compiled_step_parameter
+        else:
+            step_param_fn = self._step_parameter
+
+        step_param_fn(p, grad, state, group, lr, random_int_tensor)
+
+    def _step_parameter(self, p, grad, state, group, lr, random_int_tensor):
+        if grad.dtype != torch.float32 and state['factored']:
+            grad = grad.float()
+        if group["clip_threshold"] > 0.0:
+            grad_norm = torch.norm(grad.detach())
+            if grad_norm > group["clip_threshold"]:
+                clip_coef = group["clip_threshold"] / grad_norm
+                grad.mul_(clip_coef)
+        if group["orthogonal_gradient"]:
+            grad = _orthogonalize_gradient(p, grad)
 
         # Lion-K Logic
         kappa_p = group.get("kappa_p", 1.0)
         if group.get("auto_kappa_p", False):
             # Apply p=2.0 (Spherical) for 4D (Conv2D)
             # Apply p=1.0 (Sign) for everything else (Linear/Embeddings)
-            if p.ndim == 4:
+            if p.ndim >= 4:
                 kappa_p = 2.0
             else:
                 kappa_p = 1.0
+
+        beta1, beta2 = group["betas"]
 
         if state['factored']:
             # Factored Path
@@ -166,52 +192,41 @@ class Lion_adv(torch.optim.Optimizer):
             grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct momentum m_{t-1}
-            exp_avg = _unnmf((state['mu_m_nmf'], state['mv_m_nmf']))
-            unpacked_sign = _unpack_bools(state['sign'], original_m=d2)
-            torch.where(unpacked_sign, exp_avg, -exp_avg, out=exp_avg)
-            del unpacked_sign
-            if exp_avg.dtype != torch.float32:
-                exp_avg = exp_avg.float()
+            exp_avg = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
             # Compute update term c_t
             update = torch.lerp(grad_reshaped, exp_avg, beta1)
+
+            # Standard Lion momentum update
+            # m_t = beta2 * m_{t-1} + (1-beta2) * g_t
+            exp_avg.lerp_(grad_reshaped, 1 - beta2)
+
+            # Compress new momentum m_t and store factors
+            state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True)
+            del exp_avg
 
             update = _get_lion_k_update(update, kappa_p)
 
             if self.cautious_mask:
                 mask = (update * grad_reshaped > 0).to(grad_reshaped.dtype)
-                mask.div_(mask.mean().clamp_(min=1e-3))
+                mask.div_(mask.mean().clamp_min_(1e-3))
                 update.mul_(mask)
                 del mask
 
-            # Parameter update
             update = update.view(p.shape).mul_(lr)
-
-            # Standard Lion momentum update
-            # m_t = beta2 * m_{t-1} + (1-beta2) * g_t
-            exp_avg.lerp_(grad_reshaped, 1 - beta2)
-            del grad_reshaped
-
-            # Compress new momentum m_t and store factors
-            state['sign'] = _pack_bools(exp_avg > 0)
-            _nnmf(exp_avg.abs(), out=(state['mu_m_nmf'], state['mv_m_nmf']))
-            del exp_avg
 
         else:
             # Fallback to standard Lion logic
             exp_avg = state["exp_avg"]
 
-            # Compute update term and sign for the update
-            if exp_avg.dtype != torch.float32 and self.factored:
-                exp_avg = exp_avg.float()
-
+            # Compute update term
             update = torch.lerp(grad, exp_avg, beta1)
 
             update = _get_lion_k_update(update, kappa_p)
 
             if self.cautious_mask:
                 mask = (update * grad > 0).to(grad.dtype)
-                mask.div_(mask.mean().clamp_(min=1e-3))
+                mask.div_(mask.mean().clamp_min_(1e-3))
                 update.mul_(mask)
                 del mask
 
@@ -220,7 +235,10 @@ class Lion_adv(torch.optim.Optimizer):
             # Standard Lion momentum update
             exp_avg.lerp_(grad, 1 - beta2)
 
-        param_update.apply_parameter_update(self, p, group, update, lr)
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
+
+    def compile(self, *args, **kwargs):
+        self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def step(self, closure: Optional[callable] = None):
