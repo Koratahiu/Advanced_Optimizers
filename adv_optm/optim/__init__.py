@@ -6,6 +6,7 @@ from .Lion_adv import Lion_adv
 from .Lion_Prodigy_adv import Lion_Prodigy_adv
 from .Muon_adv import Muon_adv
 from .AdaMuon_adv import AdaMuon_adv
+from .SignSGD_adv import SignSGD_adv
 
 __all__ = [
     "AdamW_adv",
@@ -16,4 +17,5 @@ __all__ = [
     "Lion_Prodigy_adv",
     "Muon_adv",
     "AdaMuon_adv",
+    "SignSGD_adv",
 ]

@@ -7,6 +7,7 @@ from .optim import (
     Lion_Prodigy_adv,
     Muon_adv,
     AdaMuon_adv,
+    SignSGD_adv,
 )
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     "Lion_Prodigy_adv",
     "Muon_adv",
     "AdaMuon_adv",
+    "SignSGD_adv",
 ]
 
 __version__ = "2.0.1"
