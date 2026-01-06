@@ -6,6 +6,11 @@ A comprehensive, all-in-one collection of optimization algorithms for deep learn
 
 ## 🔥 What's New
 
+### in 2.1.x
+
+- Added Signum (SignSGD with momentum): A new optimizer in the family (SignSGD_adv)
+- More info coming soon.
+
 ### in 2.0.x
 
 * Implemented torch.compile for all advanced optimizers. Enabled via (compiled_optimizer=True) to fuse and optimize the optimizer step path.
