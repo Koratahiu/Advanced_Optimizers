@@ -316,8 +316,9 @@ def _auto_projection_for_adamuon(raw_update: torch.Tensor, kappa_p: float) -> to
     # Spherical (p=2) - rotation invariant
     if p == 2.0:
         # Normalize (L2=1)
-        norm = x.norm(p=2).clamp_min_(EPS)
-        x.div_(norm)
+        # We skip this, since _newton_schulz_iteration will normalize it.
+        # norm = x.norm(p=2).clamp_min_(EPS)
+        # x.div_(norm)
         return x
 
     # General p case - hybrid optimizer
@@ -372,30 +373,35 @@ def get_spectral_scaling(shape: torch.Size, n_layers: int):
     Assumes shape is (d_out, d_in).
 
     Returns:
-        ns_eps: Epsilon for Newton-Schulz = (1/L) * sqrt(d_in / d_out)
-        spectral_target: Target spectral norm = sqrt(d_out / d_in)
-        wd_scale: Weight decay scaling factor = 1 / d_in
+        ns_eps: Damping for Newton-Schul.
+        adaptive_eps: Epsilon for AdaMuon/NorMuon denominator.
+        spectral_target: Target spectral norm
+        wd_scale: Weight decay scale
     """
     d_out, d_in = shape[0], shape[1]
-
-    # If flattened 4D tensor (e.g. Conv), d_in is the product of remaining dims
+    
+    # Handle Convolutional/Flattened tensors
     if len(shape) > 2:
-        import operator
-        from functools import reduce
-        d_in = reduce(operator.mul, shape[1:], 1)
+        d_in = shape[1:].numel()
 
-    # Prevent division by zero
+
+    # Scaling for Epsilon (Table 2)
     L = max(1, n_layers)
 
-    ratio_sqrt = (d_in / d_out) ** 0.5
+    # A) Newton-Schulz Damping
+    # This ensures the matrix orthogonalization is stable across scales.
+    # Formula: (1/L) * sqrt(d_in / d_out)
+    ns_eps = (1.0 / L) * (d_in / d_out) ** 0.5
 
-    # Appendix B.4: eps = (1/L) * sqrt(d_in/d_out)
-    ns_eps = (1.0 / L) * ratio_sqrt
+    # B) Adaptive Denominator Epsilon
+    # This ensures the Adam-style division doesn't explode or vanish.
+    # Formula: (1/L) * (1 / sqrt(d_in * d_out))
+    adaptive_eps = (1.0 / L) * (1.0 / (d_in * d_out)**0.5)
 
-    # Section F: normalize to sqrt(d_out/d_in)
-    spectral_target = 1.0 / ratio_sqrt
+    # Spectral Target (Section F) -> sqrt(d_out/d_in)
+    spectral_target = (d_out / d_in) ** 0.5
 
-    # Section 3.4: weight decay scales as 1/width (1/d_in)
+    # Weight Decay (Section 3.4) -> 1/width
     wd_scale = 1.0 / d_in
 
-    return ns_eps, spectral_target, wd_scale
+    return ns_eps, adaptive_eps, spectral_target, wd_scale

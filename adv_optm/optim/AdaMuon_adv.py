@@ -433,13 +433,14 @@ class AdaMuon_adv(torch.optim.Optimizer):
             else:
                 shape_for_scaling = p.shape
 
-            scaled_eps, spectral_target, wd_scale = get_spectral_scaling(shape_for_scaling, group['n_layers'])
+            scaled_eps, adaptive_eps, spectral_target, wd_scale = get_spectral_scaling(shape_for_scaling, group['n_layers'])
 
             weight_decay = group['weight_decay'] * wd_scale
             ns_eps = scaled_eps
         else:
             weight_decay = group['weight_decay']
             ns_eps = group['ns_eps']
+            adaptive_eps = group['eps']
 
         # MARS-M Approximated (Variance Reduction)
         if group.get('approx_mars', False):
@@ -492,7 +493,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             )
 
             if group['normuon_variant']:
-                normuon_update(update, state['normuon_v'], beta2, group['eps'])
+                normuon_update(update, state['normuon_v'], beta2, adaptive_eps)
             else:
                 # Reconstruct second momentum from previous step's factors
                 vt_buf = _reconstruct_state((state['mu_vbuf_nmf'], state['mv_vbuf_nmf']), signed=False)
@@ -503,7 +504,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     denom = vt_buf.sqrt()
                     update.atan2_(denom)
                 else:
-                    denom = vt_buf.sqrt().add_(group['eps'])
+                    denom = vt_buf.sqrt().add_(adaptive_eps)
                     update.div_(denom)
                 state['mu_vbuf_nmf'], state['mv_vbuf_nmf'] = _factorize_state(vt_buf, signed=False)
                 del denom, vt_buf
@@ -558,7 +559,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             # NorMuon Logic
             if group['normuon_variant']:
-                normuon_update(update, state['normuon_v'], beta2, group['eps'])
+                normuon_update(update, state['normuon_v'], beta2, adaptive_eps)
             else:
                 # Original AdaMuon Logic
                 update = update.view(original_shape)
@@ -569,7 +570,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     denom = vt_buf.sqrt()
                     update.atan2_(denom)
                 else:
-                    denom = vt_buf.sqrt().add_(group['eps'])
+                    denom = vt_buf.sqrt().add_(adaptive_eps)
                     update.div_(denom)
                 del denom
 
