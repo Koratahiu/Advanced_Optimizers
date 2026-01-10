@@ -499,22 +499,21 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 vt_buf = _reconstruct_state((state['mu_vbuf_nmf'], state['mv_vbuf_nmf']), signed=False)
                 # Update second momentum in full-size
                 vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
+                state['mu_vbuf_nmf'], state['mv_vbuf_nmf'] = _factorize_state(vt_buf, signed=False)
                 # Apply second momentum update (adaptive scaling)
                 if group['use_atan2']:
-                    denom = vt_buf.sqrt()
+                    denom = vt_buf.sqrt_()
                     update.atan2_(denom)
                 else:
-                    denom = vt_buf.sqrt().add_(adaptive_eps)
+                    denom = vt_buf.sqrt_().add_(adaptive_eps)
                     update.div_(denom)
-                state['mu_vbuf_nmf'], state['mv_vbuf_nmf'] = _factorize_state(vt_buf, signed=False)
                 del denom, vt_buf
 
             # RMS-aligned scaling
             step_scale = lr * A if group['use_atan2'] and not group['normuon_variant'] else lr
             # Spectral Normalization
             if group.get('spectral_normalization', False):
-                spectral_norm_update(update, state['spectral_v'], spectral_target)
-                update.mul_(step_scale) # Apply LR after normalization
+                spectral_norm_update(update, state['spectral_v'], spectral_target, step_scale)
             else:
                 # Factored RMS-aligned scaling
                 rms_adjustment(update, group['rms_rescaling'], step_scale)
