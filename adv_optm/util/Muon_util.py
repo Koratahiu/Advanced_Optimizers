@@ -7,7 +7,7 @@ def _newton_schulz_iteration(
     eps: float = 1e-7,
     coeffs: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
     cns: bool = False,
-    cns_a_bound: float = 1e-4,
+    cns_a_bound: float = 1e-3,
     spectral_normalization: bool = False,
 ) -> torch.Tensor:
     """
@@ -344,19 +344,19 @@ def spectral_norm_update(update: torch.Tensor, vector_state: torch.Tensor, targe
     """
     # Power Iteration to estimate spectral norm
     # u = A @ v
-    u = torch.mv(update.float(), vector_state.float())
-    
+    u = torch.mv(update, vector_state)
+
     # v_new = A.T @ u
-    v_new = torch.mv(update.mT.float(), u)
-    
+    v_new = torch.mv(update.mT, u)
+
     # Normalize v_new to get next state
     v_norm = torch.linalg.vector_norm(v_new)
-    
+
     vector_state.copy_(v_new.div_(v_norm.clamp_min_(1e-12)).to(vector_state.dtype))
 
     # Estimate sigma = ||A @ v|| (since v is unit norm)
     # Re-compute A @ v_new with the updated vector for better estimate
-    Av = torch.mv(update.float(), vector_state.float())
+    Av = torch.mv(update, vector_state)
     sigma = torch.linalg.vector_norm(Av)
 
     # Rescale update
