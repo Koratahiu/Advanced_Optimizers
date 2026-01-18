@@ -322,7 +322,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 if state['factored']:
                     d1, d2 = state['effective_shape']
                     # We need a vector matching the 'inner' dimension d2
-                    state['spectral_v'] = torch.randn(d2, device=device, dtype=torch.float32)
+                    state['spectral_v'] = torch.randn(d2, device=device, dtype=dtype)
 
                 # Case B: Standard Muon (Linear, Conv2d, etc.)
                 elif len(p.shape) >= 2:
@@ -330,7 +330,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     # (p.shape[0], product_of_rest).
                     d_in_flat = p.numel() // p.shape[0]
 
-                    state['spectral_v'] = torch.randn(d_in_flat, device=device, dtype=torch.float32)
+                    state['spectral_v'] = torch.randn(d_in_flat, device=device, dtype=dtype)
 
                 # Normalize initial vector for stability
                 if 'spectral_v' in state:
@@ -404,7 +404,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             else:
                 lr = group['lr']
                 muon_step_param = self._muon_step_parameter
-            
+
             muon_step_param(p, grad, state, group, lr, random_int_tensor)
 
     def compile(self, *args, **kwargs):
@@ -486,7 +486,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             update = newton_schulz(
                 update,
                 steps=group['ns_steps'],
-                eps=ns_eps, 
+                eps=ns_eps,
                 coeffs=group['ns_coeffs'],
                 cns=group['accelerated_ns'],
                 cns_a_bound=group['cns_a_bound'],
@@ -550,7 +550,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             update = newton_schulz(
                 update,
                 steps=group['ns_steps'],
-                eps=ns_eps, 
+                eps=ns_eps,
                 coeffs=group['ns_coeffs'],
                 cns=group['accelerated_ns'],
                 cns_a_bound=group['cns_a_bound'],
