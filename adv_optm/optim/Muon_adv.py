@@ -72,7 +72,7 @@ class Muon_adv(torch.optim.Optimizer):
         mars_gamma (float): The scaling coefficient for MARS gradient correction.
             (default: 0.025)
         n_layers (int): The depth of the network (L). Required for optimal epsilon scaling. (default: 1)
-        spectral_normalization (bool): Enable explicit spectral normalization using power iteration. (default: True)
+        spectral_normalization (bool): Enable explicit spectral normalization using power iteration. (default: False)
         --- Auxiliary AdamW_adv Parameters (used for 'adam' groups) ---
         adam_betas (tuple[float, float]): Betas for the AdamW optimizer part.
         adam_eps (float): Epsilon for the AdamW optimizer part.

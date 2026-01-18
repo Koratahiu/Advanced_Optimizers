@@ -92,7 +92,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         use_muon (bool | None): whether to use Muon or AuxAdamW. MUST be provided
             either here or via `optim_type` in parameter groups. (default: None)
         n_layers (int): The depth of the network (L). Required for optimal epsilon scaling. (default: 1)
-        spectral_normalization (bool): Enable explicit spectral normalization using power iteration. (default: True)
+        spectral_normalization (bool): Enable explicit spectral normalization using power iteration. (default: False)
         --- Auxiliary AdamW_adv Parameters (used for 'adam' groups) ---
         adam_betas (tuple[float, float]): Betas for the AdamW optimizer part.
         adam_eps (float): Epsilon for the AdamW optimizer part.
@@ -573,13 +573,13 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     update.div_(denom)
                 del denom
 
-            # RMS-aligned rescaling
             step_scale = lr * A if group['use_atan2'] and not group['normuon_variant'] else lr
-            # Spectral Normalization
+
             if group.get('spectral_normalization', False):
+                # Spectral Normalization
                 spectral_norm_update(update, state['spectral_v'], spectral_target, step_scale)
             else:
-                # Factored RMS-aligned scaling
+                # RMS-aligned rescaling
                 rms_adjustment(update, group['rms_rescaling'], step_scale)
 
             update = update.reshape(original_shape)
