@@ -167,6 +167,9 @@ class Muon_adv(torch.optim.Optimizer):
         if Simplified_AdEMAMix and nesterov:
             print("Warning: nesterov is incompatible with Simplified_AdEMAMix, Disabling nesterov.")
             nesterov = False
+        if spectral_normalization and rms_rescaling:
+            print("Warning: spectral_normalization is incompatible with rms_rescaling, Disabling rms_rescaling.")
+            rms_rescaling = False
 
         defaults = {
             "lr": lr, "beta1": beta1, "weight_decay": weight_decay, "cautious_wd": cautious_wd,

@@ -190,6 +190,9 @@ class AdaMuon_adv(torch.optim.Optimizer):
         if normuon_variant and use_atan2:
             print("Warning: AdaMuon atan2 is incompatible with NorMuon, Disabling AdaMuon atan2.")
             use_atan2 = False
+        if spectral_normalization and rms_rescaling:
+            print("Warning: spectral_normalization is incompatible with rms_rescaling, Disabling rms_rescaling.")
+            rms_rescaling = False
 
         defaults = {
             "lr": lr, "betas": betas, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
