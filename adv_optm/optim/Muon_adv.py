@@ -132,7 +132,7 @@ class Muon_adv(torch.optim.Optimizer):
         mars_gamma: float = 0.025,
         # Spectral Normalization
         n_layers: int = 1,
-        spectral_normalization: bool = True,
+        spectral_normalization: bool = False,
         # torch.compile
         compiled_optimizer: bool = False,
         # --- AdamW_adv specific parameters ---
@@ -398,14 +398,13 @@ class Muon_adv(torch.optim.Optimizer):
             else:
                 shape_for_scaling = p.shape
 
-            scaled_eps, normuon_eps, spectral_target, wd_scale = get_spectral_scaling(shape_for_scaling, group['n_layers'])
+            scaled_eps, _, spectral_target, wd_scale = get_spectral_scaling(shape_for_scaling, group['n_layers'])
 
             weight_decay = group['weight_decay'] * wd_scale
             ns_eps = scaled_eps
         else:
             weight_decay = group['weight_decay']
             ns_eps = group['ns_eps']
-            normuon_eps = group['normuon_eps']
 
         # MARS-M Approximated (Variance Reduction)
         if group.get('approx_mars', False):
@@ -457,7 +456,7 @@ class Muon_adv(torch.optim.Optimizer):
             )
 
             if group['normuon_variant']:
-                normuon_update(update, state['normuon_v'], group['beta2_normuon'], normuon_eps)
+                normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['normuon_eps'])
 
             if group.get('spectral_normalization', False):
                 # Spectral Normalization
@@ -508,7 +507,7 @@ class Muon_adv(torch.optim.Optimizer):
 
                 # NorMuon Logic
                 if group['normuon_variant']:
-                    normuon_update(update, state['normuon_v'], group['beta2_normuon'], normuon_eps)
+                    normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['normuon_eps'])
 
                 if group.get('spectral_normalization', False):
                     # Spectral Normalization

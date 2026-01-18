@@ -156,7 +156,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         mars_gamma: float = 0.025,
         # Spectral Normalization
         n_layers: int = 1,
-        spectral_normalization: bool = True,
+        spectral_normalization: bool = False,
         # torch.compile
         compiled_optimizer: bool = False,
         # --- AdamW_adv specific parameters ---
@@ -493,7 +493,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             )
 
             if group['normuon_variant']:
-                normuon_update(update, state['normuon_v'], beta2, adaptive_eps)
+                normuon_update(update, state['normuon_v'], beta2, group['eps'])
             else:
                 # Reconstruct second momentum from previous step's factors
                 vt_buf = _reconstruct_state((state['mu_vbuf_nmf'], state['mv_vbuf_nmf']), signed=False)
@@ -558,7 +558,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             # NorMuon Logic
             if group['normuon_variant']:
-                normuon_update(update, state['normuon_v'], beta2, adaptive_eps)
+                normuon_update(update, state['normuon_v'], beta2, group['eps'])
             else:
                 # Original AdaMuon Logic
                 update = update.view(original_shape)
