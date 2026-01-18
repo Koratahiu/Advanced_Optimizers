@@ -7,7 +7,7 @@ def _newton_schulz_iteration(
     eps: float = 1e-7,
     coeffs: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
     cns: bool = False,
-    cns_a_bound: float = 1e-3,
+    cns_a_bound: float = 1e-4,
     spectral_normalization: bool = False,
 ) -> torch.Tensor:
     """
