@@ -352,7 +352,12 @@ def spectral_norm_update(update: torch.Tensor, vector_state: torch.Tensor, targe
     # Normalize v_new to get next state
     v_norm = torch.linalg.vector_norm(v_new)
 
-    vector_state.copy_(v_new.div_(v_norm.clamp_min_(1e-12)).to(vector_state.dtype))
+    # if v_norm >= 0.5:
+    #    vector_state.copy_(v_new.div_(v_norm.clamp_min_(1e-12))).to(vector_state.dtype))
+    candidate_v = v_new / v_norm
+    next_state = torch.where(v_norm >= 0.5, candidate_v, vector_state)
+    vector_state.copy_(next_state.to(vector_state.dtype))
+    # Else: We keep the old vector_state (which is a random unit vector at init)
 
     # Estimate sigma = ||A @ v|| (since v is unit norm)
     # Re-compute A @ v_new with the updated vector for better estimate
