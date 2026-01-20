@@ -93,6 +93,14 @@ def set_seed(device: torch.device):
         _generators[device] = torch.Generator(device=device)
     _generators[device].manual_seed(42)
 
+def get_generator(device: torch.device) -> torch.Generator:
+    """
+    Retrieves (and initializes if necessary) the deterministic generator 
+    for the specified device.
+    """
+    if device not in _generators:
+        set_seed(device)
+    return _generators[device]
 
 def _get_random_int_for_sr(source: Tensor) -> Tensor:
     """

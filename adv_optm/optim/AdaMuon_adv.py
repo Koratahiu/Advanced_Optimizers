@@ -319,11 +319,13 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             # Spectral Normalization
             if group.get('spectral_normalization', False):
+                gen = param_update.get_generator(device)
+
                 # Case A: Factored Muon
                 if state['factored']:
                     d1, d2 = state['effective_shape']
                     # We need a vector matching the 'inner' dimension d2
-                    state['spectral_v'] = torch.randn(d2, device=device, dtype=dtype)
+                    state['spectral_v'] = torch.randn(d2, device=device, dtype=dtype, generator=gen)
 
                 # Case B: Standard Muon (Linear, Conv2d, etc.)
                 elif len(p.shape) >= 2:
@@ -331,7 +333,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     # (p.shape[0], product_of_rest).
                     d_in_flat = p.numel() // p.shape[0]
 
-                    state['spectral_v'] = torch.randn(d_in_flat, device=device, dtype=dtype)
+                    state['spectral_v'] = torch.randn(d_in_flat, device=device, dtype=dtype, generator=gen)
 
                 # Normalize initial vector for stability
                 if 'spectral_v' in state:
