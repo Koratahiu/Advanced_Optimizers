@@ -33,7 +33,7 @@ def apply_parameter_update(
     wd = group["weight_decay"] if wd is None else wd
     cautious = group.get('cautious_wd', False)
     if decoupled:
-        scaled_wd = 1 / (1.0 +  wd * lr / self._init_lr)
+        scaled_wd = wd * (lr / self._init_lr)
     else:
         scaled_wd = wd * lr
 
