@@ -14,6 +14,7 @@ def apply_parameter_update(
     lr: float | Tensor,
     wd: float | None = None,
     random_int_tensor: Tensor | None = None,
+    decoupled: bool = False,
 ) -> None:
     """
     Applies decoupled weight decay (standard or cautious) and the final
@@ -27,9 +28,14 @@ def apply_parameter_update(
         wd: Optional float value for weight decay, if another value other than group["weight_decay"] is needed.
         random_int_tensor: Optional pre-generated random tensor for stochastic
             rounding. Required for the `torch.compile` path.
+        decoupled: Whenever to use the true decoupled weight decay.
     """
     wd = group["weight_decay"] if wd is None else wd
     cautious = group.get('cautious_wd', False)
+    if decoupled:
+        scaled_wd = 1 / (1.0 +  wd * lr / self._init_lr)
+    else:
+        scaled_wd = wd * lr
 
     # Compute full update in float32 if using bfloat16 with stochastic rounding
     if p.dtype == torch.bfloat16 and self.stochastic_rounding:
@@ -41,11 +47,11 @@ def apply_parameter_update(
             if cautious:
                 # Cautious Weight Decay
                 mask = (update_fp32 * p_fp32 >= 0).float()
-                p_fp32.addcmul_(p_fp32, mask, value=-wd * lr)
+                p_fp32.addcmul_(p_fp32, mask, value=-scaled_wd)
                 del mask
             else:
                 # Standard decoupled weight decay
-                p_fp32.add_(p_fp32, alpha=-wd * lr)
+                p_fp32.add_(p_fp32, alpha=-scaled_wd)
 
         # Apply main update
         p_fp32.add_(-update_fp32)
@@ -65,11 +71,11 @@ def apply_parameter_update(
             if cautious:
                 # Cautious Weight Decay
                 mask = (update * p >= 0).to(p.dtype)
-                p.addcmul_(p, mask, value=-wd * lr)
+                p.addcmul_(p, mask, value=-scaled_wd)
                 del mask
             else:
                 # Standard decoupled weight decay
-                p.add_(p, alpha=-wd * lr)
+                p.add_(p, alpha=-scaled_wd)
 
         # Apply main update
         p.add_(-update)

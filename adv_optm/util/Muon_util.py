@@ -384,7 +384,7 @@ def get_spectral_scaling(shape: torch.Size, n_layers: int):
         wd_scale: Weight decay scale
     """
     d_out, d_in = shape[0], shape[1]
-    
+
     # Handle Convolutional/Flattened tensors
     if len(shape) > 2:
         d_in = shape[1:].numel()

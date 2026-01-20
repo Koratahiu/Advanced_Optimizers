@@ -225,6 +225,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             "adam_k_warmup_steps": adam_k_warmup_steps, "adam_nnmf_factor": adam_nnmf_factor,
         }
         self.stochastic_rounding = stochastic_rounding
+        self._init_lr = lr
 
         super().__init__(params, defaults)
 
@@ -439,9 +440,13 @@ class AdaMuon_adv(torch.optim.Optimizer):
             scaled_eps, adaptive_eps, spectral_target, wd_scale = get_spectral_scaling(shape_for_scaling, group['n_layers'])
 
             weight_decay = group['weight_decay'] * wd_scale
+            decoupled_wd = True
+
             ns_eps = scaled_eps
+
         else:
             weight_decay = group['weight_decay']
+            decoupled_wd = False
             ns_eps = group['ns_eps']
             adaptive_eps = group['eps']
 
@@ -587,7 +592,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             update = update.reshape(original_shape)
 
-        param_update.apply_parameter_update(self, p, group, update, lr, wd=weight_decay, random_int_tensor=random_int_tensor)
+        param_update.apply_parameter_update(self, p, group, update, lr, wd=weight_decay, random_int_tensor=random_int_tensor, decoupled=decoupled_wd)
 
     @torch.no_grad()
     def step(self, closure=None):
