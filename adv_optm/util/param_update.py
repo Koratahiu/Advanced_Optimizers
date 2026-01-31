@@ -60,6 +60,7 @@ def apply_parameter_update(
         if random_int_tensor is not None:
             # Compiled path: use the pre-computed random tensor
             _copy_stochastic_core_(p, p_fp32, random_int_tensor)
+            del random_int_tensor
         else:
             # Uncompiled path: generate randoms inside
             copy_stochastic_(p, p_fp32)
@@ -132,7 +133,7 @@ def _copy_stochastic_core_(target: Tensor, source: Tensor, random_int_tensor: Te
     Core logic for stochastic rounding using a pre-computed random integer tensor.
     This version is designed to be torch.compile-friendly.
     """
-    result = random_int_tensor.clone()
+    result = random_int_tensor
     # add the random number to the lower 16 bit of the mantissa
     result.add_(source.view(dtype=torch.int32))
 
@@ -141,8 +142,6 @@ def _copy_stochastic_core_(target: Tensor, source: Tensor, random_int_tensor: Te
 
     # copy the higher 16 bit into the target tensor
     target.copy_(result.view(dtype=torch.float32))
-
-    del result
 
 
 def copy_stochastic_(target: Tensor, source: Tensor):
