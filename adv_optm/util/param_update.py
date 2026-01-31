@@ -14,6 +14,7 @@ def apply_parameter_update(
     lr: float | Tensor,
     wd: float | None = None,
     random_int_tensor: Tensor | None = None,
+    decoupled: bool = False,
 ) -> None:
     """
     Applies decoupled weight decay (standard or cautious) and the final
@@ -27,9 +28,14 @@ def apply_parameter_update(
         wd: Optional float value for weight decay, if another value other than group["weight_decay"] is needed.
         random_int_tensor: Optional pre-generated random tensor for stochastic
             rounding. Required for the `torch.compile` path.
+        decoupled: Whenever to use the true decoupled weight decay.
     """
     wd = group["weight_decay"] if wd is None else wd
     cautious = group.get('cautious_wd', False)
+    if decoupled:
+        scaled_wd = wd * (lr / self._init_lr)
+    else:
+        scaled_wd = wd * lr
 
     # Compute full update in float32 if using bfloat16 with stochastic rounding
     if p.dtype == torch.bfloat16 and self.stochastic_rounding:
@@ -41,11 +47,11 @@ def apply_parameter_update(
             if cautious:
                 # Cautious Weight Decay
                 mask = (update_fp32 * p_fp32 >= 0).float()
-                p_fp32.addcmul_(p_fp32, mask, value=-wd * lr)
+                p_fp32.addcmul_(p_fp32, mask, value=-scaled_wd)
                 del mask
             else:
                 # Standard decoupled weight decay
-                p_fp32.add_(p_fp32, alpha=-wd * lr)
+                p_fp32.add_(p_fp32, alpha=-scaled_wd)
 
         # Apply main update
         p_fp32.add_(-update_fp32)
@@ -54,6 +60,7 @@ def apply_parameter_update(
         if random_int_tensor is not None:
             # Compiled path: use the pre-computed random tensor
             _copy_stochastic_core_(p, p_fp32, random_int_tensor)
+            del random_int_tensor
         else:
             # Uncompiled path: generate randoms inside
             copy_stochastic_(p, p_fp32)
@@ -65,11 +72,11 @@ def apply_parameter_update(
             if cautious:
                 # Cautious Weight Decay
                 mask = (update * p >= 0).to(p.dtype)
-                p.addcmul_(p, mask, value=-wd * lr)
+                p.addcmul_(p, mask, value=-scaled_wd)
                 del mask
             else:
                 # Standard decoupled weight decay
-                p.add_(p, alpha=-wd * lr)
+                p.add_(p, alpha=-scaled_wd)
 
         # Apply main update
         p.add_(-update)
@@ -87,6 +94,14 @@ def set_seed(device: torch.device):
         _generators[device] = torch.Generator(device=device)
     _generators[device].manual_seed(42)
 
+def get_generator(device: torch.device) -> torch.Generator:
+    """
+    Retrieves (and initializes if necessary) the deterministic generator 
+    for the specified device.
+    """
+    if device not in _generators:
+        set_seed(device)
+    return _generators[device]
 
 def _get_random_int_for_sr(source: Tensor) -> Tensor:
     """
@@ -118,7 +133,7 @@ def _copy_stochastic_core_(target: Tensor, source: Tensor, random_int_tensor: Te
     Core logic for stochastic rounding using a pre-computed random integer tensor.
     This version is designed to be torch.compile-friendly.
     """
-    result = random_int_tensor.clone()
+    result = random_int_tensor
     # add the random number to the lower 16 bit of the mantissa
     result.add_(source.view(dtype=torch.int32))
 
@@ -127,8 +142,6 @@ def _copy_stochastic_core_(target: Tensor, source: Tensor, random_int_tensor: Te
 
     # copy the higher 16 bit into the target tensor
     target.copy_(result.view(dtype=torch.float32))
-
-    del result
 
 
 def copy_stochastic_(target: Tensor, source: Tensor):

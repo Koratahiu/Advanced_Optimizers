@@ -1,7 +1,7 @@
 import torch
 
 from ..util import param_update
-from ..util.Muon_util import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update, approx_mars
+from ..util.Muon_util import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update, approx_mars, spectral_norm_update, get_spectral_scaling
 from ..util.factorization_util import _get_effective_shape, _factorize_state, _reconstruct_state
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
@@ -71,6 +71,8 @@ class Muon_adv(torch.optim.Optimizer):
             (default: False)
         mars_gamma (float): The scaling coefficient for MARS gradient correction.
             (default: 0.025)
+        n_layers (int): The depth of the network (L). Required for optimal epsilon scaling. (default: 1)
+        spectral_normalization (bool): Enable explicit spectral normalization using power iteration. (default: False)
         --- Auxiliary AdamW_adv Parameters (used for 'adam' groups) ---
         adam_betas (tuple[float, float]): Betas for the AdamW optimizer part.
         adam_eps (float): Epsilon for the AdamW optimizer part.
@@ -128,6 +130,9 @@ class Muon_adv(torch.optim.Optimizer):
         # MARS-M
         approx_mars: bool = False,
         mars_gamma: float = 0.025,
+        # Spectral Normalization
+        n_layers: int = 1,
+        spectral_normalization: bool = False,
         # torch.compile
         compiled_optimizer: bool = False,
         # --- AdamW_adv specific parameters ---
@@ -162,6 +167,9 @@ class Muon_adv(torch.optim.Optimizer):
         if Simplified_AdEMAMix and nesterov:
             print("Warning: nesterov is incompatible with Simplified_AdEMAMix, Disabling nesterov.")
             nesterov = False
+        if spectral_normalization and rms_rescaling:
+            print("Warning: spectral_normalization is incompatible with rms_rescaling, Disabling rms_rescaling.")
+            rms_rescaling = False
 
         defaults = {
             "lr": lr, "beta1": beta1, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
@@ -181,6 +189,8 @@ class Muon_adv(torch.optim.Optimizer):
             "accelerated_ns": accelerated_ns, "cns_a_bound": cns_a_bound,
             # MARS-M
             "approx_mars": approx_mars, "mars_gamma": mars_gamma,
+            # Spectral Normalization
+            "n_layers": n_layers, "spectral_normalization": spectral_normalization,
             # AdamW_adv defaults
             "adam_betas": adam_betas, "adam_eps": adam_eps, "adam_weight_decay": adam_weight_decay,
             "adam_use_bias_correction": adam_use_bias_correction, "adam_use_atan2": adam_use_atan2,
@@ -194,6 +204,7 @@ class Muon_adv(torch.optim.Optimizer):
         }
         self.stochastic_rounding = stochastic_rounding
         self.compiled_optimizer = compiled_optimizer
+        self._init_lr = lr
 
         super().__init__(params, defaults)
 
@@ -263,14 +274,36 @@ class Muon_adv(torch.optim.Optimizer):
             device = p.device
 
             if state['factored']:
-                    state['effective_shape'] = _get_effective_shape(p.numel())
-                    d1, d2 = state['effective_shape']
-                    state['mu_mbuf_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
-                    state['mv_mbuf_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
-                    packed_d2 = (d2 + 7) // 8
-                    state['sign_buf'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                state['effective_shape'] = _get_effective_shape(p.numel())
+                d1, d2 = state['effective_shape']
+                state['mu_mbuf_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
+                state['mv_mbuf_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+                packed_d2 = (d2 + 7) // 8
+                state['sign_buf'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
             else:
                 state['momentum_buffer'] = torch.zeros_like(p)
+
+            # Spectral Normalization
+            if group.get('spectral_normalization', False):
+                gen = param_update.get_generator(device)
+
+                # Case A: Factored Muon
+                if state['factored']:
+                    d1, d2 = state['effective_shape']
+                    # We need a vector matching the 'inner' dimension d2
+                    state['spectral_v'] = torch.randn(d2, device=device, dtype=dtype, generator=gen)
+
+                # Case B: Standard Muon (Linear, Conv2d, etc.)
+                elif len(p.shape) >= 2:
+                    # Since Muon performs `update.flatten(1)`, the matrix becomes
+                    # (p.shape[0], product_of_rest).
+                    d_in_flat = p.numel() // p.shape[0]
+
+                    state['spectral_v'] = torch.randn(d_in_flat, device=device, dtype=dtype, generator=gen)
+
+                # Normalize initial vector for stability
+                if 'spectral_v' in state:
+                    state['spectral_v'].div_(state['spectral_v'].norm())
 
             # MARS-M state initialization
             if group.get('approx_mars', False):
@@ -280,6 +313,7 @@ class Muon_adv(torch.optim.Optimizer):
             # NorMuon state initialization
             if group['normuon_variant']:
                 if state['factored']:
+                    d1, _ = state['effective_shape']
                     state['normuon_v'] = torch.zeros(d1, device=p.device, dtype=torch.float32)
                 elif len(p.shape) >= 2:
                     state['normuon_v'] = torch.zeros(p.shape[0], device=p.device, dtype=torch.float32)
@@ -347,7 +381,7 @@ class Muon_adv(torch.optim.Optimizer):
             else:
                 lr = group['lr']
                 muon_step_param = self._muon_step_parameter
-            
+
             muon_step_param(p, grad, state, group, lr, random_int_tensor)
 
     def compile(self, *args, **kwargs):
@@ -362,6 +396,24 @@ class Muon_adv(torch.optim.Optimizer):
         nesterov = group['nesterov']
         Simplified_AdEMAMix = group['Simplified_AdEMAMix']
         alpha_grad = group['alpha_grad']
+
+        if group.get('spectral_normalization', False):
+            # Compute Scaling Factors
+            if state['factored']:
+                shape_for_scaling = torch.Size(state['effective_shape'])
+            else:
+                shape_for_scaling = p.shape
+
+            scaled_eps, _, spectral_target, wd_scale = get_spectral_scaling(shape_for_scaling, group['n_layers'])
+
+            weight_decay = group['weight_decay'] * wd_scale
+            decoupled_wd = True
+
+            ns_eps = scaled_eps
+        else:
+            weight_decay = group['weight_decay']
+            decoupled_wd = False
+            ns_eps = group['ns_eps']
 
         # MARS-M Approximated (Variance Reduction)
         if group.get('approx_mars', False):
@@ -403,19 +455,24 @@ class Muon_adv(torch.optim.Optimizer):
             update = newton_schulz(
                 update,
                 steps=group['ns_steps'],
-                eps=group['ns_eps'],
+                eps=ns_eps,
                 coeffs=group['ns_coeffs'],
                 cns=group['accelerated_ns'],
                 cns_a_bound=group['cns_a_bound'],
                 low_rank_ortho=group['low_rank_ortho'],
-                ortho_rank=group['ortho_rank']
+                ortho_rank=group['ortho_rank'],
+                spectral_normalization=group.get('spectral_normalization', False)
             )
 
             if group['normuon_variant']:
                 normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['normuon_eps'])
 
-            # Factored RMS-aligned scaling
-            rms_adjustment(update, group['rms_rescaling'], lr)
+            if group.get('spectral_normalization', False):
+                # Spectral Normalization
+                spectral_norm_update(update, state['spectral_v'], spectral_target, lr)
+            else:
+                # Factored RMS-aligned scaling
+                rms_adjustment(update, group['rms_rescaling'], lr)
 
             update = update.reshape(p.shape)
 
@@ -448,24 +505,29 @@ class Muon_adv(torch.optim.Optimizer):
                 update = newton_schulz(
                     update,
                     steps=group['ns_steps'],
-                    eps=group['ns_eps'],
+                    eps=ns_eps,
                     coeffs=group['ns_coeffs'],
                     cns=group['accelerated_ns'],
                     cns_a_bound=group['cns_a_bound'],
                     low_rank_ortho=group['low_rank_ortho'],
-                    ortho_rank=group['ortho_rank']
+                    ortho_rank=group['ortho_rank'],
+                    spectral_normalization=group.get('spectral_normalization', False)
                 )
 
                 # NorMuon Logic
                 if group['normuon_variant']:
                     normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['normuon_eps'])
 
-                # RMS-aligned rescaling
-                rms_adjustment(update, group['rms_rescaling'], lr)
+                if group.get('spectral_normalization', False):
+                    # Spectral Normalization
+                    spectral_norm_update(update, state['spectral_v'], spectral_target, lr)
+                else:
+                    # RMS-aligned rescaling
+                    rms_adjustment(update, group['rms_rescaling'], lr)
 
                 update = update.reshape(original_shape)
 
-        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
+        param_update.apply_parameter_update(self, p, group, update, lr, wd=weight_decay, random_int_tensor=random_int_tensor, decoupled=decoupled_wd)
 
     @torch.no_grad()
     def step(self, closure=None):

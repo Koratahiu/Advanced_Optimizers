@@ -8,6 +8,7 @@ def _newton_schulz_iteration(
     coeffs: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
     cns: bool = False,
     cns_a_bound: float = 1e-4,
+    spectral_normalization: bool = False,
 ) -> torch.Tensor:
     """
     Performs the Newton-Schulz iteration to find the nearest orthogonal matrix.
@@ -42,7 +43,10 @@ def _newton_schulz_iteration(
         X = X.mT
 
     # Normalize spectral norm to at most 1
-    X.div_(X.norm(dim=(-2, -1), keepdim=True).clamp_min_(eps))
+    if spectral_normalization:
+        X.div_(X.norm(dim=(-2, -1), keepdim=True).add_(eps))
+    else:
+        X.div_(X.norm(dim=(-2, -1), keepdim=True).clamp_min_(eps))
 
     # Select matrix multiplication function based on dimension (Batched vs Standard)
     mm_fn = torch.baddbmm if X.ndim > 2 else torch.addmm
@@ -127,6 +131,7 @@ def newton_schulz(
     cns_a_bound: float = 1e-4,
     low_rank_ortho: bool = False,
     ortho_rank: int = 128,
+    spectral_normalization: bool = False,
 ) -> torch.Tensor:
     """
     Public entry point for Muon orthogonalization.
@@ -173,7 +178,8 @@ def newton_schulz(
                 eps=eps,
                 coeffs=coeffs,
                 cns=cns,
-                cns_a_bound=cns_a_bound
+                cns_a_bound=cns_a_bound,
+                spectral_normalization = spectral_normalization
             )
 
             # 5. Project back to the original space
@@ -186,7 +192,8 @@ def newton_schulz(
         eps=eps,
         coeffs=coeffs,
         cns=cns,
-        cns_a_bound=cns_a_bound
+        cns_a_bound=cns_a_bound,
+        spectral_normalization=spectral_normalization
     )
 
 def _is_suitable_for_muon(
@@ -309,8 +316,9 @@ def _auto_projection_for_adamuon(raw_update: torch.Tensor, kappa_p: float) -> to
     # Spherical (p=2) - rotation invariant
     if p == 2.0:
         # Normalize (L2=1)
-        norm = x.norm(p=2).clamp_min_(EPS)
-        x.div_(norm)
+        # We skip this, since _newton_schulz_iteration will normalize it.
+        # norm = x.norm(p=2).clamp_min_(EPS)
+        # x.div_(norm)
         return x
 
     # General p case - hybrid optimizer
@@ -320,3 +328,85 @@ def _auto_projection_for_adamuon(raw_update: torch.Tensor, kappa_p: float) -> to
     # Denominator: ||x||_p^(p-1)
     den = x.norm(p=p).pow_(p - 1).clamp_min_(EPS)
     return num.div_(den)
+
+@torch.no_grad()
+def spectral_norm_update(update: torch.Tensor, vector_state: torch.Tensor, target_scale: float, lr):
+    """
+    From the paper:
+    "Hyperparameter Transfer Enables Consistent Gains of Matrix-Preconditioned Optimizers Across Scales"
+    Applies explicit Spectral Normalization (Section F of the paper).
+    Rescales the update A_t to (target_scale * A_t / sigma_t).
+
+    Args:
+        update: The optimizer update matrix (A_t).
+        vector_state: The persistent vector for power iteration (v_t).
+        target_scale: sqrt(d_out / d_in).
+    """
+    # Power Iteration to estimate spectral norm
+    # u = A @ v
+    u = torch.mv(update, vector_state)
+
+    # v_new = A.T @ u
+    v_new = torch.mv(update.mT, u)
+
+    # Normalize v_new to get next state
+    v_norm = torch.linalg.vector_norm(v_new)
+
+    # if v_norm >= 0.5:
+    #    vector_state.copy_(v_new.div_(v_norm.clamp_min_(1e-12))).to(vector_state.dtype))
+    candidate_v = v_new / v_norm
+    next_state = torch.where(v_norm >= 0.5, candidate_v, vector_state)
+    vector_state.copy_(next_state.to(vector_state.dtype))
+    # Else: We keep the old vector_state (which is a random unit vector at init)
+
+    # Estimate sigma = ||A @ v|| (since v is unit norm)
+    # Re-compute A @ v_new with the updated vector for better estimate
+    Av = torch.mv(update, vector_state)
+    sigma = torch.linalg.vector_norm(Av)
+
+    # Rescale update
+    # A_new = target_scale * A / sigma
+    update.mul_(lr * (target_scale / sigma.clamp_min_(1e-12)))
+
+    return update
+
+def get_spectral_scaling(shape: torch.Size, n_layers: int):
+    """
+    From the paper:
+    "Hyperparameter Transfer Enables Consistent Gains of Matrix-Preconditioned Optimizers Across Scales"
+    Calculates the scaling factors based on the paper's rules.
+    Assumes shape is (d_out, d_in).
+
+    Returns:
+        ns_eps: Damping for Newton-Schul.
+        adaptive_eps: Epsilon for AdaMuon/NorMuon denominator.
+        spectral_target: Target spectral norm
+        wd_scale: Weight decay scale
+    """
+    d_out, d_in = shape[0], shape[1]
+
+    # Handle Convolutional/Flattened tensors
+    if len(shape) > 2:
+        d_in = shape[1:].numel()
+
+
+    # Scaling for Epsilon (Table 2)
+    L = max(1, n_layers)
+
+    # A) Newton-Schulz Damping
+    # This ensures the matrix orthogonalization is stable across scales.
+    # Formula: (1/L) * sqrt(d_in / d_out)
+    ns_eps = (1.0 / L) * (d_in / d_out) ** 0.5
+
+    # B) Adaptive Denominator Epsilon
+    # This ensures the Adam-style division doesn't explode or vanish.
+    # Formula: (1/L) * (1 / sqrt(d_in * d_out))
+    adaptive_eps = (1.0 / L) * (1.0 / (d_in * d_out)**0.5)
+
+    # Spectral Target (Section F) -> sqrt(d_out/d_in)
+    spectral_target = (d_out / d_in) ** 0.5
+
+    # Weight Decay (Section 3.4) -> 1/width
+    wd_scale = 1.0 / d_in
+
+    return ns_eps, adaptive_eps, spectral_target, wd_scale
