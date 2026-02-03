@@ -7,6 +7,7 @@ from typing import Optional, Callable
 from ..util import param_update
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.update_util import _grams_update, _cautious_update
+from ..util.normalized_update import spectral_norm_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 
@@ -228,6 +229,23 @@ class AdamW_adv(torch.optim.Optimizer):
                 # Second moment (v)
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
+            if group.get('normed_var', True):
+                gen = param_update.get_generator(device)
+
+                # Case A: Factored optimizer
+                if state['factored']:
+                    _, d2 = state['effective_shape']
+                    # We need a vector matching the 'inner' dimension d2
+                    state['spectral_v'] = torch.randn(d2, device=device, dtype=dtype, generator=gen)
+                # Case B: Standard optimizer (Linear, Conv2d, etc.)
+                elif p.ndim >= 2:
+                    d_in_flat = p.numel() // p.shape[0]
+                    state['spectral_v'] = torch.randn(d_in_flat, device=device, dtype=dtype, generator=gen)
+
+                # Normalize initial vector for stability
+                if 'spectral_v' in state:
+                    state['spectral_v'].div_(state['spectral_v'].norm())
+
         beta1, beta2 = group['betas']
 
         current_step = state['step']
@@ -331,8 +349,11 @@ class AdamW_adv(torch.optim.Optimizer):
             del vt
 
             update_scaling = step_size * A if group['use_atan2'] else step_size
-            update = update.view(p.shape).mul_(update_scaling)
-
+            if group.get('normed_var', True):
+                update = spectral_norm_update(update, state['effective_shape'], group['is_hidden'], update_scaling, group['L'], state.get('spectral_v'))
+            else:
+                update.mul_(update_scaling)
+            update = update.view(p.shape)
         else:  # Standard AdamW logic for non-factored tensors
             if beta1 > 0:
                 exp_avg = state['exp_avg']
@@ -370,7 +391,10 @@ class AdamW_adv(torch.optim.Optimizer):
             del denom
 
             update_scaling = step_size * A if group['use_atan2'] else step_size
-            update.mul_(update_scaling)
+            if group.get('normed_var', True):
+                update = spectral_norm_update(update, p.shape, group['is_hidden'], update_scaling, group['L'], state.get('spectral_v'))
+            else:
+                update.mul_(update_scaling)
 
         param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor)
 
