@@ -8,7 +8,7 @@ from ..util.factorization_util import _get_effective_shape, _reconstruct_state, 
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.update_util import _grams_update, _cautious_update
-from ..util.normalized_update import spectral_norm_update
+from ..util.normalized_update import spectral_norm_update, get_weight_decay_scaling, get_adaptive_eps_scaling
 
 A = 4 / math.pi
 
@@ -181,6 +181,7 @@ class Adopt_adv(torch.optim.Optimizer):
         self.Simplified_AdEMAMix = Simplified_AdEMAMix
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
+        self._init_lr = lr
         super().__init__(params, defaults)
 
         if self.kourkoutas_beta:
@@ -318,6 +319,14 @@ class Adopt_adv(torch.optim.Optimizer):
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
 
+        if group.get('normed_var', True):
+            wd_scale = get_weight_decay_scaling(p.shape)
+            wd = group["weight_decay"] * wd_scale
+            decoupled_wd = True
+        else:
+            decoupled_wd = False
+            wd = group["weight_decay"]
+
         if state['factored']:
             d1, d2 = state['effective_shape']
             grad_reshaped = grad.view(d1, d2)
@@ -387,7 +396,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
             update_scaling = lr * A if self.use_atan2 else lr
             if group.get('normed_var', True):
-                update = spectral_norm_update(update, state['effective_shape'], group['is_hidden'], update_scaling, group['L'], state.get('spectral_v'))
+                update = spectral_norm_update(update, state, group, state['effective_shape'], update_scaling)
             else:
                 update.mul_(update_scaling)
             update = update.view(p.shape)
@@ -440,7 +449,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
             update_scaling = lr * A if self.use_atan2 else lr
             if group.get('normed_var', True):
-                update = spectral_norm_update(update, p.shape, group['is_hidden'], update_scaling, group['L'], state.get('spectral_v'))
+                update = spectral_norm_update(update, state, group, p.shape, update_scaling)
             else:
                 update.mul_(update_scaling)
 
@@ -448,7 +457,7 @@ class Adopt_adv(torch.optim.Optimizer):
             vt.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
         # Parameter Update
-        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
+        param_update.apply_parameter_update(self, p, group, update, lr, wd=wd, decoupled=decoupled_wd, random_int_tensor=random_int_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)

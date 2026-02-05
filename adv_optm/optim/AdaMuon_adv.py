@@ -261,6 +261,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
         if compiled_optimizer:
             self.compile(fullgraph=True)
 
+        self.init_step()
+
     @property
     def supports_fused_back_pass(self):
         return True
@@ -284,6 +286,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
         if 'is_muon' in state:
             return
+
+        state['is_muon'] = True
 
         if group['use_muon']:
 
@@ -345,11 +349,9 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 state['last_grad'] = torch.zeros_like(p, device=device, dtype=p.dtype)
 
             group['adam_kourkoutas_beta'] = False
-            state['is_muon'] = True # Workaround as group was acting weirdly; passing muon params in adam path
 
         else: # AdamW
             Muon_AuxAdam._init_auxadam_state(self, p, group)
-            state['is_muon'] = False
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
@@ -368,7 +370,16 @@ class AdaMuon_adv(torch.optim.Optimizer):
             # Pre-generate random tensor for stochastic rounding if needed.
             random_int_tensor = param_update._get_random_int_for_sr(p)
 
-        if not state['is_muon']: # AdamW path
+        if state['is_muon']: # Muon path
+            if is_compiled:
+                lr = torch.as_tensor(group['lr'], dtype=torch.float64)
+                muon_step_param = self._compiled_muon_step_parameter
+            else:
+                lr = group['lr']
+                muon_step_param = self._muon_step_parameter
+
+            muon_step_param(p, grad, state, group, lr, random_int_tensor)
+        else: # AdamW path
             step = state['step']
 
             beta1_adam, beta2_adam = group['adam_betas']
@@ -400,15 +411,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             state['step'] += 1
 
-        else: # Muon path
-            if is_compiled:
-                lr = torch.as_tensor(group['lr'], dtype=torch.float64)
-                muon_step_param = self._compiled_muon_step_parameter
-            else:
-                lr = group['lr']
-                muon_step_param = self._muon_step_parameter
-
-            muon_step_param(p, grad, state, group, lr, random_int_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_muon_step_parameter = torch.compile(self._muon_step_parameter, *args, **kwargs)

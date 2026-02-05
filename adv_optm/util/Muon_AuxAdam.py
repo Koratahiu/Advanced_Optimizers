@@ -6,6 +6,7 @@ from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.update_util import _grams_update, _cautious_update
+from ..util.normalized_update import spectral_norm_update, get_weight_decay_scaling
 
 A = 4 / math.pi
 
@@ -46,6 +47,26 @@ def _init_auxadam_state(self, p, group):
             state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
         state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
+    # Spectral Normalization
+    if group.get('spectral_normalization', False) and p.ndim > 1:
+        gen = param_update.get_generator(p.device)
+
+        # Case A: Factored optimizer
+        if state['factored']:
+            _, d2 = state['effective_shape']
+            # We need a vector matching the 'inner' dimension d2
+            state['spectral_v'] = torch.randn(d2, device=p.device, dtype=dtype, generator=gen)
+        # Case B: Standard optimizer (Linear, Conv2d, etc.)
+        elif p.ndim >= 2:
+            d_in_flat = p.numel() // p.shape[0]
+            state['spectral_v'] = torch.randn(d_in_flat, device=p.device, dtype=dtype, generator=gen)
+
+        # Normalize initial vector for stability
+        if 'spectral_v' in state:
+            state['spectral_v'].div_(state['spectral_v'].norm())
+
+    state['is_muon'] = False
+
 
 @torch.no_grad()
 def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sqrt_bias_correction2, step_size, random_int_tensor):
@@ -61,6 +82,14 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
     if group.get('adam_use_AdEMAMix'):
         beta3_ema = group['adam_beta3_ema']
         alpha = group['adam_alpha']
+
+    if group.get('spectral_normalization', False):
+        wd_scale = get_weight_decay_scaling(p.shape)
+        wd = group["adam_weight_decay"] * wd_scale
+        decoupled_wd = True
+    else:
+        decoupled_wd = False
+        wd = group["adam_weight_decay"]
 
     if state['factored']:
         d1, d2 = state['effective_shape']
@@ -119,7 +148,11 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
         del vt
 
         update_scaling = step_size * A if group['adam_use_atan2'] else step_size
-        update = update.view(p.shape).mul_(update_scaling)
+        if group.get('spectral_normalization', False):
+            update = spectral_norm_update(update, state, group, state['effective_shape'], update_scaling)
+        else:
+            update.mul_(update_scaling)
+        update = update.view(p.shape)
 
     else:  # Standard AdamW logic for non-factored tensors
         if beta1_adam > 0:
@@ -158,6 +191,9 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
         del denom
 
         update_scaling = step_size * A if group['adam_use_atan2'] else step_size
-        update.mul_(update_scaling)
+        if group.get('spectral_normalization', False):
+            update = spectral_norm_update(update, state, group, p.shape, update_scaling)
+        else:
+            update.mul_(update_scaling)
 
-    param_update.apply_parameter_update(self, p, group, update, step_size, group["adam_weight_decay"], random_int_tensor=random_int_tensor)
+    param_update.apply_parameter_update(self, p, group, update, step_size, wd=wd, decoupled=decoupled_wd, random_int_tensor=random_int_tensor)

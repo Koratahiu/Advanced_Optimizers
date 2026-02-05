@@ -6,6 +6,7 @@ from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.lion_k import _get_lion_k_update
+from ..util.normalized_update import spectral_norm_update, get_weight_decay_scaling
 
 
 class SignSGD_adv(torch.optim.Optimizer):
@@ -93,6 +94,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             nnmf_factor=nnmf_factor,
         )
         self.stochastic_rounding = stochastic_rounding
+        self._init_lr = lr
         super().__init__(params, defaults)
 
         if self.stochastic_rounding:
@@ -146,6 +148,22 @@ class SignSGD_adv(torch.optim.Optimizer):
                 state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
             else:
                 state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
+            if group.get('normed_var', True):
+                gen = param_update.get_generator(p.device)
+
+                # Case A: Factored optimizer
+                if state['factored']:
+                    _, d2 = state['effective_shape']
+                    # We need a vector matching the 'inner' dimension d2
+                    state['spectral_v'] = torch.randn(d2, device=p.device, dtype=dtype, generator=gen)
+                # Case B: Standard optimizer (Linear, Conv2d, etc.)
+                elif p.ndim >= 2:
+                    d_in_flat = p.numel() // p.shape[0]
+                    state['spectral_v'] = torch.randn(d_in_flat, device=p.device, dtype=dtype, generator=gen)
+
+                # Normalize initial vector for stability
+                if 'spectral_v' in state:
+                    state['spectral_v'].div_(state['spectral_v'].norm())
 
         lr = group["lr"]
 
@@ -179,6 +197,14 @@ class SignSGD_adv(torch.optim.Optimizer):
             else:
                 kappa_p = 1.0
 
+        if group.get('normed_var', True):
+            wd_scale = get_weight_decay_scaling(p.shape)
+            wd = group["weight_decay"] * wd_scale
+            decoupled_wd = True
+        else:
+            decoupled_wd = False
+            wd = group["weight_decay"]
+
         momentum = group["momentum"]
         Simplified_AdEMAMix = group["Simplified_AdEMAMix"]
         alpha_grad = group["alpha_grad"]
@@ -205,8 +231,11 @@ class SignSGD_adv(torch.optim.Optimizer):
 
             update = _get_lion_k_update(raw_update, kappa_p)
 
-            update = update.view(p.shape).mul_(lr)
-
+            if group.get('normed_var', True):
+                update = spectral_norm_update(update, state, group, state['effective_shape'], lr)
+            else:
+                update.mul_(lr)
+            update = update.view(p.shape)
         else:
             # Fallback to standard SignSGD logic
             if momentum > 0:
@@ -222,9 +251,12 @@ class SignSGD_adv(torch.optim.Optimizer):
 
             update = _get_lion_k_update(raw_update, kappa_p)
 
-            update = update.mul_(lr)
+            if group.get('normed_var', True):
+                update = spectral_norm_update(update, state, group, p.shape, lr)
+            else:
+                update.mul_(lr)
 
-        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
+        param_update.apply_parameter_update(self, p, group, update, lr, wd=wd, random_int_tensor=random_int_tensor, decoupled=decoupled_wd)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
