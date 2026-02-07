@@ -255,7 +255,7 @@ class Adopt_adv(torch.optim.Optimizer):
                     state['exp_avg_slow'] = torch.zeros_like(p, device=p.device, dtype=dtype)
                 state['exp_avg_sq'] = grad.to(dtype).square()
 
-            if group.get('normed_var', True):
+            if group.get('spectral_normalization', True):
                 gen = param_update.get_generator(p.device)
 
                 # Case A: Factored optimizer
@@ -319,7 +319,7 @@ class Adopt_adv(torch.optim.Optimizer):
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
 
-        if group.get('normed_var', True):
+        if group.get('spectral_normalization', True):
             wd_scale = get_weight_decay_scaling(p.shape)
             wd = group["weight_decay"] * wd_scale
             decoupled_wd = True
@@ -395,7 +395,7 @@ class Adopt_adv(torch.optim.Optimizer):
             update = update.view(p.shape)
 
             update_scaling = lr * A if self.use_atan2 else lr
-            if group.get('normed_var', True):
+            if group.get('spectral_normalization', True):
                 update = spectral_norm_update(update, state, group, state['effective_shape'], update_scaling)
             else:
                 update.mul_(update_scaling)
@@ -448,7 +448,7 @@ class Adopt_adv(torch.optim.Optimizer):
                     update = normalized_grad
 
             update_scaling = lr * A if self.use_atan2 else lr
-            if group.get('normed_var', True):
+            if group.get('spectral_normalization', True):
                 update = spectral_norm_update(update, state, group, p.shape, update_scaling)
             else:
                 update.mul_(update_scaling)

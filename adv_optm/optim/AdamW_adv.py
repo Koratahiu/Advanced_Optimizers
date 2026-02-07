@@ -229,7 +229,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 # Second moment (v)
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
-            if group.get('normed_var', True):
+            if group.get('spectral_normalization', True):
                 gen = param_update.get_generator(device)
 
                 # Case A: Factored optimizer
@@ -349,7 +349,7 @@ class AdamW_adv(torch.optim.Optimizer):
             del vt
 
             update_scaling = step_size * A if group['use_atan2'] else step_size
-            if group.get('normed_var', True):
+            if group.get('spectral_normalization', True):
                 update = spectral_norm_update(update, state['effective_shape'], group['is_hidden'], update_scaling, group['L'], state.get('spectral_v'))
             else:
                 update.mul_(update_scaling)
@@ -391,7 +391,7 @@ class AdamW_adv(torch.optim.Optimizer):
             del denom
 
             update_scaling = step_size * A if group['use_atan2'] else step_size
-            if group.get('normed_var', True):
+            if group.get('spectral_normalization', True):
                 update = spectral_norm_update(update, p.shape, group['is_hidden'], update_scaling, group['L'], state.get('spectral_v'))
             else:
                 update.mul_(update_scaling)

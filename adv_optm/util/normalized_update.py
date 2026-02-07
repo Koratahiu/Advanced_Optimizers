@@ -36,7 +36,12 @@ def spectral_norm_update(update: torch.Tensor, state, group, shape, lr):
     # Compute Current Norm (Sigma)
     if is_vector:
         # For biases / vectors: Use Euclidean / RMS norm
-        sigma = torch.linalg.vector_norm(update)
+        if len(shape) == 2:
+        #if group.get('is_batched'):
+            # For batched vectors [num_vectors, n_elements] like those in textural inversions, and OFT.
+            sigma = torch.linalg.vector_norm(update, dim=1, keepdim=True)
+        else:
+            sigma = torch.linalg.vector_norm(update)
     else:
         if is_hidden:
             target_norm *= (d_out / d_in_total) ** 0.5 
@@ -71,6 +76,20 @@ def spectral_norm_update(update: torch.Tensor, state, group, shape, lr):
 
     return update
 
+def init_state(state, p, gen):
+    # Case A: Factored optimizer
+    if state['factored']:
+        _, d2 = state['effective_shape']
+        # We need a vector matching the 'inner' dimension d2
+        state['spectral_v'] = torch.randn(d2, device=p.device, dtype=p.dtype, generator=gen)
+    # Case B: Standard optimizer (Linear, Conv2d, etc.)
+    elif p.ndim >= 2:
+        d_in_flat = p.numel() // p.shape[0]
+        state['spectral_v'] = torch.randn(d_in_flat, device=p.device, dtype=p.dtype, generator=gen)
+
+    # Normalize initial vector for stability
+    if 'spectral_v' in state:
+        state['spectral_v'].div_(state['spectral_v'].norm())
 
 def get_weight_decay_scaling(shape: torch.Size):
     """

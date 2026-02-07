@@ -148,7 +148,7 @@ class SignSGD_adv(torch.optim.Optimizer):
                 state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
             else:
                 state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
-            if group.get('normed_var', True):
+            if group.get('spectral_normalization', True):
                 gen = param_update.get_generator(p.device)
 
                 # Case A: Factored optimizer
@@ -197,7 +197,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             else:
                 kappa_p = 1.0
 
-        if group.get('normed_var', True):
+        if group.get('spectral_normalization', True):
             wd_scale = get_weight_decay_scaling(p.shape)
             wd = group["weight_decay"] * wd_scale
             decoupled_wd = True
@@ -231,7 +231,7 @@ class SignSGD_adv(torch.optim.Optimizer):
 
             update = _get_lion_k_update(raw_update, kappa_p)
 
-            if group.get('normed_var', True):
+            if group.get('spectral_normalization', True):
                 update = spectral_norm_update(update, state, group, state['effective_shape'], lr)
             else:
                 update.mul_(lr)
@@ -251,7 +251,7 @@ class SignSGD_adv(torch.optim.Optimizer):
 
             update = _get_lion_k_update(raw_update, kappa_p)
 
-            if group.get('normed_var', True):
+            if group.get('spectral_normalization', True):
                 update = spectral_norm_update(update, state, group, p.shape, lr)
             else:
                 update.mul_(lr)

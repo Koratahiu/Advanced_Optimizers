@@ -91,7 +91,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             the uncompressed optimizer. (default: False)
         use_muon (bool | None): whether to use Muon or AuxAdamW. MUST be provided
             either here or via `optim_type` in parameter groups. (default: None)
-        n_layers (int): The depth of the network (L). Required for optimal epsilon scaling. (default: 1)
+        n_layers (int): The depth of the network (L). Required for spectral_normalization. (default: 1)
         spectral_normalization (bool): Enable explicit spectral normalization using power iteration. (default: False)
         --- Auxiliary AdamW_adv Parameters (used for 'adam' groups) ---
         adam_betas (tuple[float, float]): Betas for the AdamW optimizer part.
