@@ -35,7 +35,7 @@ def _newton_schulz_iteration(
 
     a, b, c = coeffs
 
-    X = G
+    X = G.to(torch.bfloat16)
 
     # Transpose if needed
     transposed = X.size(-2) > X.size(-1)
@@ -118,7 +118,7 @@ def _newton_schulz_iteration(
     if transposed:
         X = X.mT
 
-    return X
+    return X.to(G.dtype)
 
 
 @torch.no_grad()
