@@ -7,7 +7,7 @@ from ..util import param_update
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state, _nnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
-from ..util.update_util import _grams_update, _cautious_update
+from ..util.update_util import _grams_update, _cautious_update, _scale_sim_AdEMAMix_update
 
 A = 4 / math.pi
 
@@ -279,6 +279,8 @@ class Adopt_adv(torch.optim.Optimizer):
             lr = group['lr']
             step_param_fn = self._step_parameter
 
+        if self.Simplified_AdEMAMix:
+            lr = _scale_sim_AdEMAMix_update(beta1, state['step'] + 1, group["alpha_grad"], lr)
 
         step_param_fn(p, grad, state, group, lr, beta1, beta2, random_int_tensor)
 

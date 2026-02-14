@@ -7,6 +7,7 @@ from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
+from ..util.update_util import _scale_sim_AdEMAMix_update
 
 # A little helper from the original simplified_AdEMAMix
 def linear_hl_warmup_scheduler(step, beta_end, beta_start=0, warmup=1):
@@ -236,6 +237,8 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         sqrt_den_num = math.sqrt(state['den_sum'] / state['num_sum'])
 
         lr = group["lr"]
+
+        lr = _scale_sim_AdEMAMix_update(beta1, state['step'] + 1, group["alpha_grad"], lr)
 
         random_int_tensor = None
 
