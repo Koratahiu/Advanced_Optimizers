@@ -9,7 +9,7 @@ from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
-from ..util.update_util import _grams_update, _cautious_update
+from ..util.update_util import _grams_update, _cautious_update, _scale_sim_AdEMAMix_update
 
 A = 4 / math.pi
 
@@ -348,6 +348,9 @@ class Prodigy_adv(torch.optim.Optimizer):
         else:
             d = group['d']
             step_param_fn = self._step_parameter
+
+        if self.Simplified_AdEMAMix:
+            dlr = _scale_sim_AdEMAMix_update(self.beta1, state['step'] + 1, group["alpha_grad"], dlr)
 
         step_param_fn(p, grad, state, group, beta2, d, dlr, random_int_tensor)
 
