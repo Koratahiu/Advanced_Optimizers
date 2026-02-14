@@ -6,6 +6,10 @@ A comprehensive, all-in-one collection of optimization algorithms for deep learn
 
 ## 🔥 What's New
 
+### in 2.2.2
+
+- `Simplified_AdEMAMix` now uses the same LR as AdamW for all `beta1` and `alpha_grad` values!
+
 ### in 2.1.x
 
 - Added Signum (SignSGD with momentum): A new optimizer in the family (SignSGD_adv)
@@ -163,14 +167,6 @@ This library integrates multiple state-of-the-art optimization techniques valida
 |----------|---------|--------------|
 | `beta1` | 0.99 | Controls accumulator memory length:<br>• Small BS: **0.99–0.9999**<br>• Large BS: **0.9** |
 | `Grad α` | 100 | Most critical parameter:<br>• Inversely scales with batch size<br>• **100–10** for small BS (≤32)<br>• **1–0.1** for large BS (≥512) |
-
-> ⚠️ **Critical**: Requires **~100x smaller learning rate** than AdamW (e.g., 1e-6 vs 1e-4).
-> For `Prodigy_Adv`, set `initial_d` to:
-> - **LoRA**: `1e-8`
-> - **Full FT**: `1e-10`
-> - **Embedding**: `1e-7`
-
-> ⚠️ **Incompatible** with: **Cautious**, **Grams**, **atan2**, and standard update clipping.
 
 ---
 
