@@ -120,6 +120,78 @@ def _newton_schulz_iteration(
 
     return X.to(G.dtype)
 
+@torch.no_grad()
+def _compiled_newton_schulz_iteration(
+    G: torch.Tensor,
+    steps: int = 5,
+    eps: float = 1e-7,
+    coeffs: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
+    cns: bool = False,
+    cns_a_bound: float = 1e-4,
+    spectral_normalization: bool = False,
+) -> torch.Tensor:
+    """
+    Newton-Schulz iteration refactored for torch.compile compatibility.
+    Removes mutable buffers and in-place operations in favor of functional graph construction.
+    """
+    assert G.ndim in (2, 3), f"Input must be 2D or 3D, got {G.ndim}D"
+
+    a, b, c = coeffs
+
+    X = G.to(torch.bfloat16)
+
+    # Transpose if needed
+    transposed = X.size(-2) > X.size(-1)
+    if transposed:
+        X = X.mT
+
+    # Normalize spectral norm to at most 1
+    if spectral_normalization:
+        X.div_(X.norm(dim=(-2, -1), keepdim=True).add_(eps))
+    else:
+        X.div_(X.norm(dim=(-2, -1), keepdim=True).clamp_min_(eps))
+
+    if cns:
+        # Chebyshev-accelerated Newton-Schulz (CANS)
+        lower_bound = cns_a_bound
+        upper_bound = 1.0
+
+        for _ in range(steps):
+            lb, ub = lower_bound, upper_bound
+            lb_ub = lb * ub
+            # Calculate Mean Square Error term
+            e_sq = (lb**2 + lb_ub + ub**2) / 3.0
+
+            # Calculate components for alpha and bounds update
+            K = 2.0 * e_sq**1.5
+            L = lb_ub * (lb + ub)
+            denom = K + L
+            alpha = 6.0 / denom
+
+            c1 = alpha * e_sq
+            c3 = -alpha / 3.0
+
+            # Apply the 3rd-order Newton-Schulz update
+            A = X @ X.mT
+            X = c1 * X + c3 * (A @ X)
+
+            # Update the singular value bounds for the next iteration based on the error
+            eps_val = (K - L) / denom
+            lower_bound, upper_bound = 1.0 - eps_val, 1.0 + eps_val
+
+    else:
+        # Standard Quintic Newton-Schulz
+        # Update: X = a*X + b*(A@X) + c*(A@A@X)
+        for _ in range(steps):
+            A = X @ X.mT
+            B = b * A + c * (A @ A)
+            X = a * X + B @ X
+
+    # Transpose back if necessary
+    if transposed:
+        X = X.mT
+
+    return X.to(G.dtype)
 
 @torch.no_grad()
 def newton_schulz(
@@ -132,6 +204,7 @@ def newton_schulz(
     low_rank_ortho: bool = False,
     ortho_rank: int = 128,
     spectral_normalization: bool = False,
+    compiled: bool = False,
 ) -> torch.Tensor:
     """
     Public entry point for Muon orthogonalization.
@@ -149,6 +222,11 @@ def newton_schulz(
         low_rank_ortho (bool): Whether to project to low rank before orthogonalizing.
         ortho_rank (int): Rank for low-rank projection.
     """
+    if compiled:
+        ns_fn = _compiled_newton_schulz_iteration
+    else:
+        ns_fn = _newton_schulz_iteration
+
     if low_rank_ortho:
         # Low-Rank Orthogonalization via Gaussian Sketching
         M = G
@@ -172,7 +250,7 @@ def newton_schulz(
             projected_M = Q.T @ M
 
             # 4. Orthogonalize the smaller projected matrix
-            ortho_projected_M = _newton_schulz_iteration(
+            ortho_projected_M = ns_fn(
                 projected_M,
                 steps=steps,
                 eps=eps,
@@ -186,7 +264,7 @@ def newton_schulz(
             return Q @ ortho_projected_M
 
     # Standard Path
-    return _newton_schulz_iteration(
+    return ns_fn(
         G,
         steps=steps,
         eps=eps,
