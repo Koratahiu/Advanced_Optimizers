@@ -10,7 +10,7 @@ from .optim import (
     SignSGD_adv,
 )
 
-from .stiefel_optm.stiefel_lora import (
+from .stiefel_optm.Stiefel_LoRA import (
     Stiefel_LoRA,
 )
 

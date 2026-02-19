@@ -200,8 +200,9 @@ class Stiefel_LoRA(torch.optim.Optimizer):
             update = raw_update.sign_()
 
         if not is_stiefel:
-            scale_factor = (p.numel()) ** 0.5
-            update = update.mul_(lr/scale_factor)
+            # The RMS of a sign() tensor is 1.
+            # We scale it to 0.2 to match the approx RMS of AdamW
+            update = update.mul_(lr * 0.2)
 
         stiefel_util.apply_stiefel_update(self, p, group, update, lr, random_int_tensor=random_int_tensor, is_B=is_stiefel, is_A=is_stiefel_euclidean)
 

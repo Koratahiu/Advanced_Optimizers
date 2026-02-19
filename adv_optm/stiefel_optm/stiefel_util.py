@@ -25,9 +25,14 @@ def qr_retraction(p):
     return p.copy_(Q)
 
 def rms_rescaling(update, lr):
-    """Rescales update to have Frobenius norm exactly equal to lr."""
+    """Rescales update to have RMS (Root Mean Square) of 0.2."""
+    # RMS = sqrt(mean(update**2))
+    # Frobenius Norm = sqrt(sum(update**2))
+    # Relationship: Norm = RMS * sqrt(numel)
+    numel = update.numel()
     norm = torch.linalg.vector_norm(update).clamp_min_(1e-12)
-    return update.mul_(lr/norm)
+    target_norm = lr * (numel ** 0.5) * 0.2
+    return update.mul_(target_norm / norm)
 
 def set_flags_AB(p):
     """
@@ -57,6 +62,10 @@ def apply_stiefel_update(
     if is_B:
         # Disable weight decay for the ortho matrix B
         wd = 0
+
+    if is_A:
+        # For matrix A, normalize weight decay by rank to make it invariant
+        wd = wd / p.shape[0]
 
     scaled_wd = wd * (lr / self._init_lr)
 
