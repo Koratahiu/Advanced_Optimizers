@@ -10,6 +10,11 @@ from .optim import (
     SignSGD_adv,
 )
 
+from .stiefel_optm.stiefel_lora import (
+    Stiefel_LoRA,
+)
+
+
 __all__ = [
     "AdamW_adv",
     "Prodigy_adv",
@@ -20,6 +25,7 @@ __all__ = [
     "Muon_adv",
     "AdaMuon_adv",
     "SignSGD_adv",
+    "Stiefel_LoRA",
 ]
 
 __version__ = "2.2.3"
