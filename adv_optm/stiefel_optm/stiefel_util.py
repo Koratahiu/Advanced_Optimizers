@@ -4,8 +4,6 @@ from torch import Tensor
 
 from typing import Dict, Any
 
-from ..util.param_update import _copy_stochastic_core_, copy_stochastic_
-
 def trangent_proj(p, update, lr):
     """
     [Stiefel-LoRA] Step 1: Tangent Space Projection
@@ -52,6 +50,7 @@ def apply_stiefel_update(
     is_B: bool | None = None,
     is_A: bool | None = None,
 ) -> None:
+    from ..util.param_update import _copy_stochastic_core_, copy_stochastic_
     wd = group["weight_decay"] if wd is None else wd
     cautious = group.get('cautious_wd', False)
 
