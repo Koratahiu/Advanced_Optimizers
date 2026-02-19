@@ -59,8 +59,8 @@ def apply_stiefel_update(
     wd = group["weight_decay"] if wd is None else wd
     cautious = group.get('cautious_wd', False)
 
-    if is_B:
-        # Disable weight decay for the ortho matrix B
+    if is_B or p.ndim == 1:
+        # Disable weight decay for the ortho matrix B or DoRA norm
         wd = 0
 
     if is_A:

@@ -28,4 +28,4 @@ __all__ = [
     "Stiefel_LoRA",
 ]
 
-__version__ = "2.3.dev1"
+__version__ = "2.3.dev2"
