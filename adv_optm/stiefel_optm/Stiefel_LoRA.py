@@ -153,7 +153,7 @@ class Stiefel_LoRA(torch.optim.Optimizer):
         if grad.dtype != torch.float32 and state['factored']:
             grad = grad.float()
 
-        is_stiefel, is_stiefel_euclidean = stiefel_util.set_flags_AB(p)
+        is_stiefel, is_stiefel_euclidean, is_scale = stiefel_util.set_flags_AB(p)
 
         momentum = group["momentum"]
         Simplified_AdEMAMix = group["Simplified_AdEMAMix"]
@@ -204,7 +204,13 @@ class Stiefel_LoRA(torch.optim.Optimizer):
             # We scale it to 0.2 to match the approx RMS of AdamW
             update = update.mul_(lr * 0.2)
 
-        stiefel_util.apply_stiefel_update(self, p, group, update, lr, random_int_tensor=random_int_tensor, is_B=is_stiefel, is_A=is_stiefel_euclidean)
+        stiefel_util.apply_stiefel_update(
+            self, p, group, update, lr,
+            random_int_tensor=random_int_tensor, 
+            is_B=is_stiefel,
+            is_A=is_stiefel_euclidean,
+            is_scale=is_scale
+        )
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)

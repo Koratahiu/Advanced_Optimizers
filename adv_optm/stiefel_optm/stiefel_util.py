@@ -36,13 +36,26 @@ def rms_rescaling(update, lr):
 
 def set_flags_AB(p):
     """
-    Identify if parameter is LoRA A or B factor based on dimensions.
-    B: (dim_out, rank) - tall matrix, Stiefel manifold
-    A: (rank, dim_in) - wide matrix, Euclidean space
+    Identify if parameter is LoRA A, B, or a scale parameter.
     """
-    B = p.ndim == 2 and p.shape[0] > p.shape[1]
-    A = p.ndim == 2 and p.shape[0] < p.shape[1]
-    return B, A
+    if getattr(p, '_is_dora_scale', False):
+        return False, False, True
+    if getattr(p, '_is_lora_B', False):
+        return True, False, False
+    if getattr(p, '_is_lora_A', False):
+        return False, True, False
+
+    # Fallback heuristic (handles 4D Conv2d layers properly)
+    dim0 = p.shape[0]
+    dim1 = p.shape[1] if p.ndim > 1 else 1
+
+    is_scale = p.ndim == 1 or (p.ndim == 2 and (dim0 == 1 or dim1 == 1))
+    if is_scale:
+        return False, False, True
+
+    B = dim0 > dim1
+    A = dim0 < dim1
+    return B, A, False
 
 def apply_stiefel_update(
     self,
@@ -54,12 +67,13 @@ def apply_stiefel_update(
     random_int_tensor: Tensor | None = None,
     is_B: bool | None = None,
     is_A: bool | None = None,
+    is_scale: bool | None = False,
 ) -> None:
     from ..util.param_update import _copy_stochastic_core_, copy_stochastic_
     wd = group["weight_decay"] if wd is None else wd
     cautious = group.get('cautious_wd', False)
 
-    if is_B or p.ndim == 1:
+    if is_B or p.ndim == 1 or is_scale:
         # Disable weight decay for the ortho matrix B or DoRA norm
         wd = 0
 
