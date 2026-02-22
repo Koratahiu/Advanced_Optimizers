@@ -8,6 +8,7 @@ from ..util.factorization_util import _get_effective_shape, _reconstruct_state, 
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.update_util import _grams_update, _cautious_update, _scale_sim_AdEMAMix_update
+from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 
 A = 4 / math.pi
 
@@ -133,6 +134,8 @@ class Adopt_adv(torch.optim.Optimizer):
         k_warmup_steps: int = 0,
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
+        # Scaled Optimizer
+        scaled_optm: bool = False,
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
@@ -167,6 +170,7 @@ class Adopt_adv(torch.optim.Optimizer):
             "alpha_grad": alpha_grad,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
+            "scaled_optm": scaled_optm,
             "nnmf_factor": nnmf_factor,
             "compiled_optimizer": compiled_optimizer,
         }
@@ -180,6 +184,7 @@ class Adopt_adv(torch.optim.Optimizer):
         self.Simplified_AdEMAMix = Simplified_AdEMAMix
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
+        self._init_lr = lr
         super().__init__(params, defaults)
 
         if self.kourkoutas_beta:
@@ -252,6 +257,9 @@ class Adopt_adv(torch.optim.Optimizer):
                 if self.use_AdEMAMix:
                     state['exp_avg_slow'] = torch.zeros_like(p, device=p.device, dtype=dtype)
                 state['exp_avg_sq'] = grad.to(dtype).square()
+
+            if group.get('scaled_optm', False) and is_spectral(p):
+                init_spectral_norm(group, state, p)
 
         beta1, beta2 = group['betas']
 
@@ -369,9 +377,6 @@ class Adopt_adv(torch.optim.Optimizer):
 
             update = update.view(p.shape)
 
-            update_scaling = lr * A if self.use_atan2 else lr
-            update.mul_(update_scaling)
-
         else: # Standard ADOPT logic for non-factored tensors
             vt = state['exp_avg_sq'] # v_{t-1}
 
@@ -418,11 +423,16 @@ class Adopt_adv(torch.optim.Optimizer):
                 else:
                     update = normalized_grad
 
-            update_scaling = lr * A if self.use_atan2 else lr
-            update.mul_(update_scaling)
 
             # Update second moment v_t for the next step using raw g_t
             vt.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+        update_scaling = lr * A if self.use_atan2 else lr
+
+        if group.get('scaled_optm', False):
+            update = scale_update(p, update, update_scaling, vector_state=state.get('spectral_v'))
+        else:
+            update.mul_(update_scaling)
 
         # Parameter Update
         param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)

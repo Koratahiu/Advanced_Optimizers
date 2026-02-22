@@ -3,6 +3,8 @@ from torch import Tensor
 
 from typing import Dict, Any
 
+from .scaled_optm import scale_wd
+
 _generators: Dict[torch.device, torch.Generator] = {}
 
 
@@ -32,6 +34,11 @@ def apply_parameter_update(
     """
     wd = group["weight_decay"] if wd is None else wd
     cautious = group.get('cautious_wd', False)
+
+    if group.get('scaled_optm', False):
+        decoupled = True
+        wd = scale_wd(wd, p)
+
     if decoupled:
         scaled_wd = wd * (lr / self._init_lr)
     else:

@@ -9,6 +9,7 @@ from ..util.factorization_util import _get_effective_shape, _reconstruct_state, 
 from ..util.update_util import _grams_update, _cautious_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
+from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 
 A = 4 / math.pi
 
@@ -114,6 +115,8 @@ class AdamW_adv(torch.optim.Optimizer):
         k_warmup_steps: int = 0,
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
+        # Scaled Optimizer
+        scaled_optm: bool = False,
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
@@ -142,6 +145,7 @@ class AdamW_adv(torch.optim.Optimizer):
             "beta3_ema": beta3_ema, "alpha": alpha, "compiled_optimizer": compiled_optimizer,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
+            "scaled_optm": scaled_optm,
             "nnmf_factor": nnmf_factor
         }
         self.stochastic_rounding = stochastic_rounding
@@ -150,6 +154,7 @@ class AdamW_adv(torch.optim.Optimizer):
         self.use_AdEMAMix = use_AdEMAMix
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
+        self._init_lr = lr
         super().__init__(params, defaults)
 
         if self.kourkoutas_beta:
@@ -227,6 +232,9 @@ class AdamW_adv(torch.optim.Optimizer):
                     state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
                 # Second moment (v)
                 state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
+
+            if group.get('scaled_optm', False) and is_spectral(p):
+                init_spectral_norm(group, state, p)
 
         beta1, beta2 = group['betas']
 
@@ -330,8 +338,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 update.div_(denom)
             del vt
 
-            update_scaling = step_size * A if group['use_atan2'] else step_size
-            update = update.view(p.shape).mul_(update_scaling)
+            update = update.view(p.shape)
 
         else:  # Standard AdamW logic for non-factored tensors
             if beta1 > 0:
@@ -369,7 +376,10 @@ class AdamW_adv(torch.optim.Optimizer):
                 update.div_(denom)
             del denom
 
-            update_scaling = step_size * A if group['use_atan2'] else step_size
+        update_scaling = step_size * A if group['use_atan2'] else step_size
+        if group.get('scaled_optm', False):
+            update = scale_update(p, update, update_scaling, vector_state=state.get('spectral_v'))
+        else:
             update.mul_(update_scaling)
 
         param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor)

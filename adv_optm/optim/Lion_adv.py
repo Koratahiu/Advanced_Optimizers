@@ -6,6 +6,7 @@ from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state, _pack_bools, _unpack_bools
 from ..util.lion_k import _get_lion_k_update
+from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 
 
 class Lion_adv(torch.optim.Optimizer):
@@ -71,6 +72,8 @@ class Lion_adv(torch.optim.Optimizer):
         # Projected and adaptive sign
         freeze_on_flip: bool = False,
         l1_scale_lr: bool = False,
+        # Scaled Optimizer
+        scaled_optm: bool = False,
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
@@ -94,12 +97,14 @@ class Lion_adv(torch.optim.Optimizer):
             clip_threshold=clip_threshold,
             kappa_p=kappa_p,
             auto_kappa_p=auto_kappa_p,
-            nnmf_factor=nnmf_factor,
             freeze_on_flip=freeze_on_flip,
             l1_scale_lr=l1_scale_lr,
+            scaled_optm= scaled_optm,
+            nnmf_factor=nnmf_factor,
         )
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
+        self._init_lr = lr
         super().__init__(params, defaults)
 
         if self.stochastic_rounding:
@@ -161,6 +166,9 @@ class Lion_adv(torch.optim.Optimizer):
                 state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
                 if group.get("freeze_on_flip", True):
                     state['prev_sign'] = (grad > 0).to(torch.uint8)
+
+            if group.get('scaled_optm', False) and is_spectral(p):
+                init_spectral_norm(group, state, p)
 
         state['step'] += 1
         lr = group["lr"]
@@ -268,7 +276,10 @@ class Lion_adv(torch.optim.Optimizer):
                 update = torch.where(current_sign == state['prev_sign'], update, 0.0)
                 state['prev_sign'] = current_sign
 
-        update.mul_(lr)
+        if group.get('scaled_optm', False):
+            update = scale_update(p, update, lr, vector_state=state.get('spectral_v'))
+        else:
+            update.mul_(lr)
 
         param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 

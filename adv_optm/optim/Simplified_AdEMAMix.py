@@ -8,6 +8,7 @@ from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.update_util import _scale_sim_AdEMAMix_update
+from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 
 # A little helper from the original simplified_AdEMAMix
 def linear_hl_warmup_scheduler(step, beta_end, beta_start=0, warmup=1):
@@ -104,6 +105,8 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         k_warmup_steps: int = 0,
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
+        # Scaled Optimizer
+        scaled_optm: bool = False,
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
@@ -130,11 +133,13 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
+            "scaled_optm": scaled_optm,
             "nnmf_factor": nnmf_factor,
         }
         self.stochastic_rounding = stochastic_rounding
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
+        self._init_lr = lr
         super().__init__(params, defaults)
 
         if self.kourkoutas_beta:
@@ -206,6 +211,9 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             else:
                 state['num_sum'] = 1.0
                 state['den_sum'] = 1.0
+
+            if group.get('scaled_optm', False) and is_spectral(p):
+                init_spectral_norm(group, state, p)
 
         beta1_final, beta2 = group["betas"]
 
@@ -291,7 +299,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             update.div_(denom)
             del vt
 
-            update = update.view(p.shape).mul_(lr * sqrt_den_num)
+            update = update.view(p.shape)
 
         else:  # Standard optimizer logic for non-factored tensors
             exp_avg_sq = state['exp_avg_sq']
@@ -307,6 +315,9 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             update.div_(denom)
             del denom
 
+        if group.get('scaled_optm', False):
+            update = scale_update(p, update, lr * sqrt_den_num, vector_state=state.get('spectral_v'))
+        else:
             update.mul_(lr * sqrt_den_num)
 
         param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
