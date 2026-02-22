@@ -4,7 +4,7 @@ from typing import Optional
 
 from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
-from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
+from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state, _pack_bools, _unpack_bools
 from ..util.lion_k import _get_lion_k_update
 
 
@@ -44,6 +44,10 @@ class SignSGD_adv(torch.optim.Optimizer):
             current gradient. For small batch sizes, use high values (e.g., 10-100) to be
             more responsive. For large batch sizes, use low values (e.g., 0-1) for
             stability. (default: 100.0)
+        freeze_on_flip (bool): Projected SignGD One-hit freeze. Masks updates for
+            coordinates where the gradient sign flips compared to the previous step. (default: False)
+        l1_scale_lr (bool): Scales learning rate dynamically 
+            by the L1 norm of the gradient to handle gradient heterogeneity. (default: False)
         nnmf_factor (bool): whether to use the factorization or use the
             uncompressed optimizer. (default: True)
     """
@@ -66,6 +70,9 @@ class SignSGD_adv(torch.optim.Optimizer):
         # Simplified_AdEMAMix
         alpha_grad: float = 1.0,
         Simplified_AdEMAMix: bool = False,
+        # Projected and adaptive sign
+        freeze_on_flip: bool = False,
+        l1_scale_lr: bool = False,
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
@@ -91,6 +98,8 @@ class SignSGD_adv(torch.optim.Optimizer):
             alpha_grad=alpha_grad,
             Simplified_AdEMAMix=Simplified_AdEMAMix,
             nnmf_factor=nnmf_factor,
+            freeze_on_flip=freeze_on_flip,
+            l1_scale_lr=l1_scale_lr,
         )
         self.stochastic_rounding = stochastic_rounding
         super().__init__(params, defaults)
@@ -142,10 +151,15 @@ class SignSGD_adv(torch.optim.Optimizer):
                 d1, d2 = state['effective_shape']
                 state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
                 state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                packed_d2 = (d2 + 7) // 8
-                state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+                if group.get("freeze_on_flip", True):
+                    state['sign'] = _pack_bools(grad.view(d1, d2) > 0)
+                else:
+                    packed_d2 = (d2 + 7) // 8
+                    state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
             else:
                 state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
+                if group.get("freeze_on_flip", True):
+                    state['prev_sign'] = (grad > 0).to(torch.uint8)
 
         lr = group["lr"]
 
@@ -179,14 +193,22 @@ class SignSGD_adv(torch.optim.Optimizer):
             else:
                 kappa_p = 1.0
 
+        if group.get("l1_scale_lr", False) and kappa_p == 1:
+            # Scale step size by L1 norm
+            lr = lr * grad.norm(p=1)
+
         momentum = group["momentum"]
         Simplified_AdEMAMix = group["Simplified_AdEMAMix"]
         alpha_grad = group["alpha_grad"]
+        freeze_on_flip = group.get("freeze_on_flip", False) and kappa_p == 1
 
-        if state['factored']:
+        if state.get('factored'):
             # Factored Path
             d1, d2 = state['effective_shape']
             grad_reshaped = grad.view(d1, d2)
+
+            if freeze_on_flip:
+                prev_sign_packed = state['sign'].clone()
 
             if momentum > 0:
                 # Reconstruct momentum m_{t-1}
@@ -202,10 +224,18 @@ class SignSGD_adv(torch.optim.Optimizer):
                 state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True)
             else:
                 raw_update = grad_reshaped.clone()
+                if freeze_on_flip:
+                    state['sign'] = _pack_bools(raw_update > 0)
 
             update = _get_lion_k_update(raw_update, kappa_p)
+            update = update.view(p.shape)
 
-            update = update.view(p.shape).mul_(lr)
+            if freeze_on_flip:
+                # Fast binary diff (XOR) from momentum sign directly
+                flipped_packed = prev_sign_packed ^ state['sign']
+                flipped_mask = _unpack_bools(flipped_packed, original_m=d2).view_as(update)
+                update = torch.where(flipped_mask, 0.0, update)
+                del prev_sign_packed, flipped_packed, flipped_mask
 
         else:
             # Fallback to standard SignSGD logic
@@ -222,7 +252,12 @@ class SignSGD_adv(torch.optim.Optimizer):
 
             update = _get_lion_k_update(raw_update, kappa_p)
 
-            update = update.mul_(lr)
+            if freeze_on_flip:
+                current_sign = (raw_update > 0).to(torch.uint8)
+                update = torch.where(current_sign == state['prev_sign'], update, 0.0)
+                state['prev_sign'] = current_sign
+
+        update = update.mul_(lr)
 
         param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 

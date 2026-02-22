@@ -4,7 +4,7 @@ from typing import Tuple, Optional
 
 from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
-from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
+from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state, _pack_bools, _unpack_bools
 from ..util.lion_k import _get_lion_k_update
 
 
@@ -42,6 +42,10 @@ class Lion_adv(torch.optim.Optimizer):
             parameter dimensionality. Sets p=2.0 for 4D tensors (Conv2D) (Biases/Norms) to
             use Spherical updates, and p=1.0 for others (Linear/Embeddings) to use Sign
             updates. Overrides explicit kappa_p value. (default: False).
+        freeze_on_flip (bool): Projected SignGD One-hit freeze. Masks updates for
+            coordinates where the gradient sign flips compared to the previous step. (default: False)
+        l1_scale_lr (bool): Scales learning rate dynamically 
+            by the L1 norm of the gradient to handle gradient heterogeneity. (default: False)
         nnmf_factor (bool): whether to use the factorization or use the
             uncompressed optimizer. (default: True)
     """
@@ -64,6 +68,9 @@ class Lion_adv(torch.optim.Optimizer):
         # Lion-k
         kappa_p: float = 1.0,
         auto_kappa_p: bool = False,
+        # Projected and adaptive sign
+        freeze_on_flip: bool = False,
+        l1_scale_lr: bool = False,
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
@@ -88,6 +95,8 @@ class Lion_adv(torch.optim.Optimizer):
             kappa_p=kappa_p,
             auto_kappa_p=auto_kappa_p,
             nnmf_factor=nnmf_factor,
+            freeze_on_flip=freeze_on_flip,
+            l1_scale_lr=l1_scale_lr,
         )
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
@@ -143,9 +152,15 @@ class Lion_adv(torch.optim.Optimizer):
                 state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
                 state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                 packed_d2 = (d2 + 7) // 8
-                state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+                if group.get("freeze_on_flip", True):
+                    state['sign'] = _pack_bools(grad.view(d1, d2) > 0)
+                else:
+                    packed_d2 = (d2 + 7) // 8
+                    state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
             else: # Fallback to standard Lion
                 state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
+                if group.get("freeze_on_flip", True):
+                    state['prev_sign'] = (grad > 0).to(torch.uint8)
 
         state['step'] += 1
         lr = group["lr"]
@@ -184,12 +199,20 @@ class Lion_adv(torch.optim.Optimizer):
             else:
                 kappa_p = 1.0
 
+        if group.get("l1_scale_lr", False) and kappa_p == 1:
+            # Scale step size by L1 norm
+            lr = lr * grad.norm(p=1)
+
         beta1, beta2 = group["betas"]
+        freeze_on_flip = group.get("freeze_on_flip", False) and kappa_p == 1
 
         if state['factored']:
             # Factored Path
             d1, d2 = state['effective_shape']
             grad_reshaped = grad.view(d1, d2)
+
+            if freeze_on_flip:
+                prev_sign_packed = state['sign'].clone()
 
             # Reconstruct momentum m_{t-1}
             exp_avg = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
@@ -213,7 +236,14 @@ class Lion_adv(torch.optim.Optimizer):
                 update.mul_(mask)
                 del mask
 
-            update = update.view(p.shape).mul_(lr)
+            update = update.view(p.shape)
+
+            if freeze_on_flip:
+                # Fast binary diff (XOR) from momentum sign directly
+                flipped_packed = prev_sign_packed ^ state['sign']
+                flipped_mask = _unpack_bools(flipped_packed, original_m=d2).view_as(update)
+                update = torch.where(flipped_mask, 0.0, update)
+                del prev_sign_packed, flipped_packed, flipped_mask
 
         else:
             # Fallback to standard Lion logic
@@ -230,10 +260,15 @@ class Lion_adv(torch.optim.Optimizer):
                 update.mul_(mask)
                 del mask
 
-            update.mul_(lr)
-
             # Standard Lion momentum update
             exp_avg.lerp_(grad, 1 - beta2)
+
+            if freeze_on_flip:
+                current_sign = (update > 0).to(torch.uint8)
+                update = torch.where(current_sign == state['prev_sign'], update, 0.0)
+                state['prev_sign'] = current_sign
+
+        update.mul_(lr)
 
         param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 
