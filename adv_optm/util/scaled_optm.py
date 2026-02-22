@@ -93,7 +93,7 @@ def init_spectral_norm(group, state, p):
 def spectral_normalization(update: torch.Tensor, vector_state: torch.Tensor, lr):
     """
     From the paper:
-    "Hyperparameter Transfer Enables Consistent Gains of Matrix-Preconditioned Optimizers Across Scales"
+    "Scalable Optimization in the Modular Norm" (https://arxiv.org/abs/2405.14813)
     Applies explicit Spectral Normalization.
     """
     shape = update.shape
