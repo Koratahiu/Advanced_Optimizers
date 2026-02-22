@@ -49,7 +49,7 @@ def scale_wd(wd, p):
 def l2_normalization(update: torch.Tensor, dim: float |None, lr: float):
     """
     """
-    norm = torch.linalg.vector_norm(update, p=2, dim=dim, keepdim=True).clamp_min_(1e-12)
+    norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).clamp_min_(1e-12)
     return update.mul_(lr /norm)
 
 
@@ -58,7 +58,7 @@ def rms_normalization(update: torch.Tensor, dim: float |None, lr: float):
     """
     """
     n = update.numel()
-    norm = torch.linalg.vector_norm(update, p=2, dim=dim, keepdim=True).clamp_min_(1e-12)
+    norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).clamp_min_(1e-12)
     return update.mul_(lr * (n**0.5)/norm)
 
 
