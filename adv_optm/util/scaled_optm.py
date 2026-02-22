@@ -39,7 +39,7 @@ def scale_wd(wd, p):
     elif lora_a:
         wd = wd/p.shape[0]
     elif p.ndim > 2:
-        wd = wd/p.shape[1]
+        wd = wd/p.shape[1:].numel()
     else:
         wd = 0
     return wd
