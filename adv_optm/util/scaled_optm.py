@@ -36,10 +36,8 @@ def scale_wd(wd, p):
     dora_scale = getattr(p, '_is_dora_scale', False)
     if dora_scale:
         wd = 0
-        return wd
     elif lora_a:
         wd = wd/p.shape[0]
-        return wd
     elif p.ndim > 2:
         wd = wd/p.shape[1]
     else:
