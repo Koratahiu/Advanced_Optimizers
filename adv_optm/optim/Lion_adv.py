@@ -225,7 +225,7 @@ class Lion_adv(torch.optim.Optimizer):
             update = torch.lerp(grad_reshaped, exp_avg, beta1)
 
             if group.get("l1_scale_lr", False) and kappa_p == 1:
-                lr = lr * (update.norm(p=1)/(update.numel()))
+                lr = lr * (update.norm(p=1))
 
             # Standard Lion momentum update
             # m_t = beta2 * m_{t-1} + (1-beta2) * g_t
@@ -260,7 +260,7 @@ class Lion_adv(torch.optim.Optimizer):
             update = torch.lerp(grad, exp_avg, beta1)
 
             if group.get("l1_scale_lr", False) and kappa_p == 1:
-                lr = lr * (update.norm(p=1)/(update.numel()))
+                lr = lr * (update.norm(p=1))
 
             update = _get_lion_k_update(update, kappa_p)
 
