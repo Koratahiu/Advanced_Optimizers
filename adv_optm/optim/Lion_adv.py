@@ -207,10 +207,6 @@ class Lion_adv(torch.optim.Optimizer):
             else:
                 kappa_p = 1.0
 
-        if group.get("l1_scale_lr", False) and kappa_p == 1:
-            # Scale step size by L1 norm
-            lr = lr * grad.norm(p=1)
-
         beta1, beta2 = group["betas"]
         freeze_on_flip = group.get("freeze_on_flip", False) and kappa_p == 1
 
@@ -227,6 +223,9 @@ class Lion_adv(torch.optim.Optimizer):
 
             # Compute update term c_t
             update = torch.lerp(grad_reshaped, exp_avg, beta1)
+
+            if group.get("l1_scale_lr", False) and kappa_p == 1:
+                lr = lr * (update.norm(p=1)/(update.numel()))
 
             # Standard Lion momentum update
             # m_t = beta2 * m_{t-1} + (1-beta2) * g_t
@@ -259,6 +258,9 @@ class Lion_adv(torch.optim.Optimizer):
 
             # Compute update term
             update = torch.lerp(grad, exp_avg, beta1)
+
+            if group.get("l1_scale_lr", False) and kappa_p == 1:
+                lr = lr * (update.norm(p=1)/(update.numel()))
 
             update = _get_lion_k_update(update, kappa_p)
 

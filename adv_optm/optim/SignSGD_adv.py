@@ -7,6 +7,7 @@ from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state, _pack_bools, _unpack_bools
 from ..util.lion_k import _get_lion_k_update
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
+from ..util.update_util import _scale_sim_AdEMAMix_update
 
 
 class SignSGD_adv(torch.optim.Optimizer):
@@ -169,6 +170,9 @@ class SignSGD_adv(torch.optim.Optimizer):
             if group.get('scaled_optm', False) and is_spectral(p):
                 init_spectral_norm(group, state, p)
 
+            if group.get("l1_scale_lr", False):
+                state["step"] = 0
+
         lr = group["lr"]
 
         random_int_tensor = None
@@ -183,6 +187,9 @@ class SignSGD_adv(torch.optim.Optimizer):
             step_param_fn = self._step_parameter
 
         step_param_fn(p, grad, state, group, lr, random_int_tensor)
+
+        if group.get("l1_scale_lr", False):
+            state["step"] += 1
 
     def _step_parameter(self, p, grad, state, group, lr, random_int_tensor):
         if grad.dtype != torch.float32 and state['factored']:
@@ -200,10 +207,6 @@ class SignSGD_adv(torch.optim.Optimizer):
                 kappa_p = 2.0
             else:
                 kappa_p = 1.0
-
-        if group.get("l1_scale_lr", False) and kappa_p == 1:
-            # Scale step size by L1 norm
-            lr = lr * grad.norm(p=1)
 
         momentum = group["momentum"]
         Simplified_AdEMAMix = group["Simplified_AdEMAMix"]
@@ -235,6 +238,13 @@ class SignSGD_adv(torch.optim.Optimizer):
                 if freeze_on_flip:
                     state['sign'] = _pack_bools(raw_update > 0)
 
+            if group.get("l1_scale_lr", False) and kappa_p == 1:
+                if Simplified_AdEMAMix:
+                    scale_factor = 1 / _scale_sim_AdEMAMix_update(momentum, state["step"] + 1, alpha_grad, 1)
+                else:
+                    scale_factor = 1 / _scale_sim_AdEMAMix_update(momentum, state["step"] + 1, 0, 1)
+                lr = lr * (raw_update.norm(p=1)/(scale_factor * raw_update.numel()))
+
             update = _get_lion_k_update(raw_update, kappa_p)
             update = update.view(p.shape)
 
@@ -257,6 +267,13 @@ class SignSGD_adv(torch.optim.Optimizer):
                     raw_update = exp_avg.clone()
             else:
                 raw_update = grad.clone()
+
+            if group.get("l1_scale_lr", False) and kappa_p == 1:
+                if Simplified_AdEMAMix:
+                    scale_factor = 1 / _scale_sim_AdEMAMix_update(momentum, state["step"] + 1, alpha_grad, 1)
+                else:
+                    scale_factor = 1 / _scale_sim_AdEMAMix_update(momentum, state["step"] + 1, 0, 1)
+                lr = lr * (raw_update.norm(p=1)/(scale_factor * raw_update.numel()))
 
             update = _get_lion_k_update(raw_update, kappa_p)
 
