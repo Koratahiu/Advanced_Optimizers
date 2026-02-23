@@ -39,8 +39,13 @@ def quantize_blockwise(p, block_size, bits=8):
 
     return quantized, scales.squeeze(1), min_vals.squeeze(1)
 
-def _init_anchor(p, state, mode):
+def _init_anchor(p, state, group):
     """Initializes the anchor state based on the selected mode."""
+    if not group.get('centered_wd', False) or is_wd_centered(p):
+        return
+
+    mode = group['centered_wd_mode']
+
     numel = p.numel()
 
     # Skip empty/tiny tensors or 1D tensors (like biases/LayerNorms)
@@ -49,20 +54,18 @@ def _init_anchor(p, state, mode):
         state['anchor_type'] = 'full'
         return
 
-    p_detached = p.detach()
-
     # Hoist shared state definitions
     state['anchor_orig_shape'] = p.shape
     state['anchor_numel'] = numel
     state['anchor_type'] = mode
 
     if mode == 'float8':
-        state['anchor_data'] = p_detached.to(torch.float8_e4m3fn)
+        state['anchor_data'] = p.to(torch.float8_e4m3fn)
         return
 
     elif mode == 'int8':
         block_size = 128
-        q_blocks, scales, mins = quantize_blockwise(p_detached, block_size, bits=8)
+        q_blocks, scales, mins = quantize_blockwise(p, block_size, bits=8)
 
         state['anchor_data'] = q_blocks
         state['anchor_scale'] = scales.to(p.dtype)
@@ -71,7 +74,7 @@ def _init_anchor(p, state, mode):
 
     elif mode == 'int4':
         block_size = 32
-        q_blocks, scales, mins = quantize_blockwise(p_detached, block_size, bits=4)
+        q_blocks, scales, mins = quantize_blockwise(p, block_size, bits=4)
 
         q_flat = q_blocks.view(-1)
 
@@ -84,7 +87,7 @@ def _init_anchor(p, state, mode):
         state['anchor_block_size'] = block_size
 
     elif mode == 'full':
-        state['anchor_data'] = p_detached.clone()
+        state['anchor_data'] = p.clone()
 
 def dequantize_anchor(p, state):
     """Restores the anchor to the original shape/dtype."""

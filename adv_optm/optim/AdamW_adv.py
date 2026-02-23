@@ -10,6 +10,7 @@ from ..util.update_util import _grams_update, _cautious_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
+from ..util.centered_decay import _init_anchor
 
 A = 4 / math.pi
 
@@ -172,6 +173,16 @@ class AdamW_adv(torch.optim.Optimizer):
         if compiled_optimizer:
             self.compile(fullgraph=True)
 
+    def load_state_dict(self, state_dict: dict) -> None:
+        """
+        Overrides default load_state_dict to implement a workaround for PyTorch's
+        automatic dtype casting. It ensures factorized states remain float32 for 
+        stability, preserves integer/float8 quantized anchor states, and forces 
+        standard states onto the parameter's current dtype/device.
+        """
+        super().load_state_dict(state_dict)
+        param_update.post_process_loaded_state(self)
+
     @property
     def supports_fused_back_pass(self):
         return True
@@ -235,6 +246,8 @@ class AdamW_adv(torch.optim.Optimizer):
 
             if group.get('scaled_optm', False) and is_spectral(p):
                 init_spectral_norm(group, state, p)
+
+            _init_anchor(p, state, group)
 
         beta1, beta2 = group['betas']
 

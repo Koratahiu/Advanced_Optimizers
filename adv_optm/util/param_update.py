@@ -1,11 +1,48 @@
 import torch
 from torch import Tensor
+from torch.optim import Optimizer
 
 from typing import Dict, Any
 
 from .scaled_optm import scale_wd
+from .centered_decay import dequantize_anchor
 
 _generators: Dict[torch.device, torch.Generator] = {}
+
+
+def _apply_weight_decay(
+    p_calc: Tensor,
+    update_calc: Tensor,
+    p: Tensor,
+    state: Dict[str, Any],
+    group: Dict[str, Any],
+    scaled_wd: float | Tensor
+) -> None:
+    """
+    Apply decoupled weight decay 
+    (Standard, Cautious, and/or Centered) to the parameter.
+    """
+    cautious = group.get('cautious_wd', False)
+    centered = group.get('centered_wd', False)
+
+    # Determine the target for weight decay: (p) or (p - anchor)
+    if centered and 'anchor_type' in state:
+        anchor = dequantize_anchor(p, state).to(p_calc.dtype)
+        decay_target = p_calc.sub(anchor, out=anchor)
+    else:
+        decay_target = p_calc
+
+    if cautious:
+        # Cautious Weight Decay: only decay if the update pushes in the same direction as the decay
+        mask = (update_calc * decay_target >= 0).to(p_calc.dtype)
+        p_calc.addcmul_(decay_target, mask, value=-scaled_wd)
+        del mask
+    else:
+        # Standard decoupled weight decay
+        p_calc.add_(decay_target, alpha=-scaled_wd)
+
+    if centered and 'anchor_type' in state:
+        del anchor, decay_target
 
 
 def apply_parameter_update(
@@ -19,7 +56,7 @@ def apply_parameter_update(
     decoupled: bool = False,
 ) -> None:
     """
-    Applies decoupled weight decay (standard or cautious) and the final
+    Applies decoupled weight decay (standard, cautious, centered) and the final
     parameter update to p in-place.
 
     Args:
@@ -33,7 +70,6 @@ def apply_parameter_update(
         decoupled: Whenever to use the true decoupled weight decay.
     """
     wd = group["weight_decay"] if wd is None else wd
-    cautious = group.get('cautious_wd', False)
 
     if group.get('scaled_optm', False):
         decoupled = True
@@ -44,6 +80,8 @@ def apply_parameter_update(
     else:
         scaled_wd = wd * lr
 
+    state = self.state[p]
+
     # Compute full update in float32 if using bfloat16 with stochastic rounding
     if p.dtype == torch.bfloat16 and self.stochastic_rounding:
         p_fp32 = p.float()
@@ -51,14 +89,7 @@ def apply_parameter_update(
 
         # Apply weight decay if needed
         if wd != 0:
-            if cautious:
-                # Cautious Weight Decay
-                mask = (update_fp32 * p_fp32 >= 0).float()
-                p_fp32.addcmul_(p_fp32, mask, value=-scaled_wd)
-                del mask
-            else:
-                # Standard decoupled weight decay
-                p_fp32.add_(p_fp32, alpha=-scaled_wd)
+            _apply_weight_decay(p_fp32, update_fp32, p, state, group, scaled_wd)
 
         # Apply main update
         p_fp32.add_(-update_fp32)
@@ -76,19 +107,13 @@ def apply_parameter_update(
     else:
         # Standard path for non-bfloat16 or without stochastic rounding
         if wd != 0:
-            if cautious:
-                # Cautious Weight Decay
-                mask = (update * p >= 0).to(p.dtype)
-                p.addcmul_(p, mask, value=-scaled_wd)
-                del mask
-            else:
-                # Standard decoupled weight decay
-                p.add_(p, alpha=-scaled_wd)
+            _apply_weight_decay(p, update, p, state, group, scaled_wd)
 
         # Apply main update
         p.add_(-update)
 
     del update
+
 
 def set_seed(device: torch.device):
     """
@@ -101,6 +126,7 @@ def set_seed(device: torch.device):
         _generators[device] = torch.Generator(device=device)
     _generators[device].manual_seed(42)
 
+
 def get_generator(device: torch.device) -> torch.Generator:
     """
     Retrieves (and initializes if necessary) the deterministic generator 
@@ -109,6 +135,7 @@ def get_generator(device: torch.device) -> torch.Generator:
     if device not in _generators:
         set_seed(device)
     return _generators[device]
+
 
 def _get_random_int_for_sr(source: Tensor) -> Tensor:
     """
@@ -134,6 +161,7 @@ def _get_random_int_for_sr(source: Tensor) -> Tensor:
         high=(1 << 16),
         generator=generator,
     )
+
 
 def _copy_stochastic_core_(target: Tensor, source: Tensor, random_int_tensor: Tensor):
     """
@@ -182,3 +210,55 @@ def add_stochastic_(input: Tensor, other: Tensor, alpha: float = 1.0):
 
     result.add_(input, alpha=alpha)
     copy_stochastic_(input, result)
+
+def post_process_loaded_state(optimizer: Optimizer) -> None:
+    """
+    Fixes the dtypes of optimizer states after loading a state_dict.
+    PyTorch's load_state_dict casts all states to the parameter's dtype,
+    which breaks 8-bit/4-bit quantization and factorized float32 states.
+    """
+    for group in optimizer.param_groups:
+        for p in group['params']:
+            state = optimizer.state.get(p, None)
+            if not state:
+                continue
+
+            # Factorized states (SMMF) must remain float32 for stability
+            is_factored = state.get('factored', False)
+            target_dtype = torch.float32 if is_factored else p.dtype
+
+            a_type = state.get('anchor_type', None)
+
+            for key, val in state.items():
+                if not isinstance(val, torch.Tensor):
+                    continue
+
+                # Handle Quantized Anchor States
+                if key == 'anchor_data':
+                    if a_type in ['int8', 'int4']:
+                        if val.dtype != torch.uint8:
+                            state[key] = val.to(torch.uint8)
+                    elif a_type == 'float8':
+                        if val.dtype != torch.float8_e4m3fn:
+                            state[key] = val.to(torch.float8_e4m3fn)
+                    elif a_type == 'full':
+                        if val.dtype != p.dtype:
+                            state[key] = val.to(p.dtype)
+
+                elif key in ['anchor_scale', 'anchor_min']:
+                    # Scales and mins should match the parameter dtype
+                    if val.dtype != p.dtype:
+                        state[key] = val.to(p.dtype)
+
+                # Handle Quantized Factorization States (Sign tensors)
+                elif key in ['sign', 'sign_slow']:
+                    if val.dtype != torch.uint8:
+                        state[key] = val.to(torch.uint8)
+
+                # Handle standard Optimizer Floating Point states (m, v, etc.)
+                elif val.is_floating_point():
+                    if val.dtype != target_dtype:
+                        state[key] = val.to(target_dtype)
+
+                if state[key].device != p.device:
+                    state[key] = state[key].to(p.device)
