@@ -31,7 +31,7 @@ def scale_update(
     # Orthogonal Fine-Tuning (OFT)
     # Scales update to achieve block-size invariance O(sqrt(rank))
     elif is_oft:
-        return l2_normalization(update, dim=0, lr=lr)
+        return l2_normalization(update, dim=1, lr=lr)
 
     # LoRA Factors or Full Finetuning weights
     # Scales update to maintain consistent spectral norm across different layer sizes and ranks.
