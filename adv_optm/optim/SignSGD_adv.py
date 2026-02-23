@@ -239,10 +239,9 @@ class SignSGD_adv(torch.optim.Optimizer):
                     state['sign'] = _pack_bools(raw_update > 0)
 
             if group.get("l1_scale_lr", False) and kappa_p == 1:
-                if Simplified_AdEMAMix:
-                    scale_factor = 1 / _scale_sim_AdEMAMix_update(momentum, state["step"] + 1, alpha_grad, 1)
-                else:
-                    scale_factor = 1 / _scale_sim_AdEMAMix_update(momentum, state["step"] + 1, 0, 1)
+                if not Simplified_AdEMAMix:
+                    alpha_grad = 0
+                scale_factor = 1 / _scale_sim_AdEMAMix_update(momentum, state["step"] + 1, alpha_grad, 1)
                 lr = lr * (raw_update.norm(p=1)/(scale_factor * raw_update.numel()))
 
             update = _get_lion_k_update(raw_update, kappa_p)
@@ -269,10 +268,9 @@ class SignSGD_adv(torch.optim.Optimizer):
                 raw_update = grad.clone()
 
             if group.get("l1_scale_lr", False) and kappa_p == 1:
-                if Simplified_AdEMAMix:
-                    scale_factor = 1 / _scale_sim_AdEMAMix_update(momentum, state["step"] + 1, alpha_grad, 1)
-                else:
-                    scale_factor = 1 / _scale_sim_AdEMAMix_update(momentum, state["step"] + 1, 0, 1)
+                if not Simplified_AdEMAMix:
+                    alpha_grad = 0
+                scale_factor = 1 / _scale_sim_AdEMAMix_update(momentum, state["step"] + 1, alpha_grad, 1)
                 lr = lr * (raw_update.norm(p=1)/(scale_factor * raw_update.numel()))
 
             update = _get_lion_k_update(raw_update, kappa_p)
