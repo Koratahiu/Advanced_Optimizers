@@ -48,7 +48,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             stability. (default: 100.0)
         freeze_on_flip (bool): Projected SignGD One-hit freeze. Masks updates for
             coordinates where the gradient sign flips compared to the previous step. (default: False)
-        l1_scale_lr (bool): Scales learning rate dynamically 
+        l1_adaptive (bool): Scales learning rate dynamically 
             by the L1 norm of the gradient to handle gradient heterogeneity. (default: False)
         nnmf_factor (bool): whether to use the factorization or use the
             uncompressed optimizer. (default: True)
@@ -74,7 +74,7 @@ class SignSGD_adv(torch.optim.Optimizer):
         Simplified_AdEMAMix: bool = False,
         # Projected and adaptive sign
         freeze_on_flip: bool = False,
-        l1_scale_lr: bool = False,
+        l1_adaptive: bool = False,
         # Scaled Optimizer
         scaled_optm: bool = False,
         # SMMF factorization
@@ -103,7 +103,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             Simplified_AdEMAMix=Simplified_AdEMAMix,
             scaled_optm= scaled_optm,
             freeze_on_flip=freeze_on_flip,
-            l1_scale_lr=l1_scale_lr,
+            l1_adaptive=l1_adaptive,
             nnmf_factor=nnmf_factor,
         )
         self.stochastic_rounding = stochastic_rounding
@@ -170,7 +170,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             if group.get('scaled_optm', False) and is_spectral(p):
                 init_spectral_norm(group, state, p)
 
-            if group.get("l1_scale_lr", False):
+            if group.get("l1_adaptive", False):
                 state["step"] = 0
 
         lr = group["lr"]
@@ -188,7 +188,7 @@ class SignSGD_adv(torch.optim.Optimizer):
 
         step_param_fn(p, grad, state, group, lr, random_int_tensor)
 
-        if group.get("l1_scale_lr", False):
+        if group.get("l1_adaptive", False):
             state["step"] += 1
 
     def _step_parameter(self, p, grad, state, group, lr, random_int_tensor):
@@ -242,7 +242,7 @@ class SignSGD_adv(torch.optim.Optimizer):
                 if freeze_on_flip:
                     state['sign'] = _pack_bools(raw_update > 0)
 
-            if group.get("l1_scale_lr", False) and kappa_p == 1:
+            if group.get("l1_adaptive", False) and kappa_p == 1:
                 scale_factor = 1 / _scale_sim_AdEMAMix_update(momentum, state["step"] + 1, alpha_grad, 1)
                 lr = lr * (raw_update.norm(p=1)/scale_factor)
 
@@ -269,7 +269,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             else:
                 raw_update = grad.clone()
 
-            if group.get("l1_scale_lr", False) and kappa_p == 1:
+            if group.get("l1_adaptive", False) and kappa_p == 1:
                 scale_factor = 1 / _scale_sim_AdEMAMix_update(momentum, state["step"] + 1, alpha_grad, 1)
                 lr = lr * (raw_update.norm(p=1)/scale_factor)
 

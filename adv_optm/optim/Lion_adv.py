@@ -45,7 +45,7 @@ class Lion_adv(torch.optim.Optimizer):
             updates. Overrides explicit kappa_p value. (default: False).
         freeze_on_flip (bool): Projected SignGD One-hit freeze. Masks updates for
             coordinates where the gradient sign flips compared to the previous step. (default: False)
-        l1_scale_lr (bool): Scales learning rate dynamically 
+        l1_adaptive (bool): Scales learning rate dynamically 
             by the L1 norm of the gradient to handle gradient heterogeneity. (default: False)
         nnmf_factor (bool): whether to use the factorization or use the
             uncompressed optimizer. (default: True)
@@ -71,7 +71,7 @@ class Lion_adv(torch.optim.Optimizer):
         auto_kappa_p: bool = False,
         # Projected and adaptive sign
         freeze_on_flip: bool = False,
-        l1_scale_lr: bool = False,
+        l1_adaptive: bool = False,
         # Scaled Optimizer
         scaled_optm: bool = False,
         # SMMF factorization
@@ -98,7 +98,7 @@ class Lion_adv(torch.optim.Optimizer):
             kappa_p=kappa_p,
             auto_kappa_p=auto_kappa_p,
             freeze_on_flip=freeze_on_flip,
-            l1_scale_lr=l1_scale_lr,
+            l1_adaptive=l1_adaptive,
             scaled_optm= scaled_optm,
             nnmf_factor=nnmf_factor,
         )
@@ -224,7 +224,7 @@ class Lion_adv(torch.optim.Optimizer):
             # Compute update term c_t
             update = torch.lerp(grad_reshaped, exp_avg, beta1)
 
-            if group.get("l1_scale_lr", False) and kappa_p == 1:
+            if group.get("l1_adaptive", False) and kappa_p == 1:
                 lr = lr * (update.norm(p=1))
 
             # Standard Lion momentum update
@@ -259,7 +259,7 @@ class Lion_adv(torch.optim.Optimizer):
             # Compute update term
             update = torch.lerp(grad, exp_avg, beta1)
 
-            if group.get("l1_scale_lr", False) and kappa_p == 1:
+            if group.get("l1_adaptive", False) and kappa_p == 1:
                 lr = lr * (update.norm(p=1))
 
             update = _get_lion_k_update(update, kappa_p)
