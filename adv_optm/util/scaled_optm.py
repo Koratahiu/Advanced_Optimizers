@@ -28,8 +28,9 @@ def scale_update(
     if is_dora_scale or p.ndim == 1:
         return rms_normalization(update, dim=None, lr=lr)
 
-    # Orthogonal Fine-Tuning (OFT)
-    # Scales update to achieve block-size invariance O(sqrt(rank))
+    # Orthogonal Fine-Tuning (OFT) 
+    # RMS normalization (dim=1 normalizes per block)
+    # This guarantees O(1) update complexity scaling, independent of block sizes.
     elif is_oft:
         return rms_normalization(update, dim=1, lr=lr)
 
@@ -45,20 +46,32 @@ def scale_wd(wd: float, p: torch.Tensor) -> float:
     Adjusts weight decay based on the parameter's shape and type to maintain 
     effective regularization strength across varying architectures.
     """
-    is_lora_a = getattr(p, '_is_lora_A', False)
     is_dora_scale = getattr(p, '_is_dora_scale', False)
+    is_oft = getattr(p, '_is_oft', False)
 
+    # DoRA Scale (Magnitude Vector)
+    # Decaying magnitude vectors artificially shrinks feature variance without 
+    # regularizing function complexity.
     if is_dora_scale:
-        return 0.0  # No WD on DoRA scales
+        return 0.0  
 
-    if is_lora_a:
-        # Normalize WD by the rank (in_features)
-        return wd / p.shape[0]
+    # Orthogonal Fine-Tuning (OFT) Skew Matrices
+    # Driving Q -> 0 pulls the OFT rotation back to the Identity matrix.
+    # We return the unscaled `wd` so the fractional pull toward Identity 
+    # remains exactly O(1) regardless of the block size.
+    if is_oft:
+        return wd
 
+    # LoRA Factors (A and B) & Full Finetuning
+    # To maintain scale-invariant variance reduction, matrices must decay 
+    # inversely to their fan_in.
     if p.ndim >= 2:
-        # Normalize WD by the width
+        # p.shape[1:].numel() extracts fan_in for both Linear and Conv2d.
+        # LoRA A: (rank, in_features) -> fan_in = in_features
+        # LoRA B: (out_features, rank) -> fan_in = rank
         return wd / p.shape[1:].numel()
 
+    # 1D Biases or generic 1D parameters
     return 0.0
 
 
