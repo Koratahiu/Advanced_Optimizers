@@ -41,19 +41,22 @@ def scale_update(
 
     return update.mul_(lr)
 
-def scale_wd(wd: float, p: torch.Tensor) -> float:
+def scale_wd(wd: float, p: torch.Tensor, group: dict) -> float:
     """
     Adjusts weight decay based on the parameter's shape and type to maintain 
     effective regularization strength across varying architectures.
     """
     is_dora_scale = getattr(p, '_is_dora_scale', False)
     is_oft = getattr(p, '_is_oft', False)
+    centered_wd = group.get('centered_wd', False)
 
     # DoRA Scale (Magnitude Vector)
     # Decaying magnitude vectors artificially shrinks feature variance without 
     # regularizing function complexity.
     if is_dora_scale:
-        return 0.0  
+        if centered_wd:
+            return wd
+        return 0.0
 
     # Orthogonal Fine-Tuning (OFT) Skew Matrices
     # Driving Q -> 0 pulls the OFT rotation back to the Identity matrix.
@@ -72,7 +75,11 @@ def scale_wd(wd: float, p: torch.Tensor) -> float:
         return wd / p.shape[1:].numel()
 
     # 1D Biases or generic 1D parameters
-    return 0.0
+    if centered_wd:
+        # Centered WD safely regularizes the delta without collapsing base feature variance
+        return wd
+    else:
+        return 0.0
 
 
 @torch.no_grad()

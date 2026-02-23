@@ -37,7 +37,7 @@ def apply_parameter_update(
 
     if group.get('scaled_optm', False):
         decoupled = True
-        wd = scale_wd(wd, p)
+        wd = scale_wd(wd, p, group)
 
     if decoupled:
         scaled_wd = wd * (lr / self._init_lr)
