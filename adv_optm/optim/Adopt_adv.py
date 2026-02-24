@@ -324,7 +324,7 @@ class Adopt_adv(torch.optim.Optimizer):
             step_param_fn = self._step_parameter
 
         if self.Simplified_AdEMAMix:
-            lr = _scale_sim_AdEMAMix_update(beta1, state['step'] + 1, group["alpha_grad"], lr)
+            lr = _scale_sim_AdEMAMix_update(beta1, state['step'] + 1, group["alpha_grad"], lr, group.get('scaled_optm', False))
 
         step_param_fn(p, grad, state, group, lr, beta1, beta2, random_int_tensor)
 

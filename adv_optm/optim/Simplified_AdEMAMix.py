@@ -278,7 +278,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
         lr = group["lr"]
 
-        lr = _scale_sim_AdEMAMix_update(beta1, state['step'] + 1, group["alpha_grad"], lr)
+        lr = _scale_sim_AdEMAMix_update(beta1, state['step'] + 1, group["alpha_grad"], lr, group.get('scaled_optm', False))
 
         random_int_tensor = None
 
