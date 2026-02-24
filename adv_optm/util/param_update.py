@@ -25,24 +25,52 @@ def _apply_weight_decay(
     cautious = group.get('cautious_wd', False)
     centered = group.get('centered_wd', False)
 
-    # Determine the target for weight decay: (p) or (p - anchor)
     if centered and 'anchor_type' in state:
-        anchor = dequantize_anchor(p, state).to(p_calc.dtype)
-        decay_target = p_calc.sub(anchor, out=anchor)
-    else:
-        decay_target = p_calc
+        return _apply_centered_flipped_wd(p_calc, update_calc, p, state, group, scaled_wd)
+
 
     if cautious:
         # Cautious Weight Decay: only decay if the update pushes in the same direction as the decay
-        mask = (update_calc * decay_target >= 0).to(p_calc.dtype)
-        p_calc.addcmul_(decay_target, mask, value=-scaled_wd)
+        mask = (update_calc * p_calc >= 0).to(p_calc.dtype)
+        p_calc.addcmul_(p_calc, mask, value=-scaled_wd)
         del mask
     else:
         # Standard decoupled weight decay
-        p_calc.add_(decay_target, alpha=-scaled_wd)
+        p_calc.add_(p_calc, alpha=-scaled_wd)
 
-    if centered and 'anchor_type' in state:
-        del anchor, decay_target
+def _apply_centered_flipped_wd(
+    p_calc: Tensor,
+    update_calc: Tensor,
+    p: Tensor,
+    state: Dict[str, Any],
+    group: Dict[str, Any],
+    scaled_wd: float | Tensor
+) -> None:
+    """
+    Subclass of centered weight decay using (Anchor - P) math.
+    Mathematically equivalent to: p_calc -= scaled_wd * (p_calc - anchor)
+    """
+    cautious = group.get('cautious_wd', False)
+
+    # We use the anchor's memory to save an allocation
+    anchor = dequantize_anchor(p, state).to(p_calc.dtype)
+    decay_target = anchor.sub_(p_calc) 
+
+    if cautious:
+        # Flip the mask logic
+        # Original: (update * (P - Anchor) >= 0)
+        # Flipped:  (update * (Anchor - P) <= 0)
+        mask = (update_calc * decay_target <= 0).to(p_calc.dtype)
+
+        #  Add the target (since target is Anchor - P, adding it is 
+        # equivalent to subtracting P - Anchor)
+        p_calc.addcmul_(decay_target, mask, value=scaled_wd)
+        del mask
+    else:
+        # Standard update: p_calc += scaled_wd * (Anchor - P)
+        p_calc.add_(decay_target, alpha=scaled_wd)
+
+    del anchor, decay_target
 
 
 def apply_parameter_update(
