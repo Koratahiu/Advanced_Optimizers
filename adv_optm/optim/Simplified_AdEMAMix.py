@@ -9,6 +9,7 @@ from ..util.Kourkoutas import KourkoutasHelper
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.update_util import _scale_sim_AdEMAMix_update
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
+from ..util.centered_decay import _init_anchor
 
 # A little helper from the original simplified_AdEMAMix
 def linear_hl_warmup_scheduler(step, beta_end, beta_start=0, warmup=1):
@@ -74,6 +75,15 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             and returns a unique, hashable key representing its "layer" or "bucket".
             If `None`, parameters are bucketed by their memory ID (tensor-wise).
             (default: None)
+        centered_wd (bool): Enables Centered Weight Decay. Instead of decaying weights
+            toward zero, they are decayed toward their initial values (anchors). This
+            can help preserve pre-trained features during full fine-tuning.
+            centered_wd_mode (str): The quantization format used to store the anchor
+            weights to save VRAM. Options include:
+            'full': Stores anchors in the original parameter's precision.
+            'float8': Uses torch.float8_e4m3fn for a balance of precision and memory.
+            'int8': Uses 8-bit block-wise quantization (block size 128).
+            'int4': Uses 4-bit block-wise quantization (block size 32).
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
         factored_2nd (bool): whether to keep the first moment uncompressed (dense) 
@@ -107,6 +117,9 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         k_warmup_steps: int = 0,
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
+        # Centered WD
+        centered_wd: bool = True,
+        centered_wd_mode: str = 'float8',
         # Scaled Optimizer
         scaled_optm: bool = False,
         # SMMF factorization
@@ -135,6 +148,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
+            "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
             "scaled_optm": scaled_optm,
             "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape,"factored_2nd": factored_2nd
         }
@@ -158,6 +172,16 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         self._compiled_step_parameter = None
         if compiled_optimizer:
             self.compile(fullgraph=True)
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        """
+        Overrides default load_state_dict to implement a workaround for PyTorch's
+        automatic dtype casting. It ensures factorized states remain float32 for 
+        stability, preserves integer/float8 quantized anchor states, and forces 
+        standard states onto the parameter's current dtype/device.
+        """
+        super().load_state_dict(state_dict)
+        param_update.post_process_loaded_state(self)
 
     @property
     def supports_fused_back_pass(self):
@@ -220,6 +244,8 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
             if group.get('scaled_optm', False) and is_spectral(p):
                 init_spectral_norm(group, state, p)
+
+            _init_anchor(p, state, group)
 
         beta1_final, beta2 = group["betas"]
 

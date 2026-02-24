@@ -6,6 +6,7 @@ from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.update_util import _grams_update, _cautious_update
+from ..util.centered_decay import _init_anchor
 
 A = 4 / math.pi
 
@@ -45,6 +46,8 @@ def _init_auxadam_state(self, p, group):
         if group.get('adam_use_AdEMAMix'):
             state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
         state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
+
+    _init_anchor(p, state, group)
 
 
 @torch.no_grad()

@@ -8,6 +8,7 @@ from ..util.factorization_util import _get_effective_shape, _factorize_state, _r
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util import Muon_AuxAdam
+from ..util.centered_decay import _init_anchor
 
 A = 4 / math.pi
 
@@ -87,6 +88,15 @@ class AdaMuon_adv(torch.optim.Optimizer):
             (default: False)
         mars_gamma (float): The scaling coefficient for MARS gradient correction.
             (default: 0.025)
+        centered_wd (bool): Enables Centered Weight Decay. Instead of decaying weights
+            toward zero, they are decayed toward their initial values (anchors). This
+            can help preserve pre-trained features during full fine-tuning.
+            centered_wd_mode (str): The quantization format used to store the anchor
+            weights to save VRAM. Options include:
+            'full': Stores anchors in the original parameter's precision.
+            'float8': Uses torch.float8_e4m3fn for a balance of precision and memory.
+            'int8': Uses 8-bit block-wise quantization (block size 128).
+            'int4': Uses 4-bit block-wise quantization (block size 32).
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
         use_muon (bool | None): whether to use Muon or AuxAdamW. MUST be provided
@@ -157,6 +167,9 @@ class AdaMuon_adv(torch.optim.Optimizer):
         # Spectral Normalization
         n_layers: int = 1,
         spectral_normalization: bool = False,
+        # Centered WD
+        centered_wd: bool = True,
+        centered_wd_mode: str = 'float8',
         # torch.compile
         compiled_optimizer: bool = False,
         # --- AdamW_adv specific parameters ---
@@ -214,6 +227,9 @@ class AdaMuon_adv(torch.optim.Optimizer):
             "approx_mars": approx_mars, "mars_gamma": mars_gamma,
             # Spectral Normalization
             "n_layers": n_layers, "spectral_normalization": spectral_normalization,
+            # Centered WD
+            "centered_wd": centered_wd,
+            "centered_wd_mode": centered_wd_mode,
             # AdamW_adv defaults
             "adam_betas": adam_betas, "adam_eps": adam_eps, "adam_weight_decay": adam_weight_decay,
             "adam_use_bias_correction": adam_use_bias_correction, "adam_use_atan2": adam_use_atan2,
@@ -260,6 +276,16 @@ class AdaMuon_adv(torch.optim.Optimizer):
         self._compiled_adam_step_parameter = None
         if compiled_optimizer:
             self.compile(fullgraph=True)
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        """
+        Overrides default load_state_dict to implement a workaround for PyTorch's
+        automatic dtype casting. It ensures factorized states remain float32 for 
+        stability, preserves integer/float8 quantized anchor states, and forces 
+        standard states onto the parameter's current dtype/device.
+        """
+        super().load_state_dict(state_dict)
+        param_update.post_process_loaded_state(self)
 
     @property
     def supports_fused_back_pass(self):
@@ -343,6 +369,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
             if group.get('approx_mars', False):
                 # Note: This requires full-rank memory even if factored
                 state['last_grad'] = torch.zeros_like(p, device=device, dtype=p.dtype)
+
+            _init_anchor(p, state, group)
 
             group['adam_kourkoutas_beta'] = False
             state['is_muon'] = True # Workaround as group was acting weirdly; passing muon params in adam path

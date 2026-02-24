@@ -162,8 +162,7 @@ class AdamW_adv(torch.optim.Optimizer):
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
             "scaled_optm": scaled_optm,
-            "centered_wd": centered_wd,
-            "centered_wd_mode": centered_wd_mode,
+            "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
             "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape, "factored_2nd": factored_2nd
         }
         self.stochastic_rounding = stochastic_rounding

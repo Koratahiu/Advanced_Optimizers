@@ -7,6 +7,7 @@ from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state, _pack_bools, _unpack_bools
 from ..util.lion_k import _get_lion_k_update
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
+from ..util.centered_decay import _init_anchor
 
 
 class Lion_adv(torch.optim.Optimizer):
@@ -46,7 +47,16 @@ class Lion_adv(torch.optim.Optimizer):
         freeze_on_flip (bool): Projected SignGD One-hit freeze. Masks updates for
             coordinates where the gradient sign flips compared to the previous step. (default: False)
         l1_adaptive (bool): Scales learning rate dynamically 
-            by the L1 norm of the gradient to handle gradient heterogeneity. (default: False)
+            by the L1 norm of the gradient to handle gradient heterogeneity. (default: False).
+        centered_wd (bool): Enables Centered Weight Decay. Instead of decaying weights
+            toward zero, they are decayed toward their initial values (anchors). This
+            can help preserve pre-trained features during full fine-tuning.
+            centered_wd_mode (str): The quantization format used to store the anchor
+            weights to save VRAM. Options include:
+            'full': Stores anchors in the original parameter's precision.
+            'float8': Uses torch.float8_e4m3fn for a balance of precision and memory.
+            'int8': Uses 8-bit block-wise quantization (block size 128).
+            'int4': Uses 4-bit block-wise quantization (block size 32).
         nnmf_factor (bool): whether to use the factorization or use the
             uncompressed optimizer. (default: True)
     """
@@ -72,6 +82,9 @@ class Lion_adv(torch.optim.Optimizer):
         # Projected and adaptive sign
         freeze_on_flip: bool = False,
         l1_adaptive: bool = False,
+        # Centered WD
+        centered_wd: bool = True,
+        centered_wd_mode: str = 'float8',
         # Scaled Optimizer
         scaled_optm: bool = False,
         # SMMF factorization
@@ -101,6 +114,8 @@ class Lion_adv(torch.optim.Optimizer):
             l1_adaptive=l1_adaptive,
             scaled_optm= scaled_optm,
             nnmf_factor=nnmf_factor,
+            centered_wd= centered_wd,
+            centered_wd_mode= centered_wd_mode,
         )
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
@@ -118,6 +133,16 @@ class Lion_adv(torch.optim.Optimizer):
         self._compiled_step_parameter = None
         if compiled_optimizer:
             self.compile(fullgraph=True)
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        """
+        Overrides default load_state_dict to implement a workaround for PyTorch's
+        automatic dtype casting. It ensures factorized states remain float32 for 
+        stability, preserves integer/float8 quantized anchor states, and forces 
+        standard states onto the parameter's current dtype/device.
+        """
+        super().load_state_dict(state_dict)
+        param_update.post_process_loaded_state(self)
 
     @property
     def supports_fused_back_pass(self) -> bool:
@@ -169,6 +194,8 @@ class Lion_adv(torch.optim.Optimizer):
 
             if group.get('scaled_optm', False) and is_spectral(p):
                 init_spectral_norm(group, state, p)
+
+            _init_anchor(p, state, group)
 
         state['step'] += 1
         lr = group["lr"]
