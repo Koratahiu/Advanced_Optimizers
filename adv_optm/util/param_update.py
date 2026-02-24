@@ -251,7 +251,7 @@ def post_process_loaded_state(optimizer: Optimizer) -> None:
                         state[key] = val.to(p.dtype)
 
                 # Handle Quantized Factorization States (Sign tensors)
-                elif key in ['sign', 'sign_slow']:
+                elif key in ['sign', 'sign_slow', 'sign_buf']:
                     if val.dtype != torch.uint8:
                         state[key] = val.to(torch.uint8)
 
