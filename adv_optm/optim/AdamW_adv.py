@@ -80,6 +80,15 @@ class AdamW_adv(torch.optim.Optimizer):
             and returns a unique, hashable key representing its "layer" or "bucket".
             If `None`, parameters are bucketed by their memory ID (tensor-wise).
             (default: None)
+        centered_wd (bool): Enables Centered Weight Decay. Instead of decaying weights
+            toward zero, they are decayed toward their initial values (anchors). This
+            can help preserve pre-trained features during full fine-tuning.
+            centered_wd_mode (str): The quantization format used to store the anchor
+            weights to save VRAM. Options include:
+            'full': Stores anchors in the original parameter's precision.
+            'float8': Uses torch.float8_e4m3fn for a balance of precision and memory.
+            'int8': Uses 8-bit block-wise quantization (block size 128).
+            'int4': Uses 4-bit block-wise quantization (block size 32).
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
     """
@@ -118,6 +127,9 @@ class AdamW_adv(torch.optim.Optimizer):
         layer_key_fn: Optional[Callable] = None,
         # Scaled Optimizer
         scaled_optm: bool = False,
+        # Centered WD
+        centered_wd: bool = False,
+        centered_wd_mode: str = 'float8',
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
@@ -147,6 +159,8 @@ class AdamW_adv(torch.optim.Optimizer):
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
             "scaled_optm": scaled_optm,
+            "centered_wd": centered_wd,
+            "centered_wd_mode": centered_wd_mode,
             "nnmf_factor": nnmf_factor
         }
         self.stochastic_rounding = stochastic_rounding

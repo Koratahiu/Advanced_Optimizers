@@ -49,8 +49,8 @@ def _init_anchor(p, state, group):
     numel = p.numel()
 
     # Skip empty/tiny tensors or 1D tensors (like biases/LayerNorms)
-    if numel == 0 or (mode in ['int8', 'int4'] and numel < 256) or p.ndim == 1:
-        state['anchor_data'] = p.detach().clone()
+    if numel == 0 or (mode in ['int8', 'int4'] and numel < 256) or p.ndim == 1 or getattr(p, '_is_dora_scale', False):
+        state['anchor_data'] = p.clone()
         state['anchor_type'] = 'full'
         return
 
