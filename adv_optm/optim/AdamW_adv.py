@@ -91,6 +91,8 @@ class AdamW_adv(torch.optim.Optimizer):
             'int4': Uses 4-bit block-wise quantization (block size 32).
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
+        factored_2nd (bool): whether to keep the first moment uncompressed (dense) 
+            while only factorizing the second moment. (default: True)
     """
 
     def __init__(
@@ -133,6 +135,7 @@ class AdamW_adv(torch.optim.Optimizer):
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
+        factored_2nd: bool = True,
         # torch.compile
         compiled_optimizer: bool = False,
     ):
@@ -153,7 +156,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
-            "vector_reshape": vector_reshape, "use_atan2": use_atan2,
+            "use_atan2": use_atan2,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
             "beta3_ema": beta3_ema, "alpha": alpha, "compiled_optimizer": compiled_optimizer,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
@@ -161,7 +164,7 @@ class AdamW_adv(torch.optim.Optimizer):
             "scaled_optm": scaled_optm,
             "centered_wd": centered_wd,
             "centered_wd_mode": centered_wd_mode,
-            "nnmf_factor": nnmf_factor
+            "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape, "factored_2nd": factored_2nd
         }
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
@@ -233,18 +236,25 @@ class AdamW_adv(torch.optim.Optimizer):
                 state['effective_shape'] = _get_effective_shape(p.numel())
                 d1, d2 = state['effective_shape']
 
-                # First moment (m)
-                if group['betas'][0] > 0:
-                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
-                    state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
-                    packed_d2 = (d2 + 7) // 8
-                    state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
-                # AdEMAMix slow moment (m_slow)
-                if self.use_AdEMAMix:
-                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
-                    state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                    packed_d2 = (d2 + 7) // 8
-                    state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+                if not group.get('factored_2nd', False):
+                    # First moment (m)
+                    if group['betas'][0] > 0:
+                        state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
+                        state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+                        packed_d2 = (d2 + 7) // 8
+                        state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                    # AdEMAMix slow moment (m_slow)
+                    if self.use_AdEMAMix:
+                        state['mu_m_slow_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
+                        state['mv_m_slow_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+                        packed_d2 = (d2 + 7) // 8
+                        state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                else:
+                    if group['betas'][0] > 0:
+                        state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
+                    if self.use_AdEMAMix:
+                        state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
+
                 # Second moment (v)
                 state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                 state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
@@ -310,32 +320,42 @@ class AdamW_adv(torch.optim.Optimizer):
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
 
+        # Determine if we are using dense first-moments alongside a factored second-order second-moment
+        factored_2nd = group.get('factored_2nd', False)
+
         if state['factored']:
             d1, d2 = state['effective_shape']
             grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct momentum from previous step's factors
             if beta1 > 0:
-                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
+                if factored_2nd:
+                    mt = state['exp_avg'].view(d1, d2)
+                else:
+                    mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
                 # Update momentum in full-size
                 mt.lerp_(grad_reshaped, 1.0 - beta1)
 
-                # Factorize
-                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
+                if not factored_2nd:
+                    # Factorize
+                    state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
 
                 if self.grams_moment:
-                    update_mt = _grams_update(mt, grad_reshaped, inplace=True)
+                    update_mt = _grams_update(mt, grad_reshaped, inplace=not factored_2nd)
                 elif self.cautious_mask:
-                    update_mt = _cautious_update(mt, grad_reshaped, inplace=True)
+                    update_mt = _cautious_update(mt, grad_reshaped, inplace=not factored_2nd)
                 else:
-                    update_mt = mt
+                    update_mt = mt if not factored_2nd else mt.clone()
 
             vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
             vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
 
             if self.use_AdEMAMix:
-                mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
+                if factored_2nd:
+                    mt_slow = state['exp_avg_slow'].view(d1, d2)
+                else:
+                    mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
 
                 mt_slow.lerp_(grad_reshaped, 1.0 - beta3_ema)
 
@@ -343,9 +363,11 @@ class AdamW_adv(torch.optim.Optimizer):
                     update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
                     update = grad_reshaped.add(mt_slow, alpha=alpha)
-                # Factorize
-                state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
-                del mt_slow
+                
+                if not factored_2nd:
+                    # Factorize
+                    state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
+                    del mt_slow
             else:
                 if beta1 > 0:
                     update = update_mt

@@ -76,6 +76,8 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             (default: None)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
+        factored_2nd (bool): whether to keep the first moment uncompressed (dense) 
+            while only factorizing the second moment. (default: True)
     """
 
     def __init__(
@@ -110,6 +112,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
+        factored_2nd: bool = True,
         # torch.compile
         compiled_optimizer: bool = False,
     ):
@@ -129,12 +132,11 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
             "alpha_grad": alpha_grad, "beta1_warmup": beta1_warmup, "min_beta1": min_beta1,
-            "vector_reshape": vector_reshape,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
             "scaled_optm": scaled_optm,
-            "nnmf_factor": nnmf_factor,
+            "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape,"factored_2nd": factored_2nd
         }
         self.stochastic_rounding = stochastic_rounding
         self.kourkoutas_beta = kourkoutas_beta
@@ -193,11 +195,15 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
                 state['effective_shape'] = _get_effective_shape(p.numel())
                 d1, d2 = state['effective_shape']
 
-                # First moment (m)
-                state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
-                state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
-                packed_d2 = (d2 + 7) // 8
-                state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                if not group.get('factored_2nd', False):
+                    # First moment (m)
+                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
+                    state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+                    packed_d2 = (d2 + 7) // 8
+                    state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                else:
+                    state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
+
                 # Second moment (v)
                 state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                 state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
@@ -271,13 +277,17 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             grad = _orthogonalize_gradient(p, grad)
 
         alpha_grad = group["alpha_grad"]
+        factored_2nd = group.get('factored_2nd', False)
 
         if state['factored']:
             d1, d2 = state['effective_shape']
             grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct momentum from previous step's factors
-            mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
+            if factored_2nd:
+                mt = state['exp_avg'].view(d1, d2)
+            else:
+                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
             # Update momentum in full-size
             mt.mul_(beta1).add_(grad_reshaped)
@@ -288,9 +298,10 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             # update = mt + (grad_reshaped * alpha_grad)
             update = torch.add(mt, grad_reshaped, alpha=alpha_grad)
 
-            # Factorize
-            state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
-            del mt
+            if not factored_2nd:
+                # Factorize
+                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
+                del mt
 
             # Factorize
             state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
