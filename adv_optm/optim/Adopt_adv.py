@@ -147,11 +147,11 @@ class Adopt_adv(torch.optim.Optimizer):
         # Scaled Optimizer
         scaled_optm: bool = False,
         # Centered WD
-        centered_wd: bool = False,
+        centered_wd: bool = True,
         centered_wd_mode: str = 'float8',
         # SMMF factorization
         nnmf_factor: bool = False,
-        vector_reshape: bool = False,
+        vector_reshape: bool = True,
         # torch.compile
         compiled_optimizer: bool = False,
     ):
@@ -256,18 +256,24 @@ class Adopt_adv(torch.optim.Optimizer):
                 state['effective_shape'] = _get_effective_shape(p.numel())
                 d1, d2 = state['effective_shape']
 
-                # First moment (m)
-                if group['betas'][0] > 0:
-                    state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
-                    state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                    packed_d2 = (d2 + 7) // 8
-                    state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
-                # AdEMAMix slow moment (m_slow)
-                if self.use_AdEMAMix:
-                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
-                    state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                    packed_d2 = (d2 + 7) // 8
-                    state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+                if not group.get('approx_vt', True):
+                    # First moment (m)
+                    if group['betas'][0] > 0:
+                        state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
+                        state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
+                        packed_d2 = (d2 + 7) // 8
+                        state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+                    # AdEMAMix slow moment (m_slow)
+                    if self.use_AdEMAMix:
+                        state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
+                        state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
+                        packed_d2 = (d2 + 7) // 8
+                        state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+                else:
+                    if group['betas'][0] > 0:
+                        state['exp_avg'] = torch.zeros((d1, d2), device=p.device, dtype=dtype)
+                    if self.use_AdEMAMix:
+                        state['exp_avg_slow'] = torch.zeros((d1, d2), device=p.device, dtype=dtype)
                 # Second moment (v)
                 vt_init = grad.to(dtype).view(d1, d2).square()
                 # Allocate NMF factors for vt
@@ -337,6 +343,9 @@ class Adopt_adv(torch.optim.Optimizer):
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
 
+        # Determine if we are using dense first-moments alongside a factored second-order second-moment
+        approx_vt = group.get('approx_vt', True)
+
         if state['factored']:
             d1, d2 = state['effective_shape']
             grad_reshaped = grad.view(d1, d2)
@@ -363,35 +372,47 @@ class Adopt_adv(torch.optim.Optimizer):
 
             # ADOPT Step B: Update momentum m_t using normalized gradient
             if beta1 > 0:
-                # Reconstruct m_{t-1}
-                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
+                if approx_vt:
+                    mt = state['exp_avg']
+                else:
+                    # Reconstruct m_{t-1}
+                    mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
+
                 if self.Simplified_AdEMAMix:
                     mt.mul_(beta1).add_(normalized_grad, alpha=1.0)
                 else:
                     mt.lerp_(normalized_grad, 1.0 - beta1)
 
-                # Factorize
-                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
+                if not approx_vt:
+                    # Factorize
+                    state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
 
                 if self.grams_moment:
-                    update_mt = _grams_update(mt, grad_reshaped, inplace=True)
+                    update_mt = _grams_update(mt, grad_reshaped, inplace=not approx_vt)
                 elif self.cautious_mask:
-                    update_mt = _cautious_update(mt, grad_reshaped, inplace=True)
+                    update_mt = _cautious_update(mt, grad_reshaped, inplace=not approx_vt)
                 else:
-                    update_mt = mt
+                    update_mt = mt if not approx_vt else mt.clone()
 
             if self.use_AdEMAMix:
-                # Reconstruct AdEMAMix EMA
-                mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
+                if approx_vt:
+                    mt_slow = state['exp_avg_slow']
+                else:
+                    # Reconstruct AdEMAMix EMA
+                    mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
+
                 mt_slow.lerp_(normalized_grad, 1.0 - beta3_ema)
+
                 if beta1 > 0:
                     update = update_mt.add_(mt_slow, alpha=alpha)
                     del normalized_grad
                 else:
                     update = normalized_grad.add_(mt_slow, alpha=alpha)
-                # Factorize
-                state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
-                del mt_slow
+                if not approx_vt:
+                    # Factorize
+                    state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
+                    del mt_slow
+
             elif self.Simplified_AdEMAMix:
                 update = update_mt.add_(normalized_grad, alpha=alpha_grad)
                 del normalized_grad
