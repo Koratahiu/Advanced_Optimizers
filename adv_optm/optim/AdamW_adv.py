@@ -226,6 +226,7 @@ class AdamW_adv(torch.optim.Optimizer):
             state['factored'] = (
                 group['nnmf_factor'] and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
+                or group["factored_2nd"]
             )
 
             dtype = torch.float32 if state['factored'] else p.dtype
