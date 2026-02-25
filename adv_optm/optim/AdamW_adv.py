@@ -80,9 +80,9 @@ class AdamW_adv(torch.optim.Optimizer):
             and returns a unique, hashable key representing its "layer" or "bucket".
             If `None`, parameters are bucketed by their memory ID (tensor-wise).
             (default: None)
-        centered_wd (bool): Enables Centered Weight Decay. Instead of decaying weights
+        centered_wd (float): Centered Weight Decay coefficient. Instead of decaying weights
             toward zero, they are decayed toward their initial values (anchors). This
-            can help preserve pre-trained features during full fine-tuning.
+            can be used together with standard weight decay. (default: 0.0)
             centered_wd_mode (str): The quantization format used to store the anchor
             weights to save VRAM. Options include:
             'full': Stores anchors in the original parameter's precision.
@@ -130,7 +130,7 @@ class AdamW_adv(torch.optim.Optimizer):
         # Scaled Optimizer
         scaled_optm: bool = False,
         # Centered WD
-        centered_wd: bool = False,
+        centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
         # SMMF factorization
         nnmf_factor: bool = False,

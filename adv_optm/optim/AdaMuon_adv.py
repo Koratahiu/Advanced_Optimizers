@@ -88,9 +88,9 @@ class AdaMuon_adv(torch.optim.Optimizer):
             (default: False)
         mars_gamma (float): The scaling coefficient for MARS gradient correction.
             (default: 0.025)
-        centered_wd (bool): Enables Centered Weight Decay. Instead of decaying weights
+        centered_wd (float): Centered Weight Decay coefficient. Instead of decaying weights
             toward zero, they are decayed toward their initial values (anchors). This
-            can help preserve pre-trained features during full fine-tuning.
+            can be used together with standard weight decay. (default: 0.0)
             centered_wd_mode (str): The quantization format used to store the anchor
             weights to save VRAM. Options include:
             'full': Stores anchors in the original parameter's precision.
@@ -168,7 +168,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         n_layers: int = 1,
         spectral_normalization: bool = False,
         # Centered WD
-        centered_wd: bool = True,
+        centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
         # torch.compile
         compiled_optimizer: bool = False,
