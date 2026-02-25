@@ -117,7 +117,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         centered_wd (float): Centered Weight Decay coefficient. Instead of decaying weights
             toward zero, they are decayed toward their initial values (anchors). This
             can be used together with standard weight decay. (default: 0.0)
-            centered_wd_mode (str): The quantization format used to store the anchor
+        centered_wd_mode (str): The quantization format used to store the anchor
             weights to save VRAM. Options include:
             'full': Stores anchors in the original parameter's precision.
             'float8': Uses torch.float8_e4m3fn for a balance of precision and memory.
