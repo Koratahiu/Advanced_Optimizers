@@ -79,13 +79,13 @@ def _init_anchor(p, state, group):
     elif mode == 'full':
         state['anchor_data'] = p.clone()
 
-def dequantize_anchor(p, state, group):
+def dequantize_anchor(p, state, group, dtype):
     """Restores the anchor to the original shape/dtype."""
     anchor_data = state['anchor_data']
 
     # If it was saved as full precision or float8
     if anchor_data.dtype in (p.dtype, torch.float32, torch.float16, torch.bfloat16, torch.float8_e4m3fn):
-        return anchor_data.to(p.dtype)
+        return anchor_data.to(dtype)
 
     # Dequantize Setup
     mode = group.get('centered_wd_mode', 'full')
@@ -106,7 +106,7 @@ def dequantize_anchor(p, state, group):
         quantized_blocks = anchor_data
 
     # Core Dequantization: (q * scale) + min
-    anchor_blocks = quantized_blocks.to(p.dtype) * scales.unsqueeze(1) + mins.unsqueeze(1)
+    anchor_blocks = quantized_blocks.to(dtype) * scales.unsqueeze(1) + mins.unsqueeze(1)
 
     # Flatten, truncate any padding added during quantization, and reshape
     return anchor_blocks.view(-1)[:orig_numel].view(orig_shape)
