@@ -27,7 +27,7 @@ def _apply_weight_decay(
 
     # Determine the target for weight decay: (p) or (p - anchor)
     if centered:
-        anchor = dequantize_anchor(p, state).to(p_calc.dtype)
+        anchor = dequantize_anchor(p, state, group).to(p_calc.dtype)
         decay_target = p_calc.sub(anchor)
     else:
         decay_target = p_calc
@@ -218,6 +218,8 @@ def post_process_loaded_state(optimizer: Optimizer) -> None:
     which breaks 8-bit/4-bit quantization and factorized float32 states.
     """
     for group in optimizer.param_groups:
+        mode = group.get('centered_wd_mode', 'full')
+
         for p in group['params']:
             state = optimizer.state.get(p, None)
             if not state:
@@ -227,7 +229,14 @@ def post_process_loaded_state(optimizer: Optimizer) -> None:
             is_factored = state.get('factored', False)
             target_dtype = torch.float32 if is_factored else p.dtype
 
-            a_type = state.get('anchor_type', None)
+            # Deterministically check if this parameter skipped quantization
+            numel = p.numel()
+            is_skipped = (
+                numel == 0 or 
+                (mode in ['int8', 'int4'] and numel < 10000) or 
+                p.ndim == 1 or 
+                getattr(p, '_is_dora_scale', False)
+            )
 
             for key, val in state.items():
                 if not isinstance(val, torch.Tensor):
@@ -235,18 +244,21 @@ def post_process_loaded_state(optimizer: Optimizer) -> None:
 
                 # Handle Quantized Anchor States
                 if key == 'anchor_data':
-                    if a_type in ['int8', 'int4']:
-                        if val.dtype != torch.uint8:
-                            state[key] = val.to(torch.uint8)
-                    elif a_type == 'float8':
-                        if val.dtype != torch.float8_e4m3fn:
-                            state[key] = val.to(torch.float8_e4m3fn)
-                    elif a_type == 'full':
+                    if is_skipped or mode == 'full':
+                        # Skips and 'full' mode should always match the parameter dtype
                         if val.dtype != p.dtype:
                             state[key] = val.to(p.dtype)
+                    elif mode in ['int8', 'int4']:
+                        # Quantized integers must be uint8
+                        if val.dtype != torch.uint8:
+                            state[key] = val.to(torch.uint8)
+                    elif mode == 'float8':
+                        # Float8 mode must be float8_e4m3fn
+                        if val.dtype != torch.float8_e4m3fn:
+                            state[key] = val.to(torch.float8_e4m3fn)
 
                 elif key in ['anchor_scale', 'anchor_min']:
-                    # Scales and mins should match the parameter dtype
+                    # Scales and mins should always match the parameter dtype
                     if val.dtype != p.dtype:
                         state[key] = val.to(p.dtype)
 
@@ -260,5 +272,6 @@ def post_process_loaded_state(optimizer: Optimizer) -> None:
                     if val.dtype != target_dtype:
                         state[key] = val.to(target_dtype)
 
+                # Ensure device match
                 if state[key].device != p.device:
                     state[key] = state[key].to(p.device)

@@ -35,88 +35,75 @@ def quantize_blockwise(p, block_size, bits=8):
     scales.masked_fill_(scales == 0, 1.0)
 
     # Quantize: (val - min) / scale
-    quantized = val_blocks.sub(min_vals).div_(scales).round_().clamp_(0, max_int).to(torch.uint8)
+    quantized = val_blocks.sub_(min_vals).div_(scales).round_().clamp_(0, max_int).to(torch.uint8)
 
     return quantized, scales.squeeze(1), min_vals.squeeze(1)
 
 def _init_anchor(p, state, group):
-    """Initializes the anchor state based on the selected mode."""
+    """Initializes the anchor state."""
     if not group.get('centered_wd', False) or is_wd_centered(p):
         return
 
-    mode = group['centered_wd_mode']
-
-    numel = p.numel()
-
-    # Skip empty/tiny tensors or 1D tensors (like biases/LayerNorms)
-    if numel == 0 or (mode in ['int8', 'int4'] and numel < 10000) or p.ndim == 1 or getattr(p, '_is_dora_scale', False):
-        state['anchor_data'] = p.clone()
-        state['anchor_type'] = 'full'
+    # Prevent re-initialization
+    if 'anchor_data' in state:
         return
 
-    # Hoist shared state definitions
-    state['anchor_orig_shape'] = p.shape
-    state['anchor_numel'] = numel
-    state['anchor_type'] = mode
+    mode = group.get('centered_wd_mode', 'full')
+    numel = p.numel()
+
+    # Skip empty/tiny tensors or 1D tensors (store as full precision)
+    if numel == 0 or (mode in ['int8', 'int4'] and numel < 10000) or p.ndim == 1 or getattr(p, '_is_dora_scale', False):
+        state['anchor_data'] = p.clone()
+        return
 
     if mode == 'float8':
         state['anchor_data'] = p.to(torch.float8_e4m3fn)
         return
 
     elif mode == 'int8':
-        block_size = 128
-        q_blocks, scales, mins = quantize_blockwise(p, block_size, bits=8)
-
+        q_blocks, scales, mins = quantize_blockwise(p, block_size=128, bits=8)
         state['anchor_data'] = q_blocks
         state['anchor_scale'] = scales.to(p.dtype)
         state['anchor_min'] = mins.to(p.dtype)
-        state['anchor_block_size'] = block_size
 
     elif mode == 'int4':
-        block_size = 32
-        q_blocks, scales, mins = quantize_blockwise(p, block_size, bits=4)
-
+        q_blocks, scales, mins = quantize_blockwise(p, block_size=32, bits=4)
         q_flat = q_blocks.view(-1)
-
         # Vectorized packing: High bits | Low bits
         packed = (q_flat[0::2] << 4) | q_flat[1::2]
 
         state['anchor_data'] = packed
         state['anchor_scale'] = scales.to(p.dtype)
         state['anchor_min'] = mins.to(p.dtype)
-        state['anchor_block_size'] = block_size
 
     elif mode == 'full':
         state['anchor_data'] = p.clone()
 
-def dequantize_anchor(p, state):
+def dequantize_anchor(p, state, group):
     """Restores the anchor to the original shape/dtype."""
-    a_type = state.get('anchor_type', 'full')
+    anchor_data = state['anchor_data']
 
-    if a_type in ('full', 'float8'):
-        return state['anchor_data'].to(p.dtype)
+    # If it was saved as full precision or float8
+    if anchor_data.dtype in (p.dtype, torch.float32, torch.float16, torch.bfloat16, torch.float8_e4m3fn):
+        return anchor_data.to(p.dtype)
 
     # Dequantize Setup
+    mode = group.get('centered_wd_mode', 'full')
     scales = state['anchor_scale']
     mins = state['anchor_min']
-    block_size = state['anchor_block_size']
-    orig_shape = state['anchor_orig_shape']
-    orig_numel = state['anchor_numel']
+    orig_shape = p.shape
+    orig_numel = p.numel()
 
-    if a_type == 'int4':
-        packed = state['anchor_data']
-
-        # Vectorized unpacking using pre-allocation
-        unpacked = torch.empty(packed.numel() * 2, dtype=torch.uint8, device=packed.device)
-        unpacked[0::2] = packed >> 4
-        unpacked[1::2] = packed & 0x0F
-
+    if mode == 'int4' and anchor_data.dtype == torch.uint8:
+        block_size = 32
+        unpacked = torch.empty(anchor_data.numel() * 2, dtype=torch.uint8, device=anchor_data.device)
+        unpacked[0::2] = anchor_data >> 4
+        unpacked[1::2] = anchor_data & 0x0F
         quantized_blocks = unpacked.view(-1, block_size)
 
-    elif a_type == 'int8':
-        quantized_blocks = state['anchor_data']
-    else:
-        raise ValueError(f"Unknown anchor type: {a_type}")
+    elif mode == 'int8' and anchor_data.dtype == torch.uint8:
+        block_size = 128
+        quantized_blocks = anchor_data
 
     # Core Dequantization: (q * scale) + min
     anchor_blocks = quantized_blocks.to(p.dtype) * scales.unsqueeze(1) + mins.unsqueeze(1)
