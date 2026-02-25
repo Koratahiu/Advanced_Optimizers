@@ -4,7 +4,7 @@ from torch.optim import Optimizer
 
 from typing import Dict, Any
 
-from .scaled_optm import scale_wd
+from .scaled_optm import scale_wds
 from .centered_decay import dequantize_anchor
 
 _generators: Dict[torch.device, torch.Generator] = {}
@@ -16,32 +16,39 @@ def _apply_weight_decay(
     p: Tensor,
     state: Dict[str, Any],
     group: Dict[str, Any],
-    scaled_wd: float | Tensor
+    scaled_wd: float | Tensor | None,
+    scaled_cwd: float | Tensor | None,
 ) -> None:
     """
-    Apply decoupled weight decay 
-    (Standard, Cautious, and/or Centered) to the parameter.
+    Apply decoupled weight decay (Standard and/or Centered) independently.
     """
     cautious = group.get('cautious_wd', False)
-    centered = group.get('centered_wd', False) and 'anchor_type' in state
 
-    # Determine the target for weight decay: (p) or (p - anchor)
-    if centered:
-        anchor = dequantize_anchor(p, state, group).to(p_calc.dtype)
-        decay_target = p_calc.sub(anchor)
-    else:
-        decay_target = p_calc
-
-    if cautious:
+    # Standard Weight Decay (pulls toward zero)
+    if scaled_wd is not None:
         # Cautious Weight Decay: only decay if the update pushes in the same direction as the decay
-        mask = (update_calc * decay_target >= 0).to(p_calc.dtype)
-        p_calc.addcmul_(decay_target, mask, value=-scaled_wd)
-        del mask
-    else:
-        # Standard decoupled weight decay
-        p_calc.add_(decay_target, alpha=-scaled_wd)
+        if cautious:
+            mask = (update_calc * p_calc >= 0).to(p_calc.dtype)
+            p_calc.addcmul_(p_calc, mask, value=-scaled_wd)
+            del mask
+        else:
+            # Standard decoupled weight decay
+            p_calc.add_(p_calc, alpha=-scaled_wd)
 
-    if centered:
+    # Centered Weight Decay (pulls toward anchor)
+    if scaled_cwd is not None and 'anchor_type' in state:
+        anchor = dequantize_anchor(p, state).to(p_calc.dtype)
+        decay_target = p_calc.sub(anchor)
+
+        if cautious:
+            # Cautious Weight Decay: only decay if the update pushes in the same direction as the decay
+            mask = (update_calc * decay_target >= 0).to(p_calc.dtype)
+            p_calc.addcmul_(decay_target, mask, value=-scaled_cwd)
+            del mask
+        else:
+            # Standard decoupled weight decay
+            p_calc.add_(decay_target, alpha=-scaled_cwd)
+
         del anchor, decay_target
 
 
@@ -70,15 +77,17 @@ def apply_parameter_update(
         decoupled: Whenever to use the true decoupled weight decay.
     """
     wd = group["weight_decay"] if wd is None else wd
+    cwd = group.get("centered_wd", 0.0)
 
     if group.get('scaled_optm', False):
         decoupled = True
-        wd = scale_wd(wd, p, group)
+        wd, cwd = scale_wds(wd, cwd, p)
 
-    if decoupled:
-        scaled_wd = wd * (lr / self._init_lr)
-    else:
-        scaled_wd = wd * lr
+    # Calculate global decay factor for decoupled vs standard
+    decay_factor = (lr / self._init_lr) if decoupled else lr
+
+    scaled_wd = (wd * decay_factor) if wd != 0 else None
+    scaled_cwd = (cwd * decay_factor) if cwd != 0 else None
 
     state = self.state[p]
 
@@ -88,8 +97,8 @@ def apply_parameter_update(
         update_fp32 = update.float()
 
         # Apply weight decay if needed
-        if wd != 0:
-            _apply_weight_decay(p_fp32, update_fp32, p, state, group, scaled_wd)
+        if scaled_wd is not None or scaled_cwd is not None:
+            _apply_weight_decay(p_fp32, update_fp32, p, state, group, scaled_wd, scaled_cwd)
 
         # Apply main update
         p_fp32.add_(-update_fp32)
@@ -106,8 +115,8 @@ def apply_parameter_update(
 
     else:
         # Standard path for non-bfloat16 or without stochastic rounding
-        if wd != 0:
-            _apply_weight_decay(p, update, p, state, group, scaled_wd)
+        if scaled_wd is not None or scaled_cwd is not None:
+            _apply_weight_decay(p, update, p, state, group, scaled_wd, scaled_cwd)
 
         # Apply main update
         p.add_(-update)

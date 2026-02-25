@@ -31,66 +31,57 @@ def scale_update(
     # Orthogonal Fine-Tuning (OFT) 
     # RMS normalization (dim=1 normalizes per block)
     # This guarantees O(1) update complexity scaling, independent of block sizes.
-    elif is_oft:
+    if is_oft:
         return rms_normalization(update, dim=1, lr=lr)
 
     # LoRA Factors or Full Finetuning weights
     # Scales update to maintain consistent spectral norm across different layer sizes and ranks.
-    elif p.ndim >= 2:
+    if p.ndim >= 2:
         return spectral_normalization(update, vector_state, lr)
 
     return update.mul_(lr)
 
-def scale_wd(wd: float, p: torch.Tensor, group: dict) -> float:
-    """
-    Adjusts weight decay based on the parameter's shape and type to maintain 
-    effective regularization strength across varying architectures.
-    """
-    is_dora_scale = getattr(p, '_is_dora_scale', False)
-    is_oft = getattr(p, '_is_oft', False)
-    centered_wd = group.get('centered_wd', False)
 
+def scale_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
+    """
+    Adjusts standard weight decay and centered weight decay based on the parameter's 
+    shape and type to maintain effective regularization strength.
+    """
     # DoRA Scale (Magnitude Vector)
-    # Decaying magnitude vectors artificially shrinks feature variance without 
-    # regularizing function complexity.
-    if is_dora_scale:
-        if centered_wd:
-            return wd
-        return 0.0
+    if getattr(p, '_is_dora_scale', False):
+        return wd, cwd
 
-    # Orthogonal Fine-Tuning (OFT) Skew Matrices
-    # Driving Q -> 0 pulls the OFT rotation back to the Identity matrix.
-    # We return the unscaled `wd` so the fractional pull toward Identity 
-    # remains exactly O(1) regardless of the block size.
-    if is_oft:
-        return wd
+    conflict = (wd != 0 and cwd != 0)
 
-    # LoRA Factors (A and B) & Full Finetuning
-    # To maintain scale-invariant variance reduction, matrices must decay 
-    # inversely to their fan_in.
+    if getattr(p, '_is_oft', False):
+        # Fallback to standard WD (using cwd value) if both are active.
+        return (cwd if conflict else wd), 0.0
+
     if p.ndim >= 2:
-        # p.shape[1:].numel() extracts fan_in for both Linear and Conv2d.
-        # LoRA A: (rank, in_features) -> fan_in = in_features
-        # LoRA B: (out_features, rank) -> fan_in = rank
-        return wd / p.shape[1:].numel()
+        fan_in = p.numel() // p.shape[0]
+
+        # When both WDs are active on LoRA, fallback to standard WD (using cwd value)
+        # Reverts the behavior for better DoRA tuning.
+        is_lora = getattr(p, '_is_lora_A', False) or getattr(p, '_is_lora_B', False)
+        if conflict and is_lora:
+            return cwd / fan_in, 0.0
+
+        return wd / fan_in, cwd / fan_in
 
     # 1D Biases or generic 1D parameters
-    if centered_wd:
-        # Centered WD safely regularizes the delta without collapsing base feature variance
-        return wd
-    else:
-        return 0.0
+    # Centered WD safely regularizes the delta without collapsing base feature variance.
+    return 0.0, cwd
 
 
 @torch.no_grad()
-def l2_normalization(update: torch.Tensor, dim: int |None, lr: float) -> torch.Tensor:
+def l2_normalization(update: torch.Tensor, dim: int | None, lr: float) -> torch.Tensor:
     """Performs L2 normalization on the update tensor."""
     norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).clamp_min_(1e-12)
     return update.mul_(lr / norm)
 
 
 @torch.no_grad()
-def rms_normalization(update: torch.Tensor, dim: int |None, lr: float) -> torch.Tensor:
+def rms_normalization(update: torch.Tensor, dim: int | None, lr: float) -> torch.Tensor:
     """Performs Root Mean Square normalization on the update tensor."""
     n = update.numel() if dim is None else update.shape[dim]
     norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).clamp_min_(1e-12)
@@ -101,20 +92,15 @@ def is_spectral(p: torch.Tensor) -> bool:
     """Determines if a parameter should undergo spectral normalization updates."""
     if getattr(p, '_is_lora_A', False) or getattr(p, '_is_lora_B', False):
         return True
-    if getattr(p, '_is_oft', False) or getattr(p, '_is_dora_scale', False):
-        return False
-    if p.ndim == 1:
+    if getattr(p, '_is_oft', False) or getattr(p, '_is_dora_scale', False) or p.ndim == 1:
         return False
     return getattr(p, 'is_hidden', True)
 
 @torch.no_grad()
 def init_spectral_norm(group: dict, state: dict, p: torch.Tensor):
     """Initializes the singular vector 'v' for the Power Iteration method."""
-    device = p.device
-    dtype = p.dtype
-    d_in_flat = p.numel() // p.shape[0]
-    gen = param_update.get_generator(device)
-    v = torch.randn(d_in_flat, device=device, dtype=dtype, generator=gen)
+    gen = param_update.get_generator(p.device)
+    v = torch.randn(p.numel() // p.shape[0], device=p.device, dtype=p.dtype, generator=gen)
     state['spectral_v'] = v.div_(v.norm().clamp_min_(1e-12))
 
 @torch.no_grad()
@@ -122,14 +108,9 @@ def spectral_normalization(update: torch.Tensor, vector_state: torch.Tensor, lr:
     """
     Applies Spectral Normalization via a single step of Power Iteration.
     Implementation follows: "Scalable Optimization in the Modular Norm" (arXiv:2405.14813).
-
-    This ensures the update's spectral norm is scaled proportionally to the 
-    ideal 'target_scale' derived from the weight dimensions.
     """
-    original_shape = update.shape
-    d_out = original_shape[0]
-    d_in = original_shape[1:].numel()
-    # Reshape for matrix operations if it's a higher-order tensor (e.g. Conv)
+    d_out = update.shape[0]
+    d_in = update.numel() // d_out
     update_flat = update.view(d_out, d_in)
     # Target scale derived from the "Modular Norm" paper
     target_scale = (d_out / d_in) ** 0.5
