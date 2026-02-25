@@ -154,7 +154,7 @@ class Adopt_adv(torch.optim.Optimizer):
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = True,
-        factored_2nd: bool = True,
+        factored_2nd: bool = False,
         # torch.compile
         compiled_optimizer: bool = False,
     ):
