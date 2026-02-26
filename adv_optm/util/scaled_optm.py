@@ -51,7 +51,7 @@ def scale_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
     if getattr(p, '_is_dora_scale', False):
         return wd, cwd
 
-    conflict = (wd != 0 and cwd != 0)
+    conflict = cwd != 0
 
     if getattr(p, '_is_oft', False):
         # Fallback to standard WD (using cwd value) if both are active.
