@@ -85,7 +85,8 @@ def rms_normalization(update: torch.Tensor, dim: int | None, lr: float) -> torch
     """Performs Root Mean Square normalization on the update tensor."""
     n = update.numel() if dim is None else update.shape[dim]
     norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).clamp_min_(1e-12)
-    return update.mul_(lr * (n**0.5) / norm)
+    scale_n = n**0.5
+    return update.mul_(lr * scale_n / norm)
 
 
 def is_spectral(p: torch.Tensor) -> bool:
@@ -111,6 +112,7 @@ def spectral_normalization(update: torch.Tensor, vector_state: torch.Tensor, lr:
     """
     d_out = update.shape[0]
     d_in = update.numel() // d_out
+    update = update.to(vector_state.dtype)
     update_flat = update.view(d_out, d_in)
     # Target scale derived from the "Modular Norm" paper
     target_scale = (d_out / d_in) ** 0.5
