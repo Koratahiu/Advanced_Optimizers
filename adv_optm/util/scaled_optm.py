@@ -29,10 +29,14 @@ def scale_update(
         return rms_normalization(update, dim=None, lr=lr)
 
     # Orthogonal Fine-Tuning (OFT) 
-    # RMS normalization (dim=1 normalizes per block)
     # This guarantees O(1) update complexity scaling, independent of block sizes.
     if is_oft:
-        return rms_normalization(update, dim=1, lr=lr)
+        n = update.shape[1]
+        # Calculate block size (b)
+        b = (1 + (1 + 8 * n) ** 0.5) / 2
+        target_norm = (b / 8) ** 0.5
+        scale = target_norm / (n ** 0.5)
+        return rms_normalization(update, dim=1, lr=lr * scale)
 
     # LoRA Factors or Full Finetuning weights
     # Scales update to maintain consistent spectral norm across different layer sizes and ranks.
