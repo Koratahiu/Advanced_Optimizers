@@ -6,6 +6,7 @@ from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state, _pack_bools, _unpack_bools
 from ..util.lion_k import _get_lion_k_update
+from ..util.update_util import _get_l1_adaptive_lr
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 from ..util.update_util import _scale_sim_AdEMAMix_update
 from ..util.centered_decay import _init_anchor
@@ -49,8 +50,8 @@ class SignSGD_adv(torch.optim.Optimizer):
             stability. (default: 100.0)
         freeze_on_flip (bool): Projected SignGD One-hit freeze. Masks updates for
             coordinates where the gradient sign flips compared to the previous step. (default: False)
-        l1_adaptive (bool): Scales learning rate dynamically.
-            by the L1 norm of the gradient to handle gradient heterogeneity. (default: False)
+        l1_adaptive (bool): Scales the update step magnitude dynamically
+            by the mean L1 norm of the momentum/gradient to handle gradient heterogeneity.(default: False)
         centered_wd (float): Centered Weight Decay coefficient. Instead of decaying weights
             toward zero, they are decayed toward their initial values (anchors). This
             can be used together with standard weight decay. (default: 0.0)
@@ -269,9 +270,7 @@ class SignSGD_adv(torch.optim.Optimizer):
                 if freeze_on_flip:
                     state['sign'] = _pack_bools(raw_update > 0)
 
-            if group.get("l1_adaptive", False) and kappa_p == 1:
-                scale_factor = 1 / _scale_sim_AdEMAMix_update(momentum, state["step"] + 1, alpha_grad, 1, False)
-                lr = lr * (raw_update.norm(p=1)/scale_factor)
+            l1_mean = _get_l1_adaptive_lr(p, raw_update, state, group, kappa_p)
 
             update = _get_lion_k_update(raw_update, kappa_p)
             update = update.view(p.shape)
@@ -296,9 +295,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             else:
                 raw_update = grad.clone()
 
-            if group.get("l1_adaptive", False) and kappa_p == 1:
-                scale_factor = 1 / _scale_sim_AdEMAMix_update(momentum, state["step"] + 1, alpha_grad, 1, False)
-                lr = lr * (raw_update.norm(p=1)/scale_factor)
+            l1_mean = _get_l1_adaptive_lr(p, raw_update, state, group, kappa_p)
 
             update = _get_lion_k_update(raw_update, kappa_p)
 
@@ -306,6 +303,9 @@ class SignSGD_adv(torch.optim.Optimizer):
                 current_sign = (raw_update > 0).to(torch.uint8)
                 update = torch.where(current_sign == state['prev_sign'], update, 0.0)
                 state['prev_sign'] = current_sign
+
+        if l1_mean is not None:
+            update.mul_(l1_mean)
 
         if group.get('scaled_optm', False):
             update = scale_update(p, update, lr, vector_state=state.get('spectral_v'))

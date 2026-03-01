@@ -30,3 +30,38 @@ def _scale_sim_AdEMAMix_update(beta: float, current_step: int, alpha_grad: float
     total_scale = 1 / (momentum_scale + alpha_grad)
     lr = lr * total_scale
     return lr
+
+def _get_l1_adaptive_lr(
+    p: torch.Tensor, 
+    update: torch.Tensor, 
+    state: dict, 
+    group: dict, 
+    kappa_p: float
+) -> torch.Tensor:
+    """
+    Calculates the L1 adaptive learning rate based on gradient heterogeneity.
+    """
+    if not group.get("l1_adaptive", False):
+        return None
+
+    momentum = group["momentum"]
+    alpha_grad = group["alpha_grad"]
+
+    # Calculate scale factor based on momentum/update magnitude
+    scale_factor = _scale_sim_AdEMAMix_update(
+        momentum, state["step"] + 1, alpha_grad, 1, False
+    )
+
+    # Determine dimension for mean calculation based on parameter type
+    if getattr(p, '_is_oft', False) or getattr(p, '_is_lora_A', False):
+        l1_dim = 1
+    elif getattr(p, '_is_lora_B', False):
+        l1_dim = 0
+    else:
+        update_abs = update.abs() * scale_factor
+        mean_l1_norm = torch.outer(update_abs.mean(1), update_abs.mean(0))
+        return mean_l1_norm
+
+    mean_l1_norm = update.abs().mean(dim=l1_dim, keepdim=True) * scale_factor
+
+    return mean_l1_norm
