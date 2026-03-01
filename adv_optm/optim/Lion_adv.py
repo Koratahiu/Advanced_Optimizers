@@ -8,6 +8,7 @@ from ..util.factorization_util import _get_effective_shape, _reconstruct_state, 
 from ..util.lion_k import _get_lion_k_update
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 from ..util.centered_decay import _init_anchor
+from ..util.update_util import _get_l1_adaptive_lr
 
 
 class Lion_adv(torch.optim.Optimizer):
@@ -251,8 +252,7 @@ class Lion_adv(torch.optim.Optimizer):
             # Compute update term c_t
             update = torch.lerp(grad_reshaped, exp_avg, beta1)
 
-            if group.get("l1_adaptive", False) and kappa_p == 1:
-                lr = lr * (update.norm(p=1))
+            l1_mean = _get_l1_adaptive_lr(p, update, state, group, kappa_p)
 
             # Standard Lion momentum update
             # m_t = beta2 * m_{t-1} + (1-beta2) * g_t
@@ -286,8 +286,7 @@ class Lion_adv(torch.optim.Optimizer):
             # Compute update term
             update = torch.lerp(grad, exp_avg, beta1)
 
-            if group.get("l1_adaptive", False) and kappa_p == 1:
-                lr = lr * (update.norm(p=1))
+            l1_mean = _get_l1_adaptive_lr(p, update, state, group, kappa_p)
 
             update = _get_lion_k_update(update, kappa_p)
 
@@ -304,6 +303,9 @@ class Lion_adv(torch.optim.Optimizer):
                 current_sign = (update > 0).to(torch.uint8)
                 update = torch.where(current_sign == state['prev_sign'], update, 0.0)
                 state['prev_sign'] = current_sign
+
+        if l1_mean is not None:
+            update.mul_(l1_mean)
 
         if group.get('scaled_optm', False):
             update = scale_update(p, update, lr, vector_state=state.get('spectral_v'))
