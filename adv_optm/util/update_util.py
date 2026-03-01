@@ -32,10 +32,10 @@ def _scale_sim_AdEMAMix_update(beta: float, current_step: int, alpha_grad: float
     return lr
 
 def _get_l1_adaptive_lr(
-    p: torch.Tensor, 
-    update: torch.Tensor, 
-    state: dict, 
-    group: dict, 
+    p: torch.Tensor,
+    update: torch.Tensor,
+    state: dict,
+    group: dict,
     kappa_p: float
 ) -> torch.Tensor:
     """

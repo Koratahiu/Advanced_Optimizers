@@ -138,7 +138,7 @@ def set_seed(device: torch.device):
 
 def get_generator(device: torch.device) -> torch.Generator:
     """
-    Retrieves (and initializes if necessary) the deterministic generator 
+    Retrieves (and initializes if necessary) the deterministic generator
     for the specified device.
     """
     if device not in _generators:
@@ -241,9 +241,9 @@ def post_process_loaded_state(optimizer: Optimizer) -> None:
             # Deterministically check if this parameter skipped quantization
             numel = p.numel()
             is_skipped = (
-                numel == 0 or 
-                (mode in ['int8', 'int4'] and numel < 10000) or 
-                p.ndim == 1 or 
+                numel == 0 or
+                (mode in ['int8', 'int4'] and numel < 10000) or
+                p.ndim == 1 or
                 getattr(p, '_is_dora_scale', False)
             )
 

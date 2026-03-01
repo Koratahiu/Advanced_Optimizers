@@ -9,7 +9,7 @@ def scale_update(
     vector_state: torch.Tensor | None = None
 ) -> torch.Tensor:
     """
-    Applies adaptive scaling to the parameter update based on the parameter's 
+    Applies adaptive scaling to the parameter update based on the parameter's
     role (DoRA, OFT, or LoRA/Full Finetuning).
 
     Args:
@@ -28,7 +28,7 @@ def scale_update(
     if is_dora_scale or p.ndim == 1:
         return rms_normalization(update, dim=None, lr=lr)
 
-    # Orthogonal Fine-Tuning (OFT) 
+    # Orthogonal Fine-Tuning (OFT)
     # This guarantees O(1) update complexity scaling, independent of block sizes.
     if is_oft:
         n = update.shape[1]
@@ -48,7 +48,7 @@ def scale_update(
 
 def scale_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
     """
-    Adjusts standard weight decay and centered weight decay based on the parameter's 
+    Adjusts standard weight decay and centered weight decay based on the parameter's
     shape and type to maintain effective regularization strength.
     """
     # DoRA Scale (Magnitude Vector)

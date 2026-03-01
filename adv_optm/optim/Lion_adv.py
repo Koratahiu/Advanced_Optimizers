@@ -47,7 +47,7 @@ class Lion_adv(torch.optim.Optimizer):
             updates. Overrides explicit kappa_p value. (default: False).
         freeze_on_flip (bool): Projected SignGD One-hit freeze. Masks updates for
             coordinates where the gradient sign flips compared to the previous step. (default: False)
-        l1_adaptive (bool): Scales learning rate dynamically 
+        l1_adaptive (bool): Scales learning rate dynamically
             by the L1 norm of the gradient to handle gradient heterogeneity. (default: False).
         centered_wd (float): Centered Weight Decay coefficient. Instead of decaying weights
             toward zero, they are decayed toward their initial values (anchors). This
@@ -138,8 +138,8 @@ class Lion_adv(torch.optim.Optimizer):
     def load_state_dict(self, state_dict: dict) -> None:
         """
         Overrides default load_state_dict to implement a workaround for PyTorch's
-        automatic dtype casting. It ensures factorized states remain float32 for 
-        stability, preserves integer/float8 quantized anchor states, and forces 
+        automatic dtype casting. It ensures factorized states remain float32 for
+        stability, preserves integer/float8 quantized anchor states, and forces
         standard states onto the parameter's current dtype/device.
         """
         super().load_state_dict(state_dict)

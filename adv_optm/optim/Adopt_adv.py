@@ -107,7 +107,7 @@ class Adopt_adv(torch.optim.Optimizer):
             'int4': Uses 4-bit block-wise quantization (block size 32).
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
-        factored_2nd (bool): whether to keep the first moment uncompressed (dense) 
+        factored_2nd (bool): whether to keep the first moment uncompressed (dense)
             while only factorizing the second moment. (default: True)
     """
 
@@ -189,7 +189,7 @@ class Adopt_adv(torch.optim.Optimizer):
             "scaled_optm": scaled_optm,
             "centered_wd": centered_wd,
             "centered_wd_mode": centered_wd_mode,
-            "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape, "factored_2nd": factored_2nd, 
+            "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape, "factored_2nd": factored_2nd,
             "compiled_optimizer": compiled_optimizer,
         }
         self.clip_lambda = clip_lambda
@@ -222,8 +222,8 @@ class Adopt_adv(torch.optim.Optimizer):
     def load_state_dict(self, state_dict: dict) -> None:
         """
         Overrides default load_state_dict to implement a workaround for PyTorch's
-        automatic dtype casting. It ensures factorized states remain float32 for 
-        stability, preserves integer/float8 quantized anchor states, and forces 
+        automatic dtype casting. It ensures factorized states remain float32 for
+        stability, preserves integer/float8 quantized anchor states, and forces
         standard states onto the parameter's current dtype/device.
         """
         super().load_state_dict(state_dict)

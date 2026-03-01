@@ -91,7 +91,7 @@ class AdamW_adv(torch.optim.Optimizer):
             'int4': Uses 4-bit block-wise quantization (block size 32).
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
-        factored_2nd (bool): whether to keep the first moment uncompressed (dense) 
+        factored_2nd (bool): whether to keep the first moment uncompressed (dense)
             while only factorizing the second moment. (default: True)
     """
 
@@ -192,8 +192,8 @@ class AdamW_adv(torch.optim.Optimizer):
     def load_state_dict(self, state_dict: dict) -> None:
         """
         Overrides default load_state_dict to implement a workaround for PyTorch's
-        automatic dtype casting. It ensures factorized states remain float32 for 
-        stability, preserves integer/float8 quantized anchor states, and forces 
+        automatic dtype casting. It ensures factorized states remain float32 for
+        stability, preserves integer/float8 quantized anchor states, and forces
         standard states onto the parameter's current dtype/device.
         """
         super().load_state_dict(state_dict)
@@ -349,7 +349,7 @@ class AdamW_adv(torch.optim.Optimizer):
                     update_mt = mt if not factored_2nd else mt.clone()
 
             vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
-            
+
             if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
                 vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped * (1.0 - beta2))
             else:
@@ -367,7 +367,7 @@ class AdamW_adv(torch.optim.Optimizer):
                     update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
                     update = grad_reshaped.add(mt_slow, alpha=alpha)
-                
+
                 if not factored_2nd:
                     # Factorize
                     state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)

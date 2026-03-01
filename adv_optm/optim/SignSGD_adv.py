@@ -8,7 +8,6 @@ from ..util.factorization_util import _get_effective_shape, _reconstruct_state, 
 from ..util.lion_k import _get_lion_k_update
 from ..util.update_util import _get_l1_adaptive_lr
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
-from ..util.update_util import _scale_sim_AdEMAMix_update
 from ..util.centered_decay import _init_anchor
 
 
@@ -141,8 +140,8 @@ class SignSGD_adv(torch.optim.Optimizer):
     def load_state_dict(self, state_dict: dict) -> None:
         """
         Overrides default load_state_dict to implement a workaround for PyTorch's
-        automatic dtype casting. It ensures factorized states remain float32 for 
-        stability, preserves integer/float8 quantized anchor states, and forces 
+        automatic dtype casting. It ensures factorized states remain float32 for
+        stability, preserves integer/float8 quantized anchor states, and forces
         standard states onto the parameter's current dtype/device.
         """
         super().load_state_dict(state_dict)

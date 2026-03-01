@@ -35,9 +35,9 @@ class KourkoutasHelper:
             # No key function was provided. Default to coarse, shape-based bucketing.
             self.optimizer.layer_key_fn = lambda p: \
                 (id(p),) if (
-                    getattr(p, '_is_oft', False) or 
-                    getattr(p, '_is_lora_A', False) or 
-                    getattr(p, '_is_lora_B', False) or 
+                    getattr(p, '_is_oft', False) or
+                    getattr(p, '_is_lora_A', False) or
+                    getattr(p, '_is_lora_B', False) or
                     getattr(p, '_is_dora_scale', False)
                 ) else tuple(p.shape)
             # This ensures that we won't mix embeddings with tokens (1 to 10)
@@ -59,7 +59,7 @@ class KourkoutasHelper:
     def _get_or_init_layer_ema_tensor(self, layer_key, layer_params, device):
         """
         Retrieves the EMA tensor for this layer.
-        It handles synchronization between the internal layer_state and 
+        It handles synchronization between the internal layer_state and
         the external optimizer.state (which is required for state_dict saving/loading).
         """
         # Initialize container in layer_state if missing

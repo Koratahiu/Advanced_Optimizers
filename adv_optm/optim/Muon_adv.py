@@ -259,8 +259,8 @@ class Muon_adv(torch.optim.Optimizer):
     def load_state_dict(self, state_dict: dict) -> None:
         """
         Overrides default load_state_dict to implement a workaround for PyTorch's
-        automatic dtype casting. It ensures factorized states remain float32 for 
-        stability, preserves integer/float8 quantized anchor states, and forces 
+        automatic dtype casting. It ensures factorized states remain float32 for
+        stability, preserves integer/float8 quantized anchor states, and forces
         standard states onto the parameter's current dtype/device.
         """
         super().load_state_dict(state_dict)
