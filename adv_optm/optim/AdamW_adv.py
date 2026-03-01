@@ -349,7 +349,11 @@ class AdamW_adv(torch.optim.Optimizer):
                     update_mt = mt if not factored_2nd else mt.clone()
 
             vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
-            vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
+            
+            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
+                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped * (1.0 - beta2))
+            else:
+                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
 
             if self.use_AdEMAMix:
                 if factored_2nd:
@@ -413,7 +417,10 @@ class AdamW_adv(torch.optim.Optimizer):
                 update = update_mt if beta1 > 0 else grad.clone()
 
             exp_avg_sq = state['exp_avg_sq']
-            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad * (1.0 - beta2))
+            else:
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
 
             if group['use_atan2']:
                 denom = exp_avg_sq.sqrt()

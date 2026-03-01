@@ -320,7 +320,10 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             mt.mul_(beta1).add_(grad_reshaped)
 
             vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
-            vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
+            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
+                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped * (1.0 - beta2))
+            else:
+                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
 
             # update = mt + (grad_reshaped * alpha_grad)
             update = torch.add(mt, grad_reshaped, alpha=alpha_grad)
@@ -347,7 +350,10 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
             update = torch.add(exp_avg, grad, alpha=alpha_grad)
 
-            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad * (1.0 - beta2))
+            else:
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
 
             denom = exp_avg_sq.sqrt().add_(sqrt_den_eps)
             update.div_(denom)

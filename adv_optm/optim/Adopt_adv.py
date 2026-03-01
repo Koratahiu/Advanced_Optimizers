@@ -244,6 +244,19 @@ class Adopt_adv(torch.optim.Optimizer):
         grad = p.grad
         state = self.state[p]
 
+
+        beta1, beta2 = group['betas']
+
+        if group.get('kourkoutas_beta', False):
+            if 'step' not in state:
+                current_step = 0
+            else:
+                current_step = state['step']
+            # Call prepare_step() once at the beginning of the step for all params
+            self.kourkoutas_helper.maybe_prepare_step(current_step, p.device)
+            # Get the dynamic beta2 calculated in prepare_step()
+            beta2 = self.kourkoutas_helper.get_beta2(p, group)
+
         # State Initialization
         if 'step' not in state:
             state['step'] = 0
@@ -255,6 +268,12 @@ class Adopt_adv(torch.optim.Optimizer):
             )
 
             dtype = torch.float32 if state['factored'] else p.dtype
+
+            vt_init = grad.pow(2).to(dtype)
+            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
+                vt_init.mul_(beta2).addcmul_(grad.to(dtype), grad.to(dtype) * (1.0 - beta2))
+            else:
+                vt_init.mul_(beta2).addcmul_(grad.to(dtype), grad.to(dtype), value=1.0 - beta2)
 
             if state['factored']:
                 state['effective_shape'] = _get_effective_shape(p.numel())
@@ -279,33 +298,21 @@ class Adopt_adv(torch.optim.Optimizer):
                     if self.use_AdEMAMix:
                         state['exp_avg_slow'] = torch.zeros_like(p, device=p.device, dtype=dtype)
                 # Second moment (v)
-                vt_init = grad.to(dtype).view(d1, d2).square()
-                # Allocate NMF factors for vt
-                state['mu_v_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
-                state['mv_v_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                # Initialize v_0
-                state['mu_v_nmf'], state['mv_v_nmf'] = _nnmf(vt_init)
+                state['mu_v_nmf'], state['mv_v_nmf'] = _nnmf(vt_init.view(d1, d2))
                 del vt_init
             else: # Fallback for non-factored tensors
                 if group['betas'][0] > 0:
                     state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
                 if self.use_AdEMAMix:
                     state['exp_avg_slow'] = torch.zeros_like(p, device=p.device, dtype=dtype)
-                state['exp_avg_sq'] = grad.to(dtype).square()
+                state['exp_avg_sq'] = vt_init
 
             if group.get('scaled_optm', False) and is_spectral(p):
                 init_spectral_norm(group, state, p)
 
             _init_anchor(p, state, group)
 
-        beta1, beta2 = group['betas']
-
         current_step = state['step']
-        if group.get('kourkoutas_beta', False):
-            # Call prepare_step() once at the beginning of the step for all params
-            self.kourkoutas_helper.maybe_prepare_step(current_step, p.device)
-            # Get the dynamic beta2 calculated in prepare_step()
-            beta2 = self.kourkoutas_helper.get_beta2(p, group)
 
         # The first step is for initialization only (skip when use_atan2 as it's scale invariant).
         if state['step'] == 0 and not self.use_atan2:
@@ -361,7 +368,10 @@ class Adopt_adv(torch.optim.Optimizer):
             denom = vt.sqrt()
 
             # Update second moment v_t for the *next* step using raw g_t
-            vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
+            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
+                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped * (1.0 - beta2))
+            else:
+                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
             # Factorize
             state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
             del vt
@@ -475,9 +485,11 @@ class Adopt_adv(torch.optim.Optimizer):
                 else:
                     update = normalized_grad
 
-
             # Update second moment v_t for the next step using raw g_t
-            vt.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
+                vt.mul_(beta2).addcmul_(grad, grad * (1.0 - beta2))
+            else:
+                vt.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
         update_scaling = lr * A if self.use_atan2 else lr
 

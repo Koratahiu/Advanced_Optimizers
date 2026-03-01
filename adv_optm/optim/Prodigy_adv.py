@@ -440,7 +440,10 @@ class Prodigy_adv(torch.optim.Optimizer):
                     update_mt = mt if not factored_2nd else mt.clone()
 
             vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
-            vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=d * d * (1.0 - beta2))
+            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
+                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped * (d * d * (1.0 - beta2)))
+            else:
+                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=d * d * (1.0 - beta2))
 
             if self.use_AdEMAMix:
                 if factored_2nd:
@@ -514,7 +517,10 @@ class Prodigy_adv(torch.optim.Optimizer):
                     update = grad.mul(d)
 
             exp_avg_sq = state['exp_avg_sq']
-            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=d * d * (1.0 - beta2))
+            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad * (d * d * (1.0 - beta2)))
+            else:
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=d * d * (1.0 - beta2))
 
             if group['use_atan2']:
                 denom = exp_avg_sq.sqrt()

@@ -34,8 +34,12 @@ class KourkoutasHelper:
         else:
             # No key function was provided. Default to coarse, shape-based bucketing.
             self.optimizer.layer_key_fn = lambda p: \
-                (id(p),) if p.dim() == 2 and 1 <= p.shape[0] <= 10 and p.shape[1] in {768, 1280, 4096} \
-                else tuple(p.shape)
+                (id(p),) if (
+                    getattr(p, '_is_oft', False) or 
+                    getattr(p, '_is_lora_A', False) or 
+                    getattr(p, '_is_lora_B', False) or 
+                    getattr(p, '_is_dora_scale', False)
+                ) else tuple(p.shape)
             # This ensures that we won't mix embeddings with tokens (1 to 10)
             # TODO find a better way to safeguard the embeddings
 
@@ -60,8 +64,16 @@ class KourkoutasHelper:
         """
         # Initialize container in layer_state if missing
         if layer_key not in self.layer_state:
+            p = layer_params[0]
+            if getattr(p, '_is_oft', False) or getattr(p, '_is_lora_A', False):
+                shape = (p.shape[0], 1)
+            elif getattr(p, '_is_lora_B', False):
+                shape = (1, p.shape[1])
+            else:
+                shape = ()
+
             self.layer_state[layer_key] = {
-                'sum_sq_accumulator': torch.tensor(0.0, device=device, dtype=torch.float32)
+                'sum_sq_accumulator': torch.zeros(shape, device=device, dtype=torch.float32)
             }
 
         internal_ema = self.layer_state[layer_key].get('kourkoutas_r_ema')
@@ -87,7 +99,15 @@ class KourkoutasHelper:
 
         # Case B: No state anywhere. Create new.
         if internal_ema is None:
-            new_ema = torch.tensor(0.0, device=device, dtype=torch.float32)
+            p = layer_params[0]
+            if getattr(p, '_is_oft', False) or getattr(p, '_is_lora_A', False):
+                shape = (p.shape[0], 1)
+            elif getattr(p, '_is_lora_B', False):
+                shape = (1, p.shape[1])
+            else:
+                shape = ()
+
+            new_ema = torch.zeros(shape, device=device, dtype=torch.float32)
             self.layer_state[layer_key]['kourkoutas_r_ema'] = new_ema
 
             # Register this tensor in optimizer.state for ALL params so it gets saved
@@ -107,7 +127,7 @@ class KourkoutasHelper:
 
     def prepare_step(self, current_step: int, device):
         """
-        Calculates dynamic beta2 for all layers using the completed scalar accumulators
+        Calculates dynamic beta2 for all layers using the completed accumulators
         from the PREVIOUS step. Should be called once at the start of an optimizer step.
         """
         beta2_log = []
@@ -154,7 +174,10 @@ class KourkoutasHelper:
                 beta2 = beta2_max - (beta2_max - beta2_min) * sun
 
             # Store the final calculated beta2 in the helper's transient state for this step.
-            self.layer_state[layer_key]['dynamic_beta2'] = beta2.item() if isinstance(beta2, torch.Tensor) and not group.get('compiled_optimizer', False) else beta2
+            if isinstance(beta2, torch.Tensor) and beta2.numel() == 1 and not group.get('compiled_optimizer', False):
+                self.layer_state[layer_key]['dynamic_beta2'] = beta2.item()
+            else:
+                self.layer_state[layer_key]['dynamic_beta2'] = beta2
 
             # Reset the accumulator for the next optimizer step.
             accumulator.zero_()
@@ -163,10 +186,11 @@ class KourkoutasHelper:
 
         # Compute stats for TensorBoard
         if beta2_log:
-            beta2_tensor = torch.as_tensor(beta2_log, device='cpu')
+            # Handles lists containing both standard floats and heterogeneous tensors
+            means = [b.mean().item() if isinstance(b, torch.Tensor) else float(b) for b in beta2_log]
             self.last_beta2_stats = {
-                'mean': beta2_tensor.mean().item()
-                }
+                'mean': sum(means) / len(means)
+            }
 
     def maybe_prepare_step(self, current_step: int, device):
         """
@@ -184,9 +208,16 @@ class KourkoutasHelper:
 
         if layer_key in self.layer_info and layer_key in self.layer_state:
             # Accumulate for the *next* step's prepare_step call
-            self.layer_state[layer_key]['sum_sq_accumulator'] += torch.sum(grad.detach().pow(2)).float()
+            if getattr(p, '_is_oft', False) or getattr(p, '_is_lora_A', False):
+                sq_norm = torch.sum(grad.detach().pow(2), dim=1, keepdim=True).float()
+            elif getattr(p, '_is_lora_B', False):
+                sq_norm = torch.sum(grad.detach().pow(2), dim=0, keepdim=True).float()
+            else:
+                sq_norm = torch.sum(grad.detach().pow(2)).float()
 
-    def get_beta2(self, p: torch.Tensor, group: dict) -> float:
+            self.layer_state[layer_key]['sum_sq_accumulator'] += sq_norm
+
+    def get_beta2(self, p: torch.Tensor, group: dict) -> float | torch.Tensor:
         """
         Gets the appropriate beta2 for the current parameter, handling warmup and dynamic value fetching.
         """

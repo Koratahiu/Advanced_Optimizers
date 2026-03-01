@@ -87,7 +87,10 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
                 update_mt = mt
 
         vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
-        vt.mul_(beta2_adam).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2_adam)
+        if isinstance(beta2_adam, torch.Tensor) and beta2_adam.dim() > 0:
+            vt.mul_(beta2_adam).addcmul_(grad_reshaped, grad_reshaped * (1.0 - beta2_adam))
+        else:
+            vt.mul_(beta2_adam).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2_adam)
 
         if group.get('adam_use_AdEMAMix'):
             mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
@@ -148,7 +151,10 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
             update = update_mt if beta1_adam > 0 else grad.clone()
 
         exp_avg_sq = state['exp_avg_sq']
-        exp_avg_sq.mul_(beta2_adam).addcmul_(grad, grad, value=1 - beta2_adam)
+        if isinstance(beta2_adam, torch.Tensor) and beta2_adam.dim() > 0:
+            exp_avg_sq.mul_(beta2_adam).addcmul_(grad, grad * (1.0 - beta2_adam))
+        else:
+            exp_avg_sq.mul_(beta2_adam).addcmul_(grad, grad, value=1.0 - beta2_adam)
 
         if group.get('adam_use_atan2'):
             denom = exp_avg_sq.sqrt()
