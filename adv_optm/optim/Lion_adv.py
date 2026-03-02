@@ -252,7 +252,7 @@ class Lion_adv(torch.optim.Optimizer):
             # Compute update term c_t
             update = torch.lerp(grad_reshaped, exp_avg, beta1)
 
-            l1_mean = _get_l1_adaptive_lr(p, update, state, group, kappa_p)
+            l1_mean = _get_l1_adaptive_lr(p, update, state, group, kappa_p, rescale=False)
 
             # Standard Lion momentum update
             # m_t = beta2 * m_{t-1} + (1-beta2) * g_t
@@ -288,7 +288,7 @@ class Lion_adv(torch.optim.Optimizer):
 
             l1_mean = _get_l1_adaptive_lr(p, update, state, group, kappa_p)
 
-            update = _get_lion_k_update(update, kappa_p)
+            update = _get_lion_k_update(update, kappa_p, rescale=False)
 
             if self.cautious_mask:
                 mask = (update * grad > 0).to(grad.dtype)

@@ -36,7 +36,8 @@ def _get_l1_adaptive_lr(
     update: torch.Tensor,
     state: dict,
     group: dict,
-    kappa_p: float
+    kappa_p: float,
+    rescale: bool = False,
 ) -> torch.Tensor:
     """
     Calculates the L1 adaptive learning rate based on gradient heterogeneity.
@@ -44,14 +45,18 @@ def _get_l1_adaptive_lr(
     if not group.get("l1_adaptive", False) and kappa_p != 1:
         return None
 
-    momentum = group["momentum"]
-    alpha_grad = group["alpha_grad"]
     update_view = update.view(p.shape)
 
-    # Calculate scale factor based on momentum/update magnitude
-    scale_factor = _scale_sim_AdEMAMix_update(
-        momentum, state["step"] + 1, alpha_grad, 1, False
-    )
+    if rescale:
+        momentum = group["momentum"]
+        alpha_grad = group["alpha_grad"]
+
+        # Calculate scale factor based on momentum/update magnitude
+        scale_factor = _scale_sim_AdEMAMix_update(
+            momentum, state["step"] + 1, alpha_grad, 1, False
+        )
+    else:
+        scale_factor = 1
 
     # Determine dimension for mean calculation based on parameter type
     if getattr(p, '_is_oft', False) or getattr(p, '_is_lora_A', False):
