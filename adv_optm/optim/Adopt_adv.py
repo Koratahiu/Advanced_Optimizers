@@ -122,7 +122,7 @@ class Adopt_adv(torch.optim.Optimizer):
         eps: float = 1e-6,
         # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
-        fisher_wd: bool = False,
+        fisher_wd: bool = True,
         cautious_wd: bool = False,
         # ADOPT clipping
         clip_lambda: Optional[Callable[[int], float]] = lambda step: step**0.25,
@@ -371,7 +371,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
             # ADOPT Step A: Decorrelate g_t using v_{t-1}
             denom = vt.sqrt()
-            wd_scaler = _get_fisher_wd_scaler(group, p, denom)
+            wd_scaler = _get_fisher_wd_scaler(group, p, denom, self.use_atan2)
 
             # Update second moment v_t for the *next* step using raw g_t
             if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
@@ -450,7 +450,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
             # ADOPT Step A: Decorrelate g_t using v_{t-1}
             denom = vt.sqrt()
-            wd_scaler = _get_fisher_wd_scaler(group, p, denom)
+            wd_scaler = _get_fisher_wd_scaler(group, p, denom, self.use_atan2)
 
             if self.use_atan2:
                 normalized_grad = torch.atan2(grad, denom, out=denom)

@@ -31,7 +31,7 @@ def _scale_sim_AdEMAMix_update(beta: float, current_step: int, alpha_grad: float
     lr = lr * total_scale
     return lr
 
-def _get_fisher_wd_scaler(group: dict, p: torch.Tensor, denom: torch.Tensor) -> torch.Tensor | None:
+def _get_fisher_wd_scaler(group: dict, p: torch.Tensor, denom: torch.Tensor, atan2: bool) -> torch.Tensor | None:
     """
     Calculates the Fisher weight decay scaler.
     Maps the decay direction through the empirical Fisher information matrix
@@ -41,7 +41,13 @@ def _get_fisher_wd_scaler(group: dict, p: torch.Tensor, denom: torch.Tensor) -> 
     """
     if not group.get('fisher_wd', False):
         return None
-    wd_scaler = 1.0 / denom
+
+    if atan2:
+        wd_scaler = torch.atan2(torch.ones_like(denom), denom)
+    else:
+        eps = group.get('eps', 1e-8)
+        wd_scaler = 1.0 / (denom + eps)
+
     # Reshape scaler if necessary to match parameter shape (for factored states)
     wd_scaler = wd_scaler.view(p.shape)
 
