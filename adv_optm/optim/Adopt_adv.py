@@ -7,7 +7,7 @@ from ..util import param_update
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state, _nnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
-from ..util.update_util import _grams_update, _cautious_update, _scale_sim_AdEMAMix_update
+from ..util.update_util import _grams_update, _cautious_update, _scale_sim_AdEMAMix_update, _get_fisher_wd_scaler
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 from ..util.centered_decay import _init_anchor
 
@@ -33,6 +33,9 @@ class Adopt_adv(torch.optim.Optimizer):
         eps (float): term added to the denominator to improve
             numerical stability (default: 1e-6)
         weight_decay (float): weight decay (L2 penalty) (default: 0)
+        fisher_wd (bool): whether to use Fisher Adam (FAdam) weight decay, mapping
+            the decay direction through the empirical Fisher information matrix and 
+            clipping its RMS. (default: False)
         cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
             applied only to parameter coordinates where the sign of the parameter
             and the sign of the optimizer update align (default: False).
@@ -119,6 +122,7 @@ class Adopt_adv(torch.optim.Optimizer):
         eps: float = 1e-6,
         # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
+        fisher_wd: bool = False,
         cautious_wd: bool = False,
         # ADOPT clipping
         clip_lambda: Optional[Callable[[int], float]] = lambda step: step**0.25,
@@ -181,7 +185,8 @@ class Adopt_adv(torch.optim.Optimizer):
             print("Warning: cautious is incompatible with Simplified_AdEMAMix, Disabling cautious.")
 
         defaults = {
-            "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
+            "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
+            "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
             "beta3_ema": beta3_ema, "alpha": alpha,
             "alpha_grad": alpha_grad,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
@@ -366,6 +371,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
             # ADOPT Step A: Decorrelate g_t using v_{t-1}
             denom = vt.sqrt()
+            wd_scaler = _get_fisher_wd_scaler(group, p, denom)
 
             # Update second moment v_t for the *next* step using raw g_t
             if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
@@ -444,6 +450,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
             # ADOPT Step A: Decorrelate g_t using v_{t-1}
             denom = vt.sqrt()
+            wd_scaler = _get_fisher_wd_scaler(group, p, denom)
 
             if self.use_atan2:
                 normalized_grad = torch.atan2(grad, denom, out=denom)
@@ -499,7 +506,7 @@ class Adopt_adv(torch.optim.Optimizer):
             update.mul_(update_scaling)
 
         # Parameter Update
-        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor, wd_scaler=wd_scaler)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)

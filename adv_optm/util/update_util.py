@@ -31,6 +31,24 @@ def _scale_sim_AdEMAMix_update(beta: float, current_step: int, alpha_grad: float
     lr = lr * total_scale
     return lr
 
+def _get_fisher_wd_scaler(group: dict, p: torch.Tensor, denom: torch.Tensor) -> torch.Tensor | None:
+    """
+    Calculates the Fisher weight decay scaler.
+    Maps the decay direction through the empirical Fisher information matrix
+    and clips its RMS to ensure stability.
+    From the paper:
+    "FAdam: Adam is a natural gradient optimizer using diagonal empirical Fisher information"
+    """
+    if not group.get('fisher_wd', False):
+        return None
+    wd_scaler = 1.0 / denom
+    # Reshape scaler if necessary to match parameter shape (for factored states)
+    wd_scaler = wd_scaler.view(p.shape)
+
+    gw_rms = torch.sqrt(torch.mean((p * wd_scaler) ** 2))
+    clip_coef = torch.clamp(gw_rms / 1.0, min=1.0)
+    return wd_scaler / clip_coef
+
 def _get_l1_adaptive_lr(
     p: torch.Tensor,
     update: torch.Tensor,

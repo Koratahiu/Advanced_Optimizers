@@ -61,6 +61,7 @@ def apply_parameter_update(
     wd: float | None = None,
     random_int_tensor: Tensor | None = None,
     decoupled: bool = False,
+    wd_scaler: float | Tensor | None = None,
 ) -> None:
     """
     Applies decoupled weight decay (standard, cautious, centered) and the final
@@ -75,6 +76,7 @@ def apply_parameter_update(
         random_int_tensor: Optional pre-generated random tensor for stochastic
             rounding. Required for the `torch.compile` path.
         decoupled: Whenever to use the true decoupled weight decay.
+        wd_scaler: A multiplier/tensor to scale the calculated wd/cwd magnitude (e.g. for Fisher Adam WD).
     """
     wd = group["weight_decay"] if wd is None else wd
     cwd = group.get("centered_wd", 0.0)
@@ -88,6 +90,12 @@ def apply_parameter_update(
 
     scaled_wd = (wd * decay_factor) if wd != 0 else None
     scaled_cwd = (cwd * decay_factor) if cwd != 0 else None
+
+    if wd_scaler is not None:
+        if scaled_wd is not None:
+            scaled_wd = scaled_wd * wd_scaler
+        if scaled_cwd is not None:
+            scaled_cwd = scaled_cwd * wd_scaler
 
     state = self.state[p]
 
