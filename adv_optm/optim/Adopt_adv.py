@@ -373,7 +373,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
             # ADOPT Step A: Decorrelate g_t using v_{t-1}
             denom = vt.sqrt()
-            wd_scaler = _get_fisher_wd_scaler(group, state["wd_scaler"], p, denom, self.use_atan2)
+            wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, self.use_atan2)
 
             # Update second moment v_t for the *next* step using raw g_t
             if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
@@ -452,7 +452,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
             # ADOPT Step A: Decorrelate g_t using v_{t-1}
             denom = vt.sqrt()
-            wd_scaler = _get_fisher_wd_scaler(group, state["wd_scaler"], p, denom, self.use_atan2)
+            wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, self.use_atan2)
 
             if self.use_atan2:
                 normalized_grad = torch.atan2(grad, denom, out=denom)

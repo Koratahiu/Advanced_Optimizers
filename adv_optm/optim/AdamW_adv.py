@@ -397,7 +397,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 denom.div_(sqrt_bias_correction2).add_(group['eps'])
                 update.div_(denom)
 
-            wd_scaler = _get_fisher_wd_scaler(group, state["wd_scaler"], p, denom, group['use_atan2'])
+            wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, group['use_atan2'])
 
             del vt
 
@@ -441,7 +441,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 denom.div_(sqrt_bias_correction2).add_(group['eps'])
                 update.div_(denom)
 
-            wd_scaler = _get_fisher_wd_scaler(group, state["wd_scaler"], p, denom, group['use_atan2'])
+            wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, group['use_atan2'])
 
             del denom
 
