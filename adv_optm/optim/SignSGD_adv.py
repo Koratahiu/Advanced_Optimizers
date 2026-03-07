@@ -9,6 +9,7 @@ from ..util.lion_k import _get_lion_k_update
 from ..util.update_util import _get_l1_adaptive_lr
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 from ..util.centered_decay import _init_anchor
+from ..util.signed_util import apply_stochastic_sign
 
 
 class SignSGD_adv(torch.optim.Optimizer):
@@ -39,6 +40,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             parameter dimensionality. Sets p=2.0 for 4D tensors (Conv2D) (Biases/Norms) to
             use Spherical updates, and p=1.0 for others (Linear/Embeddings) to use Sign
             updates. Overrides explicit kappa_p value. (default: False).
+        stochastic_sign (bool): whether to use the Stochastic Sign operator. (default: False)
         Simplified_AdEMAMix (bool): whether to use the Simplified AdEMAMix update rule.
             This changes the EMA to accumulator and the update numerator to `alpha_grad * grad + mt`, which can be
             more responsive, especially for small batch sizes. (default: False)
@@ -79,6 +81,8 @@ class SignSGD_adv(torch.optim.Optimizer):
         # Projection-k
         kappa_p: float = 1.0,
         auto_kappa_p: bool = True,
+        # Stochastic Sign Operator
+        stochastic_sign: bool = False,
         # Simplified_AdEMAMix
         alpha_grad: float = 1.0,
         Simplified_AdEMAMix: bool = False,
@@ -112,6 +116,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             orthogonal_gradient=orthogonal_gradient,
             kappa_p=kappa_p,
             auto_kappa_p=auto_kappa_p,
+            stochastic_sign=stochastic_sign,
             alpha_grad=alpha_grad,
             Simplified_AdEMAMix=Simplified_AdEMAMix,
             scaled_optm= scaled_optm,
@@ -203,23 +208,26 @@ class SignSGD_adv(torch.optim.Optimizer):
         lr = group["lr"]
 
         random_int_tensor = None
+        random_noise_tensor = None
 
         if group.get('compiled_optimizer', False):
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
-            lr = torch.as_tensor(lr, dtype=torch.float64)
+            if group.get('stochastic_sign', False):
+                random_noise_tensor = param_update._get_random_noise_for_sso(p)
+            lr = torch.as_tensor(lr)
             step_param_fn = self._compiled_step_parameter
         else:
             step_param_fn = self._step_parameter
 
-        step_param_fn(p, grad, state, group, lr, random_int_tensor)
+        step_param_fn(p, grad, state, group, lr, random_int_tensor, random_noise_tensor)
 
         if group.get("l1_adaptive", False):
             state["step"] += 1
 
-    def _step_parameter(self, p, grad, state, group, lr, random_int_tensor):
-        if grad.dtype != torch.float32 and state['factored']:
+    def _step_parameter(self, p, grad, state, group, lr, random_int_tensor, random_noise_tensor):
+        if grad.dtype != torch.float32 and state.get('factored', False):
             grad = grad.float()
 
         if group["orthogonal_gradient"]:
@@ -269,17 +277,22 @@ class SignSGD_adv(torch.optim.Optimizer):
                 if freeze_on_flip:
                     state['sign'] = _pack_bools(raw_update > 0)
 
-            l1_mean = _get_l1_adaptive_lr(p, raw_update, state, group, kappa_p)
 
-            update = _get_lion_k_update(raw_update, kappa_p)
-            update = update.view(p.shape)
+            raw_update = raw_update.view(p.shape)
 
             if freeze_on_flip:
                 # Fast binary diff (XOR) from momentum sign directly
                 flipped_packed = prev_sign_packed ^ state['sign']
-                flipped_mask = _unpack_bools(flipped_packed, original_m=d2).view_as(update)
-                update = torch.where(flipped_mask, 0.0, update)
+                flipped_mask = _unpack_bools(flipped_packed, original_m=d2).view_as(raw_update)
+                raw_update = torch.where(flipped_mask, 0.0, raw_update)
                 del prev_sign_packed, flipped_packed, flipped_mask
+
+            l1_mean = _get_l1_adaptive_lr(p, raw_update, state, group, kappa_p)
+
+            if group.get('stochastic_sign', False):
+                update = apply_stochastic_sign(raw_update, noise=random_noise_tensor)
+            else:
+                update = _get_lion_k_update(raw_update, kappa_p)
 
         else:
             # Fallback to standard SignSGD logic
@@ -294,14 +307,17 @@ class SignSGD_adv(torch.optim.Optimizer):
             else:
                 raw_update = grad.clone()
 
-            l1_mean = _get_l1_adaptive_lr(p, raw_update, state, group, kappa_p)
-
-            update = _get_lion_k_update(raw_update, kappa_p)
-
             if freeze_on_flip:
                 current_sign = (raw_update > 0).to(torch.uint8)
-                update = torch.where(current_sign == state['prev_sign'], update, 0.0)
+                raw_update = torch.where(current_sign == state['prev_sign'], raw_update, 0.0)
                 state['prev_sign'] = current_sign
+
+            l1_mean = _get_l1_adaptive_lr(p, raw_update, state, group, kappa_p)
+
+            if group.get('stochastic_sign', False):
+                update = apply_stochastic_sign(raw_update, noise=random_noise_tensor)
+            else:
+                update = _get_lion_k_update(raw_update, kappa_p)
 
         if l1_mean is not None:
             update.mul_(l1_mean)
