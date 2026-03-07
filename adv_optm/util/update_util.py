@@ -45,7 +45,7 @@ def _get_fisher_wd_scaler(group: dict, p: torch.Tensor, denom: torch.Tensor, ata
         return None
 
     if atan2:
-        wd_scaler = torch.atan2(torch.ones_like(denom), denom).mul_(4 / math.pi)
+        wd_scaler = torch.atan2(torch.tensor(1.0, device=denom.device), denom).mul_(4 / math.pi)
     else:
         eps = group.get('eps', 1e-8)
         wd_scaler = 1.0 / (denom + eps)
