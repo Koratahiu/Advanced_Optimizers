@@ -7,7 +7,7 @@ from ..util import param_update
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state, _nnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
-from ..util.update_util import _grams_update, _cautious_update, _scale_sim_AdEMAMix_update, _get_fisher_wd_scaler
+from ..util.update_util import _grams_update, _cautious_update, _scale_sim_AdEMAMix_update, _init_fisher_wd_scaler, _get_fisher_wd_scaler
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 from ..util.centered_decay import _init_anchor
 
@@ -122,7 +122,7 @@ class Adopt_adv(torch.optim.Optimizer):
         eps: float = 1e-6,
         # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
-        fisher_wd: bool = True,
+        fisher_wd: bool = False,
         cautious_wd: bool = False,
         # ADOPT clipping
         clip_lambda: Optional[Callable[[int], float]] = lambda step: step**0.25,
@@ -317,6 +317,8 @@ class Adopt_adv(torch.optim.Optimizer):
 
             _init_anchor(p, state, group)
 
+            _init_fisher_wd_scaler(group, state, p)
+
         current_step = state['step']
 
         # The first step is for initialization only (skip when use_atan2 as it's scale invariant).
@@ -371,7 +373,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
             # ADOPT Step A: Decorrelate g_t using v_{t-1}
             denom = vt.sqrt()
-            wd_scaler = _get_fisher_wd_scaler(group, p, denom, self.use_atan2)
+            wd_scaler = _get_fisher_wd_scaler(group, state["wd_scaler"], p, denom, self.use_atan2)
 
             # Update second moment v_t for the *next* step using raw g_t
             if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
@@ -450,7 +452,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
             # ADOPT Step A: Decorrelate g_t using v_{t-1}
             denom = vt.sqrt()
-            wd_scaler = _get_fisher_wd_scaler(group, p, denom, self.use_atan2)
+            wd_scaler = _get_fisher_wd_scaler(group, state["wd_scaler"], p, denom, self.use_atan2)
 
             if self.use_atan2:
                 normalized_grad = torch.atan2(grad, denom, out=denom)

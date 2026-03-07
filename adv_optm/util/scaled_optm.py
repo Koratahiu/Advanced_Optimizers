@@ -52,23 +52,20 @@ def adjust_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
     """
     # DoRA Scale (Magnitude Vector)
     if getattr(p, '_is_dora_scale', False):
-        return 0.0, cwd
+        return wd, cwd
 
     if getattr(p, '_is_oft', False):
         return wd, 0.0
 
     if p.ndim >= 2:
-        fan_in = p.numel() // p.shape[0]
-        # Reverts the behavior for better DoRA tuning.
         is_lora = getattr(p, '_is_lora_A', False) or getattr(p, '_is_lora_B', False)
         if is_lora:
             return wd, 0.0
 
-        return wd / fan_in, cwd / fan_in
-
-    # 1D Biases or generic 1D parameters
-    # Centered WD safely regularizes the delta without collapsing base feature variance.
-    return 0.0, cwd
+    else:
+        # 1D Biases or generic 1D parameters
+        # Centered WD safely regularizes the delta without collapsing base feature variance.
+        return 0.0, cwd
 
 
 def scale_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:

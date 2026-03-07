@@ -6,7 +6,7 @@ from typing import Optional, Callable
 
 from ..util import param_update
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
-from ..util.update_util import _grams_update, _cautious_update, _get_fisher_wd_scaler
+from ..util.update_util import _grams_update, _cautious_update, _init_fisher_wd_scaler, _get_fisher_wd_scaler
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
@@ -278,6 +278,8 @@ class AdamW_adv(torch.optim.Optimizer):
 
             _init_anchor(p, state, group)
 
+            _init_fisher_wd_scaler(group, state, p)
+
         beta1, beta2 = group['betas']
 
         current_step = state['step']
@@ -395,7 +397,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 denom.div_(sqrt_bias_correction2).add_(group['eps'])
                 update.div_(denom)
 
-            wd_scaler = _get_fisher_wd_scaler(group, p, denom, group['use_atan2'])
+            wd_scaler = _get_fisher_wd_scaler(group, state["wd_scaler"], p, denom, group['use_atan2'])
 
             del vt
 
@@ -439,7 +441,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 denom.div_(sqrt_bias_correction2).add_(group['eps'])
                 update.div_(denom)
 
-            wd_scaler = _get_fisher_wd_scaler(group, p, denom, group['use_atan2'])
+            wd_scaler = _get_fisher_wd_scaler(group, state["wd_scaler"], p, denom, group['use_atan2'])
 
             del denom
 
