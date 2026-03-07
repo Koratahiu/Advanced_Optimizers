@@ -29,11 +29,17 @@ def _apply_weight_decay(
         # Cautious Weight Decay: only decay if the update pushes in the same direction as the decay
         if cautious:
             mask = (update_calc * p_calc >= 0).to(p_calc.dtype)
-            p_calc.addcmul_(p_calc, mask, value=-scaled_wd)
+            if isinstance(scaled_wd, Tensor):
+                p_calc.sub_(p_calc * mask * scaled_wd)
+            else:
+                p_calc.addcmul_(p_calc, mask, value=-scaled_wd)
             del mask
         else:
             # Standard decoupled weight decay
-            p_calc.add_(p_calc, alpha=-scaled_wd)
+            if isinstance(scaled_wd, Tensor):
+                p_calc.sub_(p_calc * scaled_wd)
+            else:
+                p_calc.add_(p_calc, alpha=-scaled_wd)
 
     # Centered Weight Decay (pulls toward anchor)
     if scaled_cwd is not None and 'anchor_type' in state:
@@ -43,11 +49,17 @@ def _apply_weight_decay(
         if cautious:
             # Cautious Weight Decay: only decay if the update pushes in the same direction as the decay
             mask = (update_calc * decay_target >= 0).to(p_calc.dtype)
-            p_calc.addcmul_(decay_target, mask, value=-scaled_cwd)
+            if isinstance(scaled_cwd, Tensor):
+                p_calc.sub_(decay_target * mask * scaled_cwd)
+            else:
+                p_calc.addcmul_(decay_target, mask, value=-scaled_cwd)
             del mask
         else:
             # Standard decoupled weight decay
-            p_calc.add_(decay_target, alpha=-scaled_cwd)
+            if isinstance(scaled_cwd, Tensor):
+                p_calc.sub_(decay_target * scaled_cwd)
+            else:
+                p_calc.add_(decay_target, alpha=-scaled_cwd)
 
         del anchor, decay_target
 
