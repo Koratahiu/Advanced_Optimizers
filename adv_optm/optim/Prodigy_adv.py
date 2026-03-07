@@ -9,7 +9,7 @@ from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
-from ..util.update_util import _grams_update, _cautious_update, _scale_sim_AdEMAMix_update
+from ..util.update_util import _grams_update, _cautious_update, _scale_sim_AdEMAMix_update, _init_fisher_wd_scaler, _get_fisher_wd_scaler
 from ..util.centered_decay import _init_anchor
 
 A = 4 / math.pi
@@ -29,6 +29,9 @@ class Prodigy_adv(torch.optim.Optimizer):
         eps (float): term added to the denominator to improve
             numerical stability (default: 1e-8)
         weight_decay (float): weight decay (L2 penalty) (default: 0)
+        fisher_wd (bool): whether to use Fisher Adam (FAdam) weight decay, mapping
+            the decay direction through the empirical Fisher information matrix and 
+            clipping its RMS. (default: False)
         cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
             applied only to parameter coordinates where the sign of the parameter
             and the sign of the optimizer update align (default: False).
@@ -133,6 +136,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         eps: float = 1e-8,
         # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
+        fisher_wd: bool = False,
         cautious_wd: bool = False,
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
@@ -206,7 +210,8 @@ class Prodigy_adv(torch.optim.Optimizer):
             raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
 
         defaults = {
-            "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
+            "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
+            "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
             "use_atan2": use_atan2,
             "orthogonal_gradient": orthogonal_gradient,
             "beta3_ema": beta3_ema, "alpha": alpha, "compiled_optimizer": compiled_optimizer,
@@ -354,6 +359,8 @@ class Prodigy_adv(torch.optim.Optimizer):
 
             _init_anchor(p, state, group)
 
+            _init_fisher_wd_scaler(group, state, p)
+
         if not hasattr(self, 'd_denom'):
             self.d_denom = torch.tensor(0.0, device=p.device)
             self.d_numerator = torch.tensor(group.get('d_numerator', 0.0), device=p.device)
@@ -478,6 +485,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             else:
                 denom = vt.sqrt_()
                 update.div_(denom.add_(d * group['eps']))
+            wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, group['use_atan2'])
             del vt
 
             update_scaling = dlr * A if group['use_atan2'] else dlr
@@ -528,6 +536,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             else:
                 denom = exp_avg_sq.sqrt()
                 update.div_(denom.add_(d * group['eps']))
+            wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, group['use_atan2'])
             del denom
 
             update_scaling = dlr * A if group['use_atan2'] else dlr
@@ -557,7 +566,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             if 'p0' in state:
                 del state['p0']
 
-        param_update.apply_parameter_update(self, p, group, update, dlr, random_int_tensor=random_int_tensor)
+        param_update.apply_parameter_update(self, p, group, update, dlr, random_int_tensor=random_int_tensor, wd_scaler=wd_scaler)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
