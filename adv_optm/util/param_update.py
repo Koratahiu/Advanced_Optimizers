@@ -4,7 +4,7 @@ from torch.optim import Optimizer
 
 from typing import Dict, Any
 
-from .scaled_optm import scale_wds
+from .scaled_optm import adjust_wds, scale_wds
 from .centered_decay import dequantize_anchor
 
 _generators: Dict[torch.device, torch.Generator] = {}
@@ -83,7 +83,9 @@ def apply_parameter_update(
 
     if group.get('scaled_optm', False):
         decoupled = True
-        wd, cwd = scale_wds(wd, cwd, p)
+        wd, cwd = adjust_wds(wd, cwd, p)
+        if wd_scaler is None:
+            wd, cwd = scale_wds(wd, cwd, p)
 
     # Calculate global decay factor for decoupled vs standard
     decay_factor = (lr / self._init_lr) if decoupled else lr
