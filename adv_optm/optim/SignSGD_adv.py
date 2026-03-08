@@ -327,7 +327,7 @@ class SignSGD_adv(torch.optim.Optimizer):
         else:
             update.mul_(lr)
 
-        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor, wd_scaler=l1_mean)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
