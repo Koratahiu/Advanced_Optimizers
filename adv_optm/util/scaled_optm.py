@@ -46,35 +46,36 @@ def scale_update(
     return update.mul_(lr)
 
 
-def scale_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
+def adjust_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
     """
-    Adjusts standard weight decay and centered weight decay based on the parameter's
-    shape and type to maintain effective regularization strength.
+    Adjusts standard weight decay and centered weight decay.
     """
     # DoRA Scale (Magnitude Vector)
     if getattr(p, '_is_dora_scale', False):
         return wd, cwd
 
-    conflict = cwd != 0
-
     if getattr(p, '_is_oft', False):
-        # Fallback to standard WD (using cwd value) if both are active.
-        return (cwd if conflict else wd), 0.0
+        return wd, 0.0
 
     if p.ndim >= 2:
-        fan_in = p.numel() // p.shape[0]
-
-        # When both WDs are active on LoRA, fallback to standard WD (using cwd value)
-        # Reverts the behavior for better DoRA tuning.
         is_lora = getattr(p, '_is_lora_A', False) or getattr(p, '_is_lora_B', False)
-        if conflict and is_lora:
-            return cwd / fan_in, 0.0
+        if is_lora:
+            return wd, 0.0
 
+    else:
+        # 1D Biases or generic 1D parameters
+        # Centered WD safely regularizes the delta without collapsing base feature variance.
+        return 0.0, cwd
+
+
+def scale_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
+    """
+    Scales standard weight decay and centered weight decay based on the parameter's
+    shape and type to maintain effective regularization strength.
+    """
+    if p.ndim >= 2:
+        fan_in = p.numel() // p.shape[0]
         return wd / fan_in, cwd / fan_in
-
-    # 1D Biases or generic 1D parameters
-    # Centered WD safely regularizes the delta without collapsing base feature variance.
-    return 0.0, cwd
 
 
 @torch.no_grad()

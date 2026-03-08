@@ -4,7 +4,7 @@ from torch.optim import Optimizer
 
 from typing import Dict, Any
 
-from .scaled_optm import scale_wds
+from .scaled_optm import adjust_wds, scale_wds
 from .centered_decay import dequantize_anchor
 
 _generators: Dict[torch.device, torch.Generator] = {}
@@ -29,11 +29,17 @@ def _apply_weight_decay(
         # Cautious Weight Decay: only decay if the update pushes in the same direction as the decay
         if cautious:
             mask = (update_calc * p_calc >= 0).to(p_calc.dtype)
-            p_calc.addcmul_(p_calc, mask, value=-scaled_wd)
+            if isinstance(scaled_wd, Tensor):
+                p_calc.sub_(p_calc * mask * scaled_wd)
+            else:
+                p_calc.addcmul_(p_calc, mask, value=-scaled_wd)
             del mask
         else:
             # Standard decoupled weight decay
-            p_calc.add_(p_calc, alpha=-scaled_wd)
+            if isinstance(scaled_wd, Tensor):
+                p_calc.sub_(p_calc * scaled_wd)
+            else:
+                p_calc.add_(p_calc, alpha=-scaled_wd)
 
     # Centered Weight Decay (pulls toward anchor)
     if scaled_cwd is not None and 'anchor_type' in state:
@@ -43,11 +49,17 @@ def _apply_weight_decay(
         if cautious:
             # Cautious Weight Decay: only decay if the update pushes in the same direction as the decay
             mask = (update_calc * decay_target >= 0).to(p_calc.dtype)
-            p_calc.addcmul_(decay_target, mask, value=-scaled_cwd)
+            if isinstance(scaled_cwd, Tensor):
+                p_calc.sub_(decay_target * mask * scaled_cwd)
+            else:
+                p_calc.addcmul_(decay_target, mask, value=-scaled_cwd)
             del mask
         else:
             # Standard decoupled weight decay
-            p_calc.add_(decay_target, alpha=-scaled_cwd)
+            if isinstance(scaled_cwd, Tensor):
+                p_calc.sub_(decay_target * scaled_cwd)
+            else:
+                p_calc.add_(decay_target, alpha=-scaled_cwd)
 
         del anchor, decay_target
 
@@ -61,6 +73,7 @@ def apply_parameter_update(
     wd: float | None = None,
     random_int_tensor: Tensor | None = None,
     decoupled: bool = False,
+    wd_scaler: float | Tensor | None = None,
 ) -> None:
     """
     Applies decoupled weight decay (standard, cautious, centered) and the final
@@ -75,19 +88,28 @@ def apply_parameter_update(
         random_int_tensor: Optional pre-generated random tensor for stochastic
             rounding. Required for the `torch.compile` path.
         decoupled: Whenever to use the true decoupled weight decay.
+        wd_scaler: A multiplier/tensor to scale the calculated wd/cwd magnitude (e.g. for Fisher Adam WD).
     """
     wd = group["weight_decay"] if wd is None else wd
     cwd = group.get("centered_wd", 0.0)
 
     if group.get('scaled_optm', False):
         decoupled = True
-        wd, cwd = scale_wds(wd, cwd, p)
+        wd, cwd = adjust_wds(wd, cwd, p)
+        if wd_scaler is None:
+            wd, cwd = scale_wds(wd, cwd, p)
 
     # Calculate global decay factor for decoupled vs standard
     decay_factor = (lr / self._init_lr) if decoupled else lr
 
     scaled_wd = (wd * decay_factor) if wd != 0 else None
     scaled_cwd = (cwd * decay_factor) if cwd != 0 else None
+
+    if wd_scaler is not None:
+        if scaled_wd is not None:
+            scaled_wd = scaled_wd * wd_scaler
+        if scaled_cwd is not None:
+            scaled_cwd = scaled_cwd * wd_scaler
 
     state = self.state[p]
 

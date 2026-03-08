@@ -6,7 +6,7 @@ from typing import Optional, Callable
 
 from ..util import param_update
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
-from ..util.update_util import _grams_update, _cautious_update
+from ..util.update_util import _grams_update, _cautious_update, _init_fisher_wd_scaler, _get_fisher_wd_scaler
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
@@ -29,6 +29,9 @@ class AdamW_adv(torch.optim.Optimizer):
         eps (float): term added to the denominator to improve
             numerical stability (default: 1e-8)
         weight_decay (float): weight decay (L2 penalty) (default: 0).
+        fisher_wd (bool): whether to use Fisher Adam (FAdam) weight decay, mapping
+            the decay direction through the empirical Fisher information matrix and 
+            clipping its RMS. (default: False)
         cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
             applied only to parameter coordinates where the sign of the parameter
             and the sign of the optimizer update align (default: False).
@@ -103,6 +106,7 @@ class AdamW_adv(torch.optim.Optimizer):
         eps: float = 1e-8,
         # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
+        fisher_wd: bool = False,
         cautious_wd: bool = False,
         # Adam's Bias Correction
         use_bias_correction: bool = True,
@@ -155,7 +159,8 @@ class AdamW_adv(torch.optim.Optimizer):
             cautious_mask = False
 
         defaults = {
-            "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
+            "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
+            "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
             "use_atan2": use_atan2,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
             "beta3_ema": beta3_ema, "alpha": alpha, "compiled_optimizer": compiled_optimizer,
@@ -273,6 +278,8 @@ class AdamW_adv(torch.optim.Optimizer):
 
             _init_anchor(p, state, group)
 
+            _init_fisher_wd_scaler(group, state, p)
+
         beta1, beta2 = group['betas']
 
         current_step = state['step']
@@ -389,6 +396,9 @@ class AdamW_adv(torch.optim.Optimizer):
                 denom = vt.sqrt_()
                 denom.div_(sqrt_bias_correction2).add_(group['eps'])
                 update.div_(denom)
+
+            wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, group['use_atan2'])
+
             del vt
 
             update = update.view(p.shape)
@@ -430,6 +440,9 @@ class AdamW_adv(torch.optim.Optimizer):
                 denom = exp_avg_sq.sqrt()
                 denom.div_(sqrt_bias_correction2).add_(group['eps'])
                 update.div_(denom)
+
+            wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, group['use_atan2'])
+
             del denom
 
         update_scaling = step_size * A if group['use_atan2'] else step_size
@@ -438,7 +451,7 @@ class AdamW_adv(torch.optim.Optimizer):
         else:
             update.mul_(update_scaling)
 
-        param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor)
+        param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor, wd_scaler=wd_scaler)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
