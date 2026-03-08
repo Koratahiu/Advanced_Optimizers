@@ -77,6 +77,9 @@ def scale_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
         fan_in = p.numel() // p.shape[0]
         return wd / fan_in, cwd / fan_in
 
+    # 1D tensors (like DoRA scale and Biases)
+    return wd, cwd
+
 
 @torch.no_grad()
 def l2_normalization(update: torch.Tensor, dim: int | None, lr: float) -> torch.Tensor:
