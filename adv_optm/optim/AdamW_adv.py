@@ -294,7 +294,7 @@ class AdamW_adv(torch.optim.Optimizer):
         random_int_tensor = None
 
         if group.get('compiled_optimizer', False):
-            step_size = torch.as_tensor(step_size, dtype=torch.float64)
+            step_size = torch.as_tensor(step_size)
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)

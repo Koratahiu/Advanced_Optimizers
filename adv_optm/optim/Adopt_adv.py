@@ -322,7 +322,7 @@ class Adopt_adv(torch.optim.Optimizer):
         random_int_tensor = None
 
         if group.get('compiled_optimizer', False):
-            lr = torch.as_tensor(group['lr'], dtype=torch.float64)
+            lr = torch.as_tensor(group['lr'])
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)

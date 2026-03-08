@@ -284,3 +284,24 @@ def post_process_loaded_state(optimizer: Optimizer) -> None:
                 # Ensure device match
                 if state[key].device != p.device:
                     state[key] = state[key].to(p.device)
+
+
+def _get_random_noise_for_sso(source: torch.Tensor) -> torch.Tensor:
+    """
+    Generates a random noise tensor for Stochastic Sign operator.
+    This function is not torch.compile-path friendly due to its use of torch.Generator.
+    """
+    global _generators
+    device = source.device
+    if device not in _generators:
+        set_seed(device)
+    # TODO, this is a workaround until torch compile error
+    # NotImplementedError: UserDefinedObjectVariable(generator) is fixed
+    generator = _generators[device]
+    # create a random noise tensor
+    return torch.randint(
+        size=source.shape,
+        device=source.device,
+        dtype=source.dtype,
+        generator=generator,
+    )

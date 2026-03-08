@@ -393,7 +393,7 @@ class Muon_adv(torch.optim.Optimizer):
             step_size = group['lr'] / bias_correction1
 
             if is_compiled:
-                step_size = torch.as_tensor(step_size, dtype=torch.float64)
+                step_size = torch.as_tensor(step_size)
                 adam_step_param = self._compiled_adam_step_parameter
             else:
                 adam_step_param = Muon_AuxAdam._adam_step_parameter
@@ -404,7 +404,7 @@ class Muon_adv(torch.optim.Optimizer):
 
         else: # Muon path
             if is_compiled:
-                lr = torch.as_tensor(group['lr'], dtype=torch.float64)
+                lr = torch.as_tensor(group['lr'])
                 muon_step_param = self._compiled_muon_step_parameter
             else:
                 lr = group['lr']
