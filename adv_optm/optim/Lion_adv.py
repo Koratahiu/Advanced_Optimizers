@@ -9,6 +9,7 @@ from ..util.lion_k import _get_lion_k_update
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 from ..util.centered_decay import _init_anchor
 from ..util.update_util import _get_l1_adaptive_lr
+from ..util.signed_util import apply_stochastic_sign
 
 
 class Lion_adv(torch.optim.Optimizer):
@@ -45,6 +46,7 @@ class Lion_adv(torch.optim.Optimizer):
             parameter dimensionality. Sets p=2.0 for 4D tensors (Conv2D) (Biases/Norms) to
             use Spherical updates, and p=1.0 for others (Linear/Embeddings) to use Sign
             updates. Overrides explicit kappa_p value. (default: False).
+        stochastic_sign (bool): whether to use the Stochastic Sign operator. (default: False)
         freeze_on_flip (bool): Projected SignGD One-hit freeze. Masks updates for
             coordinates where the gradient sign flips compared to the previous step. (default: False)
         l1_adaptive (bool): Scales learning rate dynamically
@@ -80,6 +82,8 @@ class Lion_adv(torch.optim.Optimizer):
         # Lion-k
         kappa_p: float = 1.0,
         auto_kappa_p: bool = False,
+        # Stochastic Sign Operator
+        stochastic_sign: bool = False,
         # Projected and adaptive sign
         freeze_on_flip: bool = False,
         l1_adaptive: bool = False,
@@ -111,6 +115,7 @@ class Lion_adv(torch.optim.Optimizer):
             clip_threshold=clip_threshold,
             kappa_p=kappa_p,
             auto_kappa_p=auto_kappa_p,
+            stochastic_sign=stochastic_sign,
             freeze_on_flip=freeze_on_flip,
             l1_adaptive=l1_adaptive,
             scaled_optm= scaled_optm,
@@ -202,19 +207,22 @@ class Lion_adv(torch.optim.Optimizer):
         lr = group["lr"]
 
         random_int_tensor = None
+        random_noise_tensor = None
 
         if group.get('compiled_optimizer', False):
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
+            if group.get('stochastic_sign', False):
+                random_noise_tensor = param_update._get_random_noise_for_sso(p)
             lr = torch.as_tensor(lr)
             step_param_fn = self._compiled_step_parameter
         else:
             step_param_fn = self._step_parameter
 
-        step_param_fn(p, grad, state, group, lr, random_int_tensor)
+        step_param_fn(p, grad, state, group, lr, random_int_tensor, random_noise_tensor)
 
-    def _step_parameter(self, p, grad, state, group, lr, random_int_tensor):
+    def _step_parameter(self, p, grad, state, group, lr, random_int_tensor, random_noise_tensor):
         if grad.dtype != torch.float32 and state['factored']:
             grad = grad.float()
         if group["clip_threshold"] > 0.0:
@@ -252,8 +260,6 @@ class Lion_adv(torch.optim.Optimizer):
             # Compute update term c_t
             update = torch.lerp(grad_reshaped, exp_avg, beta1)
 
-            l1_mean = _get_l1_adaptive_lr(p, update, state, group, kappa_p, rescale=False)
-
             # Standard Lion momentum update
             # m_t = beta2 * m_{t-1} + (1-beta2) * g_t
             exp_avg.lerp_(grad_reshaped, 1 - beta2)
@@ -262,7 +268,12 @@ class Lion_adv(torch.optim.Optimizer):
             state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True)
             del exp_avg
 
-            update = _get_lion_k_update(update, kappa_p)
+            if freeze_on_flip:
+                # Fast binary diff (XOR) from momentum sign directly
+                flipped_packed = prev_sign_packed ^ state['sign']
+                flipped_mask = _unpack_bools(flipped_packed, original_m=d2).view_as(update)
+                update = torch.where(flipped_mask, 0.0, update)
+                del prev_sign_packed, flipped_packed, flipped_mask
 
             if self.cautious_mask:
                 mask = (update * grad_reshaped > 0).to(grad_reshaped.dtype)
@@ -272,12 +283,12 @@ class Lion_adv(torch.optim.Optimizer):
 
             update = update.view(p.shape)
 
-            if freeze_on_flip:
-                # Fast binary diff (XOR) from momentum sign directly
-                flipped_packed = prev_sign_packed ^ state['sign']
-                flipped_mask = _unpack_bools(flipped_packed, original_m=d2).view_as(update)
-                update = torch.where(flipped_mask, 0.0, update)
-                del prev_sign_packed, flipped_packed, flipped_mask
+            l1_mean = _get_l1_adaptive_lr(p, update, state, group, kappa_p, rescale=False)
+
+            if group.get('stochastic_sign', False):
+                update = apply_stochastic_sign(update, noise=random_noise_tensor)
+            else:
+                update = _get_lion_k_update(update, kappa_p)
 
         else:
             # Fallback to standard Lion logic
@@ -286,16 +297,6 @@ class Lion_adv(torch.optim.Optimizer):
             # Compute update term
             update = torch.lerp(grad, exp_avg, beta1)
 
-            l1_mean = _get_l1_adaptive_lr(p, update, state, group, kappa_p)
-
-            update = _get_lion_k_update(update, kappa_p, rescale=False)
-
-            if self.cautious_mask:
-                mask = (update * grad > 0).to(grad.dtype)
-                mask.div_(mask.mean().clamp_min_(1e-3))
-                update.mul_(mask)
-                del mask
-
             # Standard Lion momentum update
             exp_avg.lerp_(grad, 1 - beta2)
 
@@ -303,6 +304,19 @@ class Lion_adv(torch.optim.Optimizer):
                 current_sign = (update > 0).to(torch.uint8)
                 update = torch.where(current_sign == state['prev_sign'], update, 0.0)
                 state['prev_sign'] = current_sign
+
+            if self.cautious_mask:
+                mask = (update * grad > 0).to(grad.dtype)
+                mask.div_(mask.mean().clamp_min_(1e-3))
+                update.mul_(mask)
+                del mask
+
+            l1_mean = _get_l1_adaptive_lr(p, update, state, group, kappa_p, rescale=False)
+
+            if group.get('stochastic_sign', False):
+                update = apply_stochastic_sign(update, noise=random_noise_tensor)
+            else:
+                update = _get_lion_k_update(update, kappa_p)
 
         if l1_mean is not None:
             update.mul_(l1_mean)
