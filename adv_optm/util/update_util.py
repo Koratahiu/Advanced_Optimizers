@@ -75,7 +75,7 @@ def _get_l1_adaptive_lr(
     """
     Calculates the L1 adaptive learning rate based on gradient heterogeneity.
     """
-    if not group.get("l1_adaptive", False) and kappa_p != 1:
+    if not group.get("l1_adaptive", False) or kappa_p != 1:
         return None
 
     update_view = update.view(p.shape)
