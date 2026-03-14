@@ -1,5 +1,7 @@
 import torch
 
+import math
+
 @torch.no_grad()
 def _newton_schulz_iteration(
     G: torch.Tensor,
@@ -359,11 +361,11 @@ def rms_adjustment(update: torch.Tensor, rms_rescaling: bool, lr):
         # This is slower due to norm calculations but it worked the best for t2i models.
         rms_target = 0.2 # default (Adam) value for RMS
         update_norm = torch.linalg.vector_norm(update)
-        return update.mul_(lr * rms_target * (update.numel()**0.5) / update_norm.clamp_min_(1e-8))
+        return update.mul_(lr * rms_target * (math.sqrt(update.numel())) / update_norm.clamp_min_(1e-8))
     else:
         # Original Muon scaling
         r, c = update.size(-2), update.size(-1)
-        scaling_factor = max(1, r / c) ** 0.5
+        scaling_factor = math.sqrt(max(1, r / c))
         return update.mul_(lr * scaling_factor)
 
 def _auto_projection_for_adamuon(raw_update: torch.Tensor, kappa_p: float) -> torch.Tensor:
@@ -474,15 +476,15 @@ def get_spectral_scaling(shape: torch.Size, n_layers: int):
     # A) Newton-Schulz Damping
     # This ensures the matrix orthogonalization is stable across scales.
     # Formula: (1/L) * sqrt(d_in / d_out)
-    ns_eps = (1.0 / L) * (d_in / d_out) ** 0.5
+    ns_eps = (1.0 / L) * math.sqrt(d_in / d_out)
 
     # B) Adaptive Denominator Epsilon
     # This ensures the Adam-style division doesn't explode or vanish.
     # Formula: (1/L) * (1 / sqrt(d_in * d_out))
-    adaptive_eps = (1.0 / L) * (1.0 / (d_in * d_out)**0.5)
+    adaptive_eps = (1.0 / L) * (1.0 / math.sqrt(d_in * d_out))
 
     # Spectral Target (Section F) -> sqrt(d_out/d_in)
-    spectral_target = (d_out / d_in) ** 0.5
+    spectral_target = math.sqrt(d_out / d_in)
 
     # Weight Decay (Section 3.4) -> 1/width
     wd_scale = 1.0 / d_in
