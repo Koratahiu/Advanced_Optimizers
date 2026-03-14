@@ -183,6 +183,8 @@ class Muon_adv(torch.optim.Optimizer):
         if spectral_normalization and rms_rescaling:
             print("Warning: spectral_normalization is incompatible with rms_rescaling, Disabling rms_rescaling.")
             rms_rescaling = False
+        if spectral_normalization and accelerated_ns:
+            print("Warning: spectral_normalization is at odds with accelerated Newton-Schulz math. Use at your own risk!")
 
         defaults = {
             "lr": lr, "beta1": beta1, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
@@ -238,6 +240,8 @@ class Muon_adv(torch.optim.Optimizer):
 
             if group.get('use_muon') is None: # Fallback
                  group['use_muon'] = group.get('optim_type') == 'muon'
+
+        self.init_step()
 
         self.kourkoutas_helper = None
         if any(group.get('adam_kourkoutas_beta', False) for group in self.param_groups):

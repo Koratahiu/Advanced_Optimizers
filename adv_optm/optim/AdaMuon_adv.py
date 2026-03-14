@@ -206,6 +206,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
         if spectral_normalization and rms_rescaling:
             print("Warning: spectral_normalization is incompatible with rms_rescaling, Disabling rms_rescaling.")
             rms_rescaling = False
+        if spectral_normalization and accelerated_ns:
+            print("Warning: spectral_normalization is at odds with accelerated Newton-Schulz math. Use at your own risk!")
 
         defaults = {
             "lr": lr, "betas": betas, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
@@ -259,6 +261,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             if group.get('use_muon') is None: # Fallback
                  group['use_muon'] = group.get('optim_type') == 'muon'
+
+        self.init_step()
 
         self.kourkoutas_helper = None
         if any(group.get('adam_kourkoutas_beta', False) for group in self.param_groups):
@@ -467,7 +471,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             else:
                 shape_for_scaling = p.shape
 
-            scaled_eps, adaptive_eps, spectral_target, wd_scale = get_spectral_scaling(shape_for_scaling, group['n_layers'])
+            scaled_eps, adaptive_eps, spectral_target, wd_scale = get_spectral_scaling(p, shape_for_scaling, group['n_layers'])
 
             weight_decay = group['weight_decay'] * wd_scale
             decoupled_wd = True
