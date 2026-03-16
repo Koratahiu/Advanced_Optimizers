@@ -2,6 +2,8 @@ import torch
 
 from . import param_update
 
+import math
+
 def scale_update(
     p: torch.Tensor,
     update: torch.Tensor,
@@ -45,6 +47,16 @@ def scale_update(
 
     return update.mul_(lr)
 
+
+def scale_eps(group: dict, p) -> tuple[float, float]:
+    """
+    Scales Adam eps to be scale-invariant.
+    """
+    if group.get('scaled_optm', False):
+        adaptive_eps = (1.0 / group['n_layers']) * (1.0 / math.sqrt(p.numel()))
+    else:
+        adaptive_eps = group['eps']
+    return adaptive_eps
 
 def adjust_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
     """
