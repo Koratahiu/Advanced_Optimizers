@@ -30,7 +30,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             numerical stability (default: 1e-8)
         weight_decay (float): weight decay (L2 penalty) (default: 0)
         fisher_wd (bool): whether to use Fisher Adam (FAdam) weight decay, mapping
-            the decay direction through the empirical Fisher information matrix and 
+            the decay direction through the empirical Fisher information matrix and
             clipping its RMS. (default: False)
         cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
             applied only to parameter coordinates where the sign of the parameter
