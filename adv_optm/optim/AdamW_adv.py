@@ -9,7 +9,7 @@ from ..util.factorization_util import _get_effective_shape, _reconstruct_state, 
 from ..util.update_util import _grams_update, _cautious_update, _init_fisher_wd_scaler, _get_fisher_wd_scaler
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
-from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
+from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm, scale_eps
 from ..util.centered_decay import _init_anchor
 
 A = 4 / math.pi
@@ -153,6 +153,9 @@ class AdamW_adv(torch.optim.Optimizer):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
         if kourkoutas_beta and not (betas[1] > beta2_min):
             raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
+        if scaled_optm and use_atan2:
+            print("Warning: use_atan2 is incompatible with scaled_optm, Disabling atan2.")
+            use_atan2 = False
 
         if cautious_mask and grams_moment:
             print("Warning: cautious is incompatible with grams, Disabling cautious.")
@@ -330,6 +333,8 @@ class AdamW_adv(torch.optim.Optimizer):
         # Determine if we are using dense first-moments alongside a factored second-order second-moment
         factored_2nd = group.get('factored_2nd', False)
 
+        adaptive_eps = scale_eps(group, p)
+
         if state['factored']:
             d1, d2 = state['effective_shape']
             grad_reshaped = grad.view(d1, d2)
@@ -394,7 +399,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 update.atan2_(denom)
             else:
                 denom = vt.sqrt_()
-                denom.div_(sqrt_bias_correction2).add_(group['eps'])
+                denom.div_(sqrt_bias_correction2).add_(adaptive_eps)
                 update.div_(denom)
 
             wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, group['use_atan2'])
@@ -438,7 +443,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 update.atan2_(denom)
             else:
                 denom = exp_avg_sq.sqrt()
-                denom.div_(sqrt_bias_correction2).add_(group['eps'])
+                denom.div_(sqrt_bias_correction2).add_(adaptive_eps)
                 update.div_(denom)
 
             wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, group['use_atan2'])

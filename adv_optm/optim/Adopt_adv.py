@@ -8,7 +8,7 @@ from ..util.factorization_util import _get_effective_shape, _reconstruct_state, 
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.update_util import _grams_update, _cautious_update, _scale_sim_AdEMAMix_update, _init_fisher_wd_scaler, _get_fisher_wd_scaler
-from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
+from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm, scale_eps
 from ..util.centered_decay import _init_anchor
 
 A = 4 / math.pi
@@ -183,6 +183,9 @@ class Adopt_adv(torch.optim.Optimizer):
             print("Warning: grams is incompatible with Simplified_AdEMAMix, Disabling grams.")
         if cautious_mask and Simplified_AdEMAMix:
             print("Warning: cautious is incompatible with Simplified_AdEMAMix, Disabling cautious.")
+        if scaled_optm and use_atan2:
+            print("Warning: use_atan2 is incompatible with scaled_optm, Disabling atan2.")
+            use_atan2 = False
 
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
@@ -364,6 +367,8 @@ class Adopt_adv(torch.optim.Optimizer):
         # Determine if we are using dense first-moments alongside a factored second-order second-moment
         factored_2nd = group.get('factored_2nd', False)
 
+        adaptive_eps = scale_eps(group, p)
+
         if state['factored']:
             d1, d2 = state['effective_shape']
             grad_reshaped = grad.view(d1, d2)
@@ -387,7 +392,7 @@ class Adopt_adv(torch.optim.Optimizer):
             if self.use_atan2:
                 normalized_grad = torch.atan2(grad_reshaped, denom, out=denom)
             else:
-                normalized_grad = torch.div(grad_reshaped, denom.add_(group['eps']), out=denom)
+                normalized_grad = torch.div(grad_reshaped, denom.add_(adaptive_eps), out=denom)
                 if self.clip_lambda is not None:
                     clip_val = self.clip_lambda(state['step'])
                     normalized_grad.clamp_(-clip_val, clip_val)
@@ -457,7 +462,7 @@ class Adopt_adv(torch.optim.Optimizer):
             if self.use_atan2:
                 normalized_grad = torch.atan2(grad, denom, out=denom)
             else:
-                normalized_grad = torch.div(grad, denom.add_(group['eps']), out=denom)
+                normalized_grad = torch.div(grad, denom.add_(adaptive_eps), out=denom)
                 if self.clip_lambda is not None:
                     clip_val = self.clip_lambda(state['step'])
                     normalized_grad.clamp_(-clip_val, clip_val)
