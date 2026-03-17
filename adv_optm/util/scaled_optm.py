@@ -28,7 +28,7 @@ def scale_update(
 
     # DoRA Magnitude Scales (1D) or 1D Bias/Norm layers
     if is_dora_scale or p.ndim == 1:
-        return rms_normalization(update, dim=None, lr=lr)
+        return l2_normalization(update, dim=None, lr=lr)
 
     # Orthogonal Fine-Tuning (OFT)
     # This guarantees O(1) update complexity scaling, independent of block sizes.
