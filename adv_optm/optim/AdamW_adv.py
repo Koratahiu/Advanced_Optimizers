@@ -347,7 +347,6 @@ class AdamW_adv(torch.optim.Optimizer):
                         #TODO use the same random int tensor?
                         param_update._copy_stochastic_core_(exp_avg, exp_avg_fp32, random_int_tensor)
                     else:
-                        assert False
                         # Uncompiled path: generate randoms inside
                         param_update.copy_stochastic_(exp_avg, exp_avg_fp32)
                 else:
@@ -381,7 +380,6 @@ class AdamW_adv(torch.optim.Optimizer):
                     # Compiled path: use the pre-computed random tensor
                     param_update._copy_stochastic_core_(exp_avg_sq, exp_avg_sq_fp32, random_int_tensor)
                 else:
-                    assert False
                     # Uncompiled path: generate randoms inside
                     param_update.copy_stochastic_(exp_avg_sq, exp_avg_sq_fp32)
             else:
