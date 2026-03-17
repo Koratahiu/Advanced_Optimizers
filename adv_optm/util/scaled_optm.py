@@ -35,9 +35,9 @@ def scale_update(
     if is_oft:
         n = update.shape[1]
         # Calculate block size (b)
-        b = (1 + (1 + 8 * n) ** 0.5) / 2
-        target_norm = (b / 8) ** 0.5
-        scale = target_norm / (n ** 0.5)
+        b = (1 + math.sqrt(1 + 8 * n)) / 2
+        target_norm = math.sqrt(b / 8)
+        scale = target_norm / math.sqrt(n)
         return rms_normalization(update, dim=1, lr=lr * scale)
 
     # LoRA Factors or Full Finetuning weights
@@ -105,7 +105,7 @@ def rms_normalization(update: torch.Tensor, dim: int | None, lr: float) -> torch
     """Performs Root Mean Square normalization on the update tensor."""
     n = update.numel() if dim is None else update.shape[dim]
     norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).clamp_min_(1e-12)
-    scale_n = n**0.5
+    scale_n = math.sqrt(n)
     return update.mul_(lr * scale_n / norm)
 
 
@@ -135,7 +135,7 @@ def spectral_normalization(update: torch.Tensor, vector_state: torch.Tensor, lr:
     update = update.to(vector_state.dtype)
     update_flat = update.view(d_out, d_in)
     # Target scale derived from the "Modular Norm" paper
-    target_scale = (d_out / d_in) ** 0.5
+    target_scale = math.sqrt(d_out / d_in)
     # Power Iteration step to estimate the largest singular value (sigma)
     # u = Wv
     u = torch.mv(update_flat, vector_state)
