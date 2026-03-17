@@ -133,7 +133,7 @@ def _copy_stochastic_core_(target: Tensor, source: Tensor, random_int_tensor: Te
     Core logic for stochastic rounding using a pre-computed random integer tensor.
     This version is designed to be torch.compile-friendly.
     """
-    result = random_int_tensor
+    result = random_int_tensor.clone() #TODO reused for now
     # add the random number to the lower 16 bit of the mantissa
     result.add_(source.view(dtype=torch.int32))
 
@@ -159,7 +159,7 @@ def copy_stochastic_(target: Tensor, source: Tensor):
     """
     random_int_tensor = _get_random_int_for_sr(source)
     _copy_stochastic_core_(target, source, random_int_tensor)
-    del random_int_tensor
+    #del random_int_tensor FIXME
 
 
 def add_stochastic_(input: Tensor, other: Tensor, alpha: float = 1.0):
