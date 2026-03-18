@@ -48,7 +48,7 @@ def scale_update(
     return update.mul_(lr)
 
 
-def scale_eps(group: dict, p) -> tuple[float, float]:
+def scale_eps(group: dict, p) -> float:
     """
     Scales Adam eps to be scale-invariant.
     """

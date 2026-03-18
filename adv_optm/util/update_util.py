@@ -40,7 +40,7 @@ def _init_fisher_wd_scaler(group: dict, state: dict, p: torch.Tensor) -> torch.T
 
     state["wd_scaler"] = torch.tensor(1.0, device=p.device)
 
-def _get_fisher_wd_scaler(group: dict, stored_scaler: torch.Tensor, p: torch.Tensor, denom: torch.Tensor, atan2: bool) -> torch.Tensor | None:
+def _get_fisher_wd_scaler(group: dict, stored_scaler: torch.Tensor, p: torch.Tensor, denom: torch.Tensor, atan2: bool, eps: float | None = None) -> torch.Tensor | None:
     """
     Calculates the Fisher weight decay scaler.
     Maps the decay direction through the empirical Fisher information matrix
@@ -54,8 +54,8 @@ def _get_fisher_wd_scaler(group: dict, stored_scaler: torch.Tensor, p: torch.Ten
     if atan2:
         wd_scaler = torch.atan2(stored_scaler, denom).mul_(4 / math.pi)
     else:
-        eps = group.get('eps', 1e-8)
-        wd_scaler = 1.0 / (denom + eps)
+        scaled_denom = denom + eps if eps is not None else denom
+        wd_scaler = 1.0 / (scaled_denom)
 
     # Reshape scaler if necessary to match parameter shape (for factored states)
     wd_scaler = wd_scaler.view(p.shape)
