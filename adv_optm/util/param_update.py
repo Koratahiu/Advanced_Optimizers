@@ -313,64 +313,15 @@ def post_process_loaded_state(optimizer: Optimizer) -> None:
     PyTorch's load_state_dict casts all states to the parameter's dtype,
     which breaks 8-bit/4-bit quantization and factorized float32 states.
     """
-    for group in optimizer.param_groups:
-        mode = group.get('centered_wd_mode', 'full')
+    from .state_util import fix_loaded_state_dtype
 
+    for group in optimizer.param_groups:
         for p in group['params']:
             state = optimizer.state.get(p, None)
             if not state:
                 continue
 
-            # Factorized states (SMMF) must remain float32 for stability
-            is_factored = state.get('factored', False)
-            target_dtype = torch.float32 if is_factored else p.dtype
-
-            # Deterministically check if this parameter skipped quantization
-            numel = p.numel()
-            is_skipped = (
-                numel == 0 or
-                (mode in ['int8', 'int4'] and numel < 10000) or
-                p.ndim == 1 or
-                getattr(p, '_is_dora_scale', False)
-            )
-
-            for key, val in state.items():
-                if not isinstance(val, torch.Tensor):
-                    continue
-
-                # Handle Quantized Anchor States
-                if key == 'anchor_data':
-                    if is_skipped or mode == 'full':
-                        # Skips and 'full' mode should always match the parameter dtype
-                        if val.dtype != p.dtype:
-                            state[key] = val.to(p.dtype)
-                    elif mode in ['int8', 'int4']:
-                        # Quantized integers must be uint8
-                        if val.dtype != torch.uint8:
-                            state[key] = val.to(torch.uint8)
-                    elif mode == 'float8':
-                        # Float8 mode must be float8_e4m3fn
-                        if val.dtype != torch.float8_e4m3fn:
-                            state[key] = val.to(torch.float8_e4m3fn)
-
-                elif key in ['anchor_scale', 'anchor_min']:
-                    # Scales and mins should always match the parameter dtype
-                    if val.dtype != p.dtype:
-                        state[key] = val.to(p.dtype)
-
-                # Handle Quantized Factorization States (Sign tensors)
-                elif key in ['sign', 'sign_slow', 'sign_buf']:
-                    if val.dtype != torch.uint8:
-                        state[key] = val.to(torch.uint8)
-
-                # Handle standard Optimizer Floating Point states (m, v, etc.)
-                elif val.is_floating_point():
-                    if val.dtype != target_dtype:
-                        state[key] = val.to(target_dtype)
-
-                # Ensure device match
-                if state[key].device != p.device:
-                    state[key] = state[key].to(p.device)
+            fix_loaded_state_dtype(state, p, group)
 
 
 def _get_random_noise_for_sso(source: torch.Tensor) -> torch.Tensor:

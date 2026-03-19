@@ -92,3 +92,82 @@ def upcast_grad_for_precision(grad: torch.Tensor, state: dict, state_precision: 
         return grad.float()
 
     return grad
+
+def fix_loaded_state_dtype(state: dict, p: torch.Tensor, group: dict) -> None:
+    """
+    Fixes the dtypes of an optimizer state after loading a state_dict.
+    Accounts for state_precision options and works around PyTorch's auto-casting bug.
+    """
+    mode = group.get('centered_wd_mode', 'full')
+    is_factored = state.get('factored', False)
+
+    # Retrieve the active precision mode
+    actual_precision = state.get('actual_state_precision', group.get('state_precision', 'auto'))
+
+    # Determine the target dtype for general floating-point states based on state_precision
+    if actual_precision == 'fp32':
+        base_dtype = torch.float32
+    elif actual_precision == 'bf16_sr':
+        base_dtype = torch.bfloat16
+    elif actual_precision in ['fp8', 'fp8_sr'] and hasattr(torch, 'float8_e4m3fn'):
+        base_dtype = torch.float8_e4m3fn
+    else:
+        # Fallback ('auto').
+        base_dtype = torch.float32 if is_factored else p.dtype
+
+    # Deterministically check if this parameter skipped quantization
+    numel = p.numel()
+    is_skipped = (
+        numel == 0 or
+        (mode in ['int8', 'int4'] and numel < 10000) or
+        p.ndim == 1 or
+        getattr(p, '_is_dora_scale', False)
+    )
+
+    # Pre-define sets for known exact-match keys
+    uint8_keys = {'sign', 'sign_slow', 'sign_buf'}
+    fp32_keys = {'mu_m_nmf', 'mv_m_nmf', 'mu_v_nmf', 'mv_v_nmf', 'mu_m_slow_nmf', 'mv_m_slow_nmf'}
+
+    for key, val in state.items():
+        if not isinstance(val, torch.Tensor):
+            continue
+
+        # Handle Quantized Anchor States
+        if key == 'anchor_data':
+            if is_skipped or mode == 'full':
+                if val.dtype != p.dtype:
+                    state[key] = val.to(p.dtype)
+            elif mode in ['int8', 'int4']:
+                if val.dtype != torch.uint8:
+                    state[key] = val.to(torch.uint8)
+            elif mode == 'float8':
+                if val.dtype != torch.float8_e4m3fn:
+                    state[key] = val.to(torch.float8_e4m3fn)
+            continue
+
+        elif key in ['anchor_scale', 'anchor_min']:
+            if val.dtype != p.dtype:
+                state[key] = val.to(p.dtype)
+            continue
+
+        # Handle Quantized Factorization States (Sign tensors)
+        if key in uint8_keys:
+            if val.dtype != torch.uint8:
+                state[key] = val.to(torch.uint8)
+            continue
+
+        # Handle Factorized Tensors and FP8 Scales (Must be float32)
+        if key in fp32_keys or (key.endswith('_scale') and key != 'anchor_scale'):
+            if val.dtype != torch.float32:
+                state[key] = val.to(torch.float32)
+            continue
+
+        # Handle Standard Floating Point Optimizer States
+        if val.is_floating_point():
+            # Apply base_dtype which accounts for `state_precision` and upcasting logic
+            if val.dtype != base_dtype:
+                state[key] = val.to(base_dtype)
+
+        # Ensure device match
+        if state[key].device != p.device:
+            state[key] = state[key].to(p.device)
