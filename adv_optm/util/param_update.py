@@ -262,31 +262,27 @@ def _copy_fp8_stochastic_core_(
     random integer tensor.
     """
     # Scale the source to FP32
-    scaled_source = (source * scale).to(torch.float32)
+    buffer = (source * scale).to(torch.float32)
 
     # Extract magnitude and sign
-    abs_x = scaled_source.abs()
-    sign_x = torch.sign(scaled_source)
+    sign_x = torch.sign(buffer)
+    buffer.abs_()
 
-    magic_offset = torch.where(abs_x < 0.015625, 0.015625, 0.0)
-    y = abs_x + magic_offset
+    # Create and apply the magic offset
+    offset = (buffer < 0.015625).to(torch.float32).mul_(0.015625)
+    buffer.add_(offset)
 
-    # Apply Constant-Shift Stochastic Rounding
-    # Because FP8 normals always keep exactly 3 mantissa bits, and our offset handles subnormals,
-    # we can use a constant 20-bit mask across the entire domain
-    y_int = y.view(torch.int32)
+    # Apply Stochastic Rounding
+    buffer_int = buffer.view(torch.int32)
+    buffer_int.add_(random_int_tensor)
+    buffer_int.bitwise_and_(-1048576)
 
-    # Add noise directly to the integer representation
-    y_noisy = y_int + random_int_tensor
+    # Remove offset and reapply sign
+    buffer = buffer_int.view(torch.float32)
+    buffer.sub_(offset)
+    buffer.mul_(sign_x)
 
-    # Truncate the bottom 20 bits. 
-    y_trunc = y_noisy.bitwise_and_(-1048576)
-
-    # Remove Magic Offset and reapply sign
-    rounded_abs = y_trunc.view(torch.float32) - magic_offset
-    result = rounded_abs * sign_x
-
-    target.copy_(result.to(torch.float8_e4m3fn))
+    target.copy_(buffer.to(torch.float8_e4m3fn))
 
 
 def copy_fp8_stochastic_(target: torch.Tensor, source: torch.Tensor, scale: torch.Tensor):
