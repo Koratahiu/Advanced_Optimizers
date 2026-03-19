@@ -1,0 +1,75 @@
+import torch
+from .param_update import copy_stochastic_, _copy_stochastic_core_, copy_fp8_stochastic_, _copy_fp8_stochastic_core_
+
+
+def init_state_tensor(state: dict, key: str, shape: tuple, state_precision: str, device: torch.device, default_dtype: torch.dtype):
+    """
+    Initializes a generic optimizer state tensor based on the requested precision.
+    """
+    # Determine storage dtype based on precision selection
+    if state_precision == 'fp32':
+        store_dtype = torch.float32
+    elif state_precision == 'bf16_sr':
+        store_dtype = torch.bfloat16
+    elif state_precision in ['fp8', 'fp8_sr']:
+        store_dtype = torch.float8_e4m3fn
+    else:  # 'auto'
+        store_dtype = default_dtype
+
+    if store_dtype == getattr(torch, 'float8_e4m3fn', None):
+        # FP8 initialization: we need to store a separate scale for dequantization
+        state[key] = torch.zeros(shape, device=device, dtype=store_dtype)
+        state[f"{key}_scale"] = torch.tensor(1.0, device=device, dtype=torch.float32)
+    else:
+        state[key] = torch.zeros(shape, device=device, dtype=store_dtype)
+
+
+def get_state(state: dict, key: str, state_precision: str) -> torch.Tensor:
+    """
+    Retrieves the state tensor.
+    """
+    tensor = state[key]
+    if state_precision in ['fp8', 'fp8_sr']:
+        scale = state[f"{key}_scale"]
+        return tensor.float() / scale
+    elif state_precision == 'bf16_sr':
+        return tensor.float()
+    else: # 'auto', 'fp32'.
+        return tensor
+
+
+def set_state(state: dict, key: str, value: torch.Tensor, state_precision: str, random_int_state_tensor: torch.Tensor | None):
+    """
+    Quantizes or packs the computed state value.
+    """
+    if state_precision == 'fp32':
+        if state[key] is not value:
+            state[key].copy_(value)
+
+    elif state_precision == 'bf16_sr':
+        # Apply stochastic rounding for BF16 states
+        if random_int_state_tensor is None:
+            copy_stochastic_(state[key], value, False)
+        else:
+            _copy_stochastic_core_(state[key], value, random_int_state_tensor, False)
+
+    elif state_precision == 'fp8_sr':
+        # Quantize to FP8 with bitwise Stochastic Rounding
+        amax = value.abs().max().clamp_min(1e-12)
+        scale = 448.0 / amax
+        state[f"{key}_scale"].copy_(scale)
+        if random_int_state_tensor is None:
+            copy_fp8_stochastic_(state[key], value, scale)
+        else:
+            _copy_fp8_stochastic_core_(state[key], value, scale, random_int_state_tensor)
+
+    elif state_precision == 'fp8':
+        # Quantize to FP8 standard Round-to-Nearest
+        amax = value.abs().max().clamp_min(1e-12)
+        scale = 448.0 / amax
+        state[f"{key}_scale"].copy_(scale)
+        state[key].copy_((value * scale).clamp(min=-448, max=448).to(torch.float8_e4m3fn))
+
+    else:  # 'auto'
+        if state[key] is not value:
+            state[key].copy_(value)

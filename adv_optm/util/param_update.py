@@ -127,11 +127,11 @@ def apply_parameter_update(
         # Single stochastic rounding at the end
         if random_int_tensor is not None:
             # Compiled path: use the pre-computed random tensor
-            _copy_stochastic_core_(p, p_fp32, random_int_tensor)
+            _copy_stochastic_core_(p, p_fp32, random_int_tensor, inplace=True)
             del random_int_tensor
         else:
             # Uncompiled path: generate randoms inside
-            copy_stochastic_(p, p_fp32)
+            copy_stochastic_(p, p_fp32, inplace=True)
         del p_fp32, update_fp32
 
     else:
@@ -192,13 +192,32 @@ def _get_random_int_for_sr(source: Tensor) -> Tensor:
         generator=generator,
     )
 
-
-def _copy_stochastic_core_(target: Tensor, source: Tensor, random_int_tensor: Tensor):
+def _get_random_float_for_fp8_sr(source: Tensor) -> Tensor:
     """
-    Core logic for stochastic rounding using a pre-computed random integer tensor.
+    Generates a random float32 tensor uniformly distributed in [0, 1) 
+    for FP8 stochastic rounding.
+    """
+    global _generators
+    device = source.device
+
+    if device not in _generators:
+        set_seed(device)
+
+    generator = _generators[device]
+
+    return torch.rand(
+        size=source.shape,
+        device=device,
+        dtype=torch.float32,
+        generator=generator,
+    )
+
+def _copy_stochastic_core_(target: Tensor, source: Tensor, random_int_tensor: Tensor, inplace: bool = False):
+    """
+    Core logic for BF16 stochastic rounding using a pre-computed random integer tensor.
     This version is designed to be torch.compile-friendly.
     """
-    result = random_int_tensor
+    result = random_int_tensor if inplace else random_int_tensor.clone()
     # add the random number to the lower 16 bit of the mantissa
     result.add_(source.view(dtype=torch.int32))
 
@@ -209,7 +228,7 @@ def _copy_stochastic_core_(target: Tensor, source: Tensor, random_int_tensor: Te
     target.copy_(result.view(dtype=torch.float32))
 
 
-def copy_stochastic_(target: Tensor, source: Tensor):
+def copy_stochastic_(target: Tensor, source: Tensor, inplace: bool = False):
     """
     Nerogar's implementation of stochastic rounding in the paper "Revisiting BFloat16 Training"
     (https://arxiv.org/abs/2010.06192). Made deterministic.
@@ -223,9 +242,43 @@ def copy_stochastic_(target: Tensor, source: Tensor):
         source: the target tensor with dtype=float32
     """
     random_int_tensor = _get_random_int_for_sr(source)
-    _copy_stochastic_core_(target, source, random_int_tensor)
+    _copy_stochastic_core_(target, source, random_int_tensor, inplace)
     del random_int_tensor
 
+def _copy_fp8_stochastic_core_(
+    target: Tensor,
+    source: Tensor,
+    scale: Tensor,
+    random_float_tensor: Tensor,
+) -> None:
+    """
+    Core logic for FP8 stochastic rounding using a pre-computed random float tensor.
+    """
+    scaled_source = source * scale
+
+    # ULP exponent via int32 bit extraction
+    abs_clamped = scaled_source.abs().clamp_(min=0.015625)
+    ulp_exp = ((abs_clamped.view(torch.int32) >> 23) & 0xFF).sub_(130)
+    del abs_clamped
+
+    # Scale into ULP space, add U[0,1) noise, floor
+    scaled_to_ulp = torch.ldexp(scaled_source, -ulp_exp)
+    del scaled_source
+    scaled_to_ulp.add_(random_float_tensor).floor_()
+
+    # Scale back, clamp to e4m3fn range [-448, 448], cast
+    target.copy_(
+        torch.ldexp(scaled_to_ulp, ulp_exp).clamp_(-448.0, 448.0).to(torch.float8_e4m3fn)
+    )
+    del scaled_to_ulp, ulp_exp
+
+
+def copy_fp8_stochastic_(target: Tensor, source: Tensor, scale: Tensor):
+    """
+    Stochastic rounding implementation for FP8 e4m3fn states. Made deterministic.
+    """
+    random_float_tensor = _get_random_float_for_fp8_sr(source)
+    _copy_fp8_stochastic_core_(target, source, scale, random_float_tensor)
 
 def add_stochastic_(input: Tensor, other: Tensor, alpha: float = 1.0):
     """
