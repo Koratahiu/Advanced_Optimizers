@@ -192,26 +192,6 @@ def _get_random_int_for_sr(source: Tensor) -> Tensor:
         generator=generator,
     )
 
-def _get_random_float_for_fp8_sr(source: Tensor) -> Tensor:
-    """
-    Generates a random float32 tensor uniformly distributed in [0, 1) 
-    for FP8 stochastic rounding.
-    """
-    global _generators
-    device = source.device
-
-    if device not in _generators:
-        set_seed(device)
-
-    generator = _generators[device]
-
-    return torch.rand(
-        size=source.shape,
-        device=device,
-        dtype=torch.float32,
-        generator=generator,
-    )
-
 def _copy_stochastic_core_(target: Tensor, source: Tensor, random_int_tensor: Tensor, inplace: bool = False):
     """
     Core logic for BF16 stochastic rounding using a pre-computed random integer tensor.
@@ -245,40 +225,77 @@ def copy_stochastic_(target: Tensor, source: Tensor, inplace: bool = False):
     _copy_stochastic_core_(target, source, random_int_tensor, inplace)
     del random_int_tensor
 
-def _copy_fp8_stochastic_core_(
-    target: Tensor,
-    source: Tensor,
-    scale: Tensor,
-    random_float_tensor: Tensor,
-) -> None:
+def _get_random_int_for_fp8_sr(source: torch.Tensor) -> torch.Tensor:
     """
-    Core logic for FP8 stochastic rounding using a pre-computed random float tensor.
+    Generates a random int32 tensor for FP8 stochastic rounding.
+    This function is not torch.compile-path friendly due to its use of torch.Generator.
     """
-    scaled_source = source * scale
+    device = source.device
 
-    # ULP exponent via int32 bit extraction
-    abs_clamped = scaled_source.abs().clamp_(min=0.015625)
-    ulp_exp = ((abs_clamped.view(torch.int32) >> 23) & 0xFF).sub_(130)
-    del abs_clamped
+    if device not in _generators:
+        set_seed(device)
 
-    # Scale into ULP space, add U[0,1) noise, floor
-    scaled_to_ulp = torch.ldexp(scaled_source, -ulp_exp)
-    del scaled_source
-    scaled_to_ulp.add_(random_float_tensor).floor_()
+    # TODO: this is a workaround until torch compile error
+    # NotImplementedError: UserDefinedObjectVariable(generator) is fixed
+    generator = _generators[device]
 
-    # Scale back, clamp to e4m3fn range [-448, 448], cast
-    target.copy_(
-        torch.ldexp(scaled_to_ulp, ulp_exp).clamp_(-448.0, 448.0).to(torch.float8_e4m3fn)
+    # FP8 e4m3fn always preserves exactly 3 mantissa bits from FP32 (23 bits).
+    # We need uniform noise in [0, 2^20 - 1]
+    return torch.randint(
+        size=source.shape,
+        device=source.device,
+        dtype=torch.int32,
+        low=0,
+        high=1048576,  # 1 << 20
+        generator=generator,
     )
-    del scaled_to_ulp, ulp_exp
 
 
-def copy_fp8_stochastic_(target: Tensor, source: Tensor, scale: Tensor):
+def _copy_fp8_stochastic_core_(
+    target: torch.Tensor, 
+    source: torch.Tensor, 
+    scale: torch.Tensor, 
+    random_int_tensor: torch.Tensor
+):
     """
-    Stochastic rounding implementation for FP8 e4m3fn states. Made deterministic.
+    Core logic for FP8 (float8_e4m3fn) stochastic rounding using a pre-computed 
+    random integer tensor.
     """
-    random_float_tensor = _get_random_float_for_fp8_sr(source)
-    _copy_fp8_stochastic_core_(target, source, scale, random_float_tensor)
+    # Scale the source to FP32
+    scaled_source = (source * scale).to(torch.float32)
+
+    # Extract magnitude and sign
+    abs_x = scaled_source.abs()
+    sign_x = torch.sign(scaled_source)
+
+    magic_offset = torch.where(abs_x < 0.015625, 0.015625, 0.0)
+    y = abs_x + magic_offset
+
+    # Apply Constant-Shift Stochastic Rounding
+    # Because FP8 normals always keep exactly 3 mantissa bits, and our offset handles subnormals,
+    # we can use a constant 20-bit mask across the entire domain
+    y_int = y.view(torch.int32)
+
+    # Add noise directly to the integer representation
+    y_noisy = y_int + random_int_tensor
+
+    # Truncate the bottom 20 bits. 
+    y_trunc = y_noisy.bitwise_and_(-1048576)
+
+    # Remove Magic Offset and reapply sign
+    rounded_abs = y_trunc.view(torch.float32) - magic_offset
+    result = rounded_abs * sign_x
+
+    target.copy_(result.to(torch.float8_e4m3fn))
+
+
+def copy_fp8_stochastic_(target: torch.Tensor, source: torch.Tensor, scale: torch.Tensor):
+    """
+    Stochastic rounding implementation for FP8 e4m3fn states.
+    """
+    random_int_tensor = _get_random_int_for_fp8_sr(source)
+    _copy_fp8_stochastic_core_(target, source, scale, random_int_tensor)
+    del random_int_tensor
 
 def add_stochastic_(input: Tensor, other: Tensor, alpha: float = 1.0):
     """
