@@ -11,6 +11,7 @@ from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm, scale_eps
 from ..util.centered_decay import _init_anchor
+from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 
 A = 4 / math.pi
 
@@ -95,7 +96,10 @@ class AdamW_adv(torch.optim.Optimizer):
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
         factored_2nd (bool): whether to keep the first moment uncompressed (dense)
-            while only factorizing the second moment. (default: True)
+            while only factorizing the second moment. (default: False)
+        state_precision (str): Precision method for Adopt states. Options: 'auto'
+            (parameter precision), 'fp32', 'factored' (SMMF low-rank FP32), 'bf16_sr' (with
+            stochastic rounding), 'fp8', 'fp8_sr'. (default: 'auto')
     """
 
     def __init__(
@@ -136,7 +140,9 @@ class AdamW_adv(torch.optim.Optimizer):
         # Centered WD
         centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
-        # SMMF factorization
+        # States precision
+        state_precision: str = "auto", # 'fp32', 'factored', 'bf16_sr', 'fp8', 'fp8_sr'.
+        # SMMF factorization (legacy)
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
         factored_2nd: bool = False,
@@ -161,6 +167,15 @@ class AdamW_adv(torch.optim.Optimizer):
             print("Warning: cautious is incompatible with grams, Disabling cautious.")
             cautious_mask = False
 
+        state_precision = state_precision.lower()
+        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp8", "fp8_sr"}
+        if state_precision not in valid_precisions:
+            raise ValueError(f"state_precision must be one of {valid_precisions}. Got {state_precision}")
+
+        # Legacy backwards compatibility support for `nnmf_factor=True`
+        if nnmf_factor:
+            state_precision = "factored"
+
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
@@ -171,6 +186,7 @@ class AdamW_adv(torch.optim.Optimizer):
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
             "scaled_optm": scaled_optm,
             "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
+            "state_precision": state_precision,
             "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape, "factored_2nd": factored_2nd
         }
         self.stochastic_rounding = stochastic_rounding
@@ -231,11 +247,15 @@ class AdamW_adv(torch.optim.Optimizer):
         if 'step' not in state:
             state['step'] = 0
 
+            req_precision = group['state_precision']
+
             state['factored'] = (
-                group['nnmf_factor'] and
+                req_precision == 'factored' and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
-                or group["factored_2nd"]
             )
+
+            actual_precision = 'auto' if req_precision == 'factored' else req_precision
+            state['actual_state_precision'] = actual_precision
 
             dtype = torch.float32 if state['factored'] else p.dtype
             device = p.device
@@ -243,6 +263,7 @@ class AdamW_adv(torch.optim.Optimizer):
             if state['factored']:
                 state['effective_shape'] = _get_effective_shape(p.numel())
                 d1, d2 = state['effective_shape']
+                dtype = torch.float32
 
                 if not group.get('factored_2nd', False):
                     # First moment (m)
@@ -269,12 +290,12 @@ class AdamW_adv(torch.optim.Optimizer):
             else:  # Fallback to standard AdamW for non-factored tensors
                 # First moment
                 if group['betas'][0] > 0:
-                    state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
+                    init_state_tensor(state, 'exp_avg', p.shape, actual_precision, p.device, dtype)
                 # AdEMAMix slow moment
                 if self.use_AdEMAMix:
-                    state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
+                    init_state_tensor(state, 'exp_avg_slow', p.shape, actual_precision, p.device, dtype)
                 # Second moment (v)
-                state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
+                init_state_tensor(state, 'exp_avg_sq', p.shape, actual_precision, p.device, dtype)
 
             if group.get('scaled_optm', False) and is_spectral(p):
                 init_spectral_norm(group, state, p)
@@ -302,23 +323,29 @@ class AdamW_adv(torch.optim.Optimizer):
         step_size = group['lr'] / bias_correction1
 
         random_int_tensor = None
+        random_int_state_tensor = None
 
         if group.get('compiled_optimizer', False):
             step_size = torch.as_tensor(step_size)
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
+                random_int_state_tensor = random_int_tensor
+            if state['actual_state_precision'] == 'bf16_sr' and random_int_state_tensor is None:
+                random_int_state_tensor = param_update._get_random_int_for_sr(p)
+            elif state['actual_state_precision'] == 'fp8_sr':
+                random_int_state_tensor = param_update._get_random_int_for_fp8_sr(p)
             step_param_fn = self._compiled_step_parameter
         else:
             step_param_fn = self._step_parameter
 
-        step_param_fn(p, grad, state, group, step_size, beta1, beta2, sqrt_bias_correction2, random_int_tensor)
+        step_param_fn(p, grad, state, group, step_size, beta1, beta2, sqrt_bias_correction2, random_int_tensor, random_int_state_tensor)
 
         state['step'] += 1
 
-    def _step_parameter(self, p, grad, state, group, step_size, beta1, beta2, sqrt_bias_correction2, random_int_tensor):
-        if grad.dtype != torch.float32 and state['factored']:
-            grad = grad.float()
+    def _step_parameter(self, p, grad, state, group, step_size, beta1, beta2, sqrt_bias_correction2, random_int_tensor, random_int_state_tensor):
+        grad = upcast_grad_for_precision(grad, state, group['state_precision'])
+
         if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)
 
@@ -409,8 +436,10 @@ class AdamW_adv(torch.optim.Optimizer):
             update = update.view(p.shape)
 
         else:  # Standard AdamW logic for non-factored tensors
+            actual_precision = state.get('actual_state_precision', 'auto')
+
             if beta1 > 0:
-                exp_avg = state['exp_avg']
+                exp_avg = get_state(state, 'exp_avg', actual_precision)
                 exp_avg.lerp_(grad, 1.0 - beta1)
 
                 if self.grams_moment:
@@ -419,6 +448,7 @@ class AdamW_adv(torch.optim.Optimizer):
                     update_mt = _cautious_update(exp_avg, grad)
                 else:
                     update_mt = exp_avg.clone()
+                set_state(state, 'exp_avg', exp_avg, actual_precision, random_int_state_tensor)
 
             if self.use_AdEMAMix:
                 exp_avg_slow = state['exp_avg_slow']
@@ -431,11 +461,13 @@ class AdamW_adv(torch.optim.Optimizer):
             else:
                 update = update_mt if beta1 > 0 else grad.clone()
 
-            exp_avg_sq = state['exp_avg_sq']
+            exp_avg_sq = get_state(state, 'exp_avg_sq', actual_precision)
             if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad * (1.0 - beta2))
             else:
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+            set_state(state, 'exp_avg_sq', exp_avg_sq, actual_precision, random_int_state_tensor)
+            del random_int_state_tensor
 
             if group['use_atan2']:
                 denom = exp_avg_sq.sqrt()

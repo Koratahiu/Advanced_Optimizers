@@ -10,7 +10,7 @@ from ..util.Kourkoutas import KourkoutasHelper
 from ..util.update_util import _grams_update, _cautious_update, _scale_sim_AdEMAMix_update, _init_fisher_wd_scaler, _get_fisher_wd_scaler
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm, scale_eps
 from ..util.centered_decay import _init_anchor
-from ..util.state_util import init_state_tensor, get_state, set_state
+from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 
 A = 4 / math.pi
 
@@ -378,8 +378,8 @@ class Adopt_adv(torch.optim.Optimizer):
         state['step'] += 1
 
     def _step_parameter(self, p, grad, state, group, lr, beta1, beta2, random_int_tensor, random_int_state_tensor):
-        if state['factored'] and grad.dtype != torch.float32:
-            grad = grad.float()
+        grad = upcast_grad_for_precision(grad, state, group['state_precision'])
+
         if self.orthogonal_gradient:
             grad = _orthogonalize_gradient(p, grad)
 

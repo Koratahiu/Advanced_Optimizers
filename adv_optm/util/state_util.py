@@ -76,3 +76,19 @@ def set_state(state: dict, key: str, value: torch.Tensor, state_precision: str, 
     else:  # 'auto'
         if state[key] is not value:
             state[key].copy_(value)
+
+def upcast_grad_for_precision(grad: torch.Tensor, state: dict, state_precision: str) -> torch.Tensor:
+    """
+    Upcasts the gradient to float32 if the optimizer state precision 
+    or factorization requires higher precision for accumulation.
+    """
+    # Factored states (SMMF) always require FP32 for reconstruction/factorization logic
+    if state.get('factored', False):
+        return grad.float()
+
+    # Low-precision storage modes benefit from FP32 accumulation to 
+    # maintain accuracy before quantizing back down in set_state.
+    if state_precision in ['bf16_sr', 'fp8', 'fp8_sr', 'factored']:
+        return grad.float()
+
+    return grad
