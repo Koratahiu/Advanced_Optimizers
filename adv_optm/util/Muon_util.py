@@ -450,7 +450,7 @@ def spectral_norm_update(update: torch.Tensor, vector_state: torch.Tensor, targe
 
     return update
 
-def get_spectral_scaling(shape: torch.Size, n_layers: int):
+def get_spectral_scaling(p, shape: torch.Size, n_layers: int):
     """
     From the paper:
     "Hyperparameter Transfer Enables Consistent Gains of Matrix-Preconditioned Optimizers Across Scales"
@@ -481,7 +481,12 @@ def get_spectral_scaling(shape: torch.Size, n_layers: int):
     # B) Adaptive Denominator Epsilon
     # This ensures the Adam-style division doesn't explode or vanish.
     # Formula: (1/L) * (1 / sqrt(d_in * d_out))
-    adaptive_eps = (1.0 / L) * (1.0 / math.sqrt(d_in * d_out))
+    if getattr(p, '_is_lora_A', False):
+        # Apply 1/depth only to B factor (zero init)
+        # To achieve O(1)
+        adaptive_eps = (1.0 / math.sqrt(d_in * d_out))
+    else:
+        adaptive_eps = (1.0 / L) * (1.0 / math.sqrt(d_in * d_out))
 
     # Spectral Target (Section F) -> sqrt(d_out/d_in)
     spectral_target = math.sqrt(d_out / d_in)

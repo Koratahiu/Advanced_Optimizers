@@ -53,7 +53,12 @@ def scale_eps(group: dict, p) -> float:
     Scales Adam eps to be scale-invariant.
     """
     if group.get('scaled_optm', False):
-        adaptive_eps = (1.0 / group['n_layers']) * (1.0 / math.sqrt(p.numel()))
+        if getattr(p, '_is_lora_A', False):
+            # Apply 1/depth only to B factor (zero init)
+            # To achieve O(1)
+            adaptive_eps = (1.0 / math.sqrt(p.numel()))
+        else:
+            adaptive_eps = (1.0 / group['n_layers']) * (1.0 / math.sqrt(p.numel()))
     else:
         adaptive_eps = group['eps']
     return adaptive_eps

@@ -436,7 +436,7 @@ class Muon_adv(torch.optim.Optimizer):
             else:
                 shape_for_scaling = p.shape
 
-            scaled_eps, _, spectral_target, wd_scale = get_spectral_scaling(shape_for_scaling, group['n_layers'])
+            scaled_eps, _, spectral_target, wd_scale = get_spectral_scaling(p, shape_for_scaling, group['n_layers'])
 
             weight_decay = group['weight_decay'] * wd_scale
             decoupled_wd = True
