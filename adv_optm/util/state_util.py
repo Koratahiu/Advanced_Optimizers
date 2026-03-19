@@ -46,29 +46,32 @@ def set_state(state: dict, key: str, value: torch.Tensor, state_precision: str, 
         if state[key] is not value:
             state[key].copy_(value)
 
+    elif state_precision in ['fp8', 'fp8_sr']:
+        # Calculate amax
+        amax = value.abs().max().clamp_min(1e-12)
+        # We find the largest power of 2 such that (amax * scale) <= 448
+        raw_scale = 448.0 / amax
+        log_scale = torch.floor(torch.log2(raw_scale))
+        scale = 2.0 ** log_scale
+
+        state[f"{key}_scale"].copy_(scale)
+
+        if state_precision == 'fp8_sr':
+            # Quantize with bitwise Stochastic Rounding
+            if random_int_state_tensor is None:
+                copy_fp8_stochastic_(state[key], value, scale)
+            else:
+                _copy_fp8_stochastic_core_(state[key], value, scale, random_int_state_tensor)
+        else:
+            # Standard Round-to-Nearest
+            state[key].copy_((value * scale).clamp(min=-448, max=448).to(torch.float8_e4m3fn))
+
     elif state_precision == 'bf16_sr':
         # Apply stochastic rounding for BF16 states
         if random_int_state_tensor is None:
             copy_stochastic_(state[key], value, False)
         else:
             _copy_stochastic_core_(state[key], value, random_int_state_tensor, False)
-
-    elif state_precision == 'fp8_sr':
-        # Quantize to FP8 with bitwise Stochastic Rounding
-        amax = value.abs().max().clamp_min(1e-12)
-        scale = 448.0 / amax
-        state[f"{key}_scale"].copy_(scale)
-        if random_int_state_tensor is None:
-            copy_fp8_stochastic_(state[key], value, scale)
-        else:
-            _copy_fp8_stochastic_core_(state[key], value, scale, random_int_state_tensor)
-
-    elif state_precision == 'fp8':
-        # Quantize to FP8 standard Round-to-Nearest
-        amax = value.abs().max().clamp_min(1e-12)
-        scale = 448.0 / amax
-        state[f"{key}_scale"].copy_(scale)
-        state[key].copy_((value * scale).clamp(min=-448, max=448).to(torch.float8_e4m3fn))
 
     else:  # 'auto'
         if state[key] is not value:
