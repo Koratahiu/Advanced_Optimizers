@@ -72,7 +72,7 @@ def _prepare_uint8_blocks(
     orig_shape = value.shape
     orig_numel = value.numel()
     pad_len = (block_size - (orig_numel % block_size)) % block_size
-    val_flat = F.pad(value.reshape(-1), (0, pad_len), mode='replicate')
+    val_flat = F.pad(value.reshape(1, -1), (0, pad_len), mode='replicate')
     return val_flat.view(-1, block_size).float(), orig_shape, orig_numel
 
 
@@ -173,9 +173,14 @@ def fix_loaded_state_dtype(state: dict, p: torch.Tensor, group: dict) -> None:
 
     # Retrieve the active precision mode
     actual_precision = state.get('actual_state_precision', group.get('state_precision', 'auto'))
+    numel = p.numel()
+    is_full = (
+        numel < 10000 or
+        p.ndim == 1
+    )
 
     # Determine the target dtype for general floating-point states based on state_precision
-    if actual_precision == 'fp32':
+    if actual_precision == 'fp32' or is_full:
         base_dtype = torch.float32
     elif actual_precision == 'bf16_sr':
         base_dtype = torch.bfloat16

@@ -82,6 +82,8 @@ def adjust_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
         if is_lora:
             return wd, 0.0
 
+        return wd, cwd
+
     else:
         # 1D Biases or generic 1D parameters
         # Centered WD safely regularizes the delta without collapsing base feature variance.
