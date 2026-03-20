@@ -103,22 +103,18 @@ def set_state(state: dict, key: str, value: torch.Tensor, state_precision: str, 
         if state[key] is not value:
             state[key].copy_(value)
 
-    elif state_precision in ['fp8', 'fp8_sr']:
+    elif state_precision == 'fp8_sr':
         amax = value.abs().max().clamp_min(1e-12)
         # Calculate amax
         scale = 448.0 / amax
 
         state[f"{key}_scale"].copy_(scale)
 
-        if state_precision == 'fp8_sr':
-            # Quantize with bitwise Stochastic Rounding
-            if random_int_state_tensor is None:
-                copy_fp8_stochastic_(state[key], value, scale)
-            else:
-                _copy_fp8_stochastic_core_(state[key], value, scale, random_int_state_tensor)
+        # Quantize with bitwise Stochastic Rounding
+        if random_int_state_tensor is None:
+            copy_fp8_stochastic_(state[key], value, scale)
         else:
-            # Standard Round-to-Nearest
-            state[key].copy_((value * scale).clamp(min=-448, max=448).to(torch.float8_e4m3fn))
+            _copy_fp8_stochastic_core_(state[key], value, scale, random_int_state_tensor)
 
     elif state_precision == 'bf16_sr':
         # Apply stochastic rounding for BF16 states
@@ -162,7 +158,7 @@ def upcast_grad_for_precision(grad: torch.Tensor, state: dict, state_precision: 
 
     # Low-precision storage modes benefit from FP32 accumulation to 
     # maintain accuracy before quantizing back down in set_state.
-    if state_precision in ['bf16_sr', 'fp8', 'fp8_sr', 'uint8_sr', 'factored']:
+    if state_precision in ['bf16_sr', 'fp8_sr', 'uint8_sr', 'factored']:
         return grad.float()
 
     return grad

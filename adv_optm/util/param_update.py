@@ -298,7 +298,7 @@ def copy_fp8_stochastic_(target: torch.Tensor, source: torch.Tensor, scale: torc
 
 def _get_random_int_for_uint8_sr(source: torch.Tensor, numel: int | None = None) -> torch.Tensor:
     """
-    Generates a flat random int32 tensor for INT8 stochastic rounding.
+    Generates a flat random int32 tensor for unit stochastic rounding.
     Values are in [0, 2^16 - 1]; they are later scaled to U[0, 1) inside
     the core function.
     This function is not torch.compile-path friendly due to its use of torch.Generator.

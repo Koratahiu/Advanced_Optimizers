@@ -115,7 +115,7 @@ class Adopt_adv(torch.optim.Optimizer):
             while only factorizing the second moment. (default: True)  Legacy fallback. (default: False)
         state_precision (str): Precision method for Adopt states. Options: 'auto'
             (parameter precision), 'fp32', 'factored' (SMMF low-rank FP32), 'bf16_sr' (with
-            stochastic rounding), 'fp8', 'fp8_sr'. (default: 'auto')
+            stochastic rounding), 'fp8_sr', 'uint8_sr'. (default: 'auto')
     """
 
     def __init__(
@@ -160,7 +160,7 @@ class Adopt_adv(torch.optim.Optimizer):
         centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
         # States precision
-        state_precision: str = "auto", # 'fp32', 'factored', 'bf16_sr', 'fp8', 'fp8_sr'.
+        state_precision: str = "auto", # 'fp32', 'factored', 'bf16_sr', 'fp8_sr', 'uint8_sr'.
         # SMMF factorization (legacy)
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
@@ -194,7 +194,7 @@ class Adopt_adv(torch.optim.Optimizer):
             use_atan2 = False
 
         state_precision = state_precision.lower()
-        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp8", "fp8_sr"}
+        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp8_sr", "uint8_sr"}
         if state_precision not in valid_precisions:
             raise ValueError(f"state_precision must be one of {valid_precisions}. Got {state_precision}")
 
@@ -363,6 +363,8 @@ class Adopt_adv(torch.optim.Optimizer):
                 random_int_state_tensor = random_int_tensor
             if state['actual_state_precision'] == 'bf16_sr' and random_int_state_tensor is None:
                 random_int_state_tensor = param_update._get_random_int_for_sr(p)
+            elif state['actual_state_precision'] == 'uint8_sr':
+                random_int_state_tensor = param_update._get_random_int_for_uint8_sr(p)
             elif state['actual_state_precision'] == 'fp8_sr':
                 random_int_state_tensor = param_update._get_random_int_for_fp8_sr(p)
             step_param_fn = self._compiled_step_parameter
