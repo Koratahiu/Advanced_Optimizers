@@ -105,8 +105,15 @@ def dequantize_anchor(p, state, group, dtype):
         block_size = 128
         quantized_blocks = anchor_data
 
+    else:
+        # Unrecognised mode/dtype combination
+        return anchor_data.to(dtype)
+
     # Core Dequantization: (q * scale) + min
-    anchor_blocks = quantized_blocks.to(dtype) * scales.unsqueeze(1) + mins.unsqueeze(1)
+    anchor_blocks = (
+        quantized_blocks.float() * scales.float().unsqueeze(1)
+        + mins.float().unsqueeze(1)
+    )
 
     # Flatten, truncate any padding added during quantization, and reshape
-    return anchor_blocks.view(-1)[:orig_numel].view(orig_shape)
+    return anchor_blocks.view(-1)[:orig_numel].view(orig_shape).to(dtype)
