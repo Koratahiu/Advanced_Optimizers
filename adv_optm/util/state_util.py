@@ -71,11 +71,12 @@ def _prepare_uint8_blocks(
     """
     orig_shape = value.shape
     orig_numel = value.numel()
-    val_flat = value.reshape(-1).float()
     pad_len = (block_size - (orig_numel % block_size)) % block_size
     if pad_len > 0:
-        val_flat = F.pad(val_flat, (0, pad_len), mode='replicate')
-    return val_flat.view(-1, block_size), orig_shape, orig_numel
+        val_flat = F.pad(value.reshape(-1), (0, pad_len), mode='replicate')
+    else:
+        val_flat = value.reshape(-1)
+    return val_flat.view(-1, block_size).float(), orig_shape, orig_numel
 
 
 def _compute_uint8_block_stats(value: torch.Tensor, block_size: int, bits: int = 8,
@@ -130,31 +131,24 @@ def set_state(state: dict, key: str, value: torch.Tensor, state_precision: str, 
             _copy_stochastic_core_(state[key], value, random_int_state_tensor, False)
 
     elif state_precision == 'unit8_sr':
-        val_fp32 = value.float()
-        val_blocks, _, _ = _prepare_uint8_blocks(val_fp32, _unit8_sr_BLOCK_SIZE)
+        val_blocks, _, _ = _prepare_uint8_blocks(value, _unit8_sr_BLOCK_SIZE)
+
         scales, mins = _compute_uint8_block_stats(
-            val_fp32, block_size=_unit8_sr_BLOCK_SIZE, bits=8, val_blocks=val_blocks
+            value,
+            block_size=_unit8_sr_BLOCK_SIZE, 
+            bits=8, 
+            val_blocks=val_blocks
         )
 
         state[f"{key}_scale"].copy_(scales)
         state[f"{key}_min"].copy_(mins)
 
-        # Apply stochastic rounding for unit8 states
+        # Apply stochastic rounding using the already allocated val_blocks
         if random_int_state_tensor is not None:
-            _copy_int8_blockwise_stochastic_core_(
-                state[key], val_fp32,
-                scales, mins,
-                random_int_state_tensor,
-                block_size=_unit8_sr_BLOCK_SIZE,
-                val_blocks=val_blocks,
-            )
+            _copy_int8_blockwise_stochastic_core_(state[key], value, scales, mins, random_int_state_tensor, block_size=_unit8_sr_BLOCK_SIZE, val_blocks=val_blocks,)
         else:
-            copy_int8_blockwise_stochastic_(
-                state[key], val_fp32,
-                scales, mins,
-                block_size=_unit8_sr_BLOCK_SIZE,
-            )
-        del val_fp32, val_blocks
+            copy_int8_blockwise_stochastic_(state[key], value, scales, mins, block_size=_unit8_sr_BLOCK_SIZE,)
+        del val_blocks
 
     else:  # 'auto'
         if state[key] is not value:
