@@ -293,6 +293,79 @@ def copy_fp8_stochastic_(target: torch.Tensor, source: torch.Tensor, scale: torc
     _copy_fp8_stochastic_core_(target, source, scale, random_int_tensor)
     del random_int_tensor
 
+
+def _get_random_int_for_int8_sr(source: torch.Tensor) -> torch.Tensor:
+    """
+    Generates a random int32 tensor for INT8 stochastic rounding.
+    Values are in [0, 2^16 - 1]; they are later scaled to U[0, 1) inside
+    the core function.
+    This function is not torch.compile-path friendly due to its use of torch.Generator.
+    """
+    device = source.device
+
+    if device not in _generators:
+        set_seed(device)
+
+    # TODO: this is a workaround until torch compile error
+    # NotImplementedError: UserDefinedObjectVariable(generator) is fixed
+    generator = _generators[device]
+
+    return torch.randint(
+        size=source.shape,
+        device=source.device,
+        dtype=torch.int32,
+        low=0,
+        high=(1 << 16),
+        generator=generator,
+    )
+
+
+def _copy_int8_stochastic_core_(
+    target: torch.Tensor,
+    source: torch.Tensor,
+    scale: torch.Tensor,
+    random_int_tensor: torch.Tensor,
+) -> None:
+    """
+    Core logic for INT8 stochastic rounding using a pre-computed random integer tensor.
+
+    Uses the identity: stochastic_round(x) = floor(x + u), u ~ U[0, 1).
+    This is unbiased for both positive and negative values.
+
+    Args:
+        target:            INT8 destination tensor.
+        source:            FP32 source tensor (full-precision state values).
+        scale:             Scalar FP32 scale such that (source * scale) fits in [-127, 127].
+        random_int_tensor: INT32 tensor in [0, 2^16 - 1] used as the noise source.
+    """
+    # Scale to the INT8 representable range, keep in FP32 for precision
+    buffer = (source * scale).to(torch.float32)
+
+    # Convert the int32 noise to U[0, 1) and add before flooring.
+    # floor(x + u) is an unbiased stochastic round: rounds down with prob (1 - frac(x)),
+    # rounds up with prob frac(x).
+    noise = random_int_tensor.to(torch.float32).mul_(1.0 / (1 << 16))
+    buffer.add_(noise)
+    del noise
+
+    buffer.floor_()
+    target.copy_(buffer.clamp_(-128, 127).to(torch.int8))
+
+
+def copy_int8_stochastic_(target: torch.Tensor, source: torch.Tensor, scale: torch.Tensor) -> None:
+    """
+    Stochastic rounding implementation for INT8 states.
+
+    Args:
+        target: INT8 destination tensor.
+        source: FP32 source tensor.
+        scale:  Quantization scale such that (source * scale) fits in [-127, 127].
+    """
+    random_int_tensor = _get_random_int_for_int8_sr(source)
+    _copy_int8_stochastic_core_(target, source, scale, random_int_tensor)
+    del random_int_tensor
+
+
 def add_stochastic_(input: Tensor, other: Tensor, alpha: float = 1.0):
     """
     adds other to input using stochastic rounding

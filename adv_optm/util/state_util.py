@@ -1,5 +1,9 @@
 import torch
-from .param_update import copy_stochastic_, _copy_stochastic_core_, copy_fp8_stochastic_, _copy_fp8_stochastic_core_
+from .param_update import (
+    copy_stochastic_, _copy_stochastic_core_,
+    copy_fp8_stochastic_, _copy_fp8_stochastic_core_,
+    copy_int8_stochastic_, _copy_int8_stochastic_core_,
+)
 
 
 def init_state_tensor(state: dict, key: str, shape: tuple, state_precision: str, device: torch.device, default_dtype: torch.dtype):
@@ -13,11 +17,17 @@ def init_state_tensor(state: dict, key: str, shape: tuple, state_precision: str,
         store_dtype = torch.bfloat16
     elif state_precision in ['fp8', 'fp8_sr']:
         store_dtype = torch.float8_e4m3fn
+    elif state_precision == 'int8_sr':
+        store_dtype = torch.int8
     else:  # 'auto'
         store_dtype = default_dtype
 
     if store_dtype == getattr(torch, 'float8_e4m3fn', None):
         # FP8 initialization: we need to store a separate scale for dequantization
+        state[key] = torch.zeros(shape, device=device, dtype=store_dtype)
+        state[f"{key}_scale"] = torch.tensor(1.0, device=device, dtype=torch.float32)
+    elif store_dtype == torch.int8:
+        # INT8 initialization: we need to store a separate scale for dequantization
         state[key] = torch.zeros(shape, device=device, dtype=store_dtype)
         state[f"{key}_scale"] = torch.tensor(1.0, device=device, dtype=torch.float32)
     else:
@@ -30,6 +40,9 @@ def get_state(state: dict, key: str, state_precision: str) -> torch.Tensor:
     """
     tensor = state[key]
     if state_precision in ['fp8', 'fp8_sr']:
+        scale = state[f"{key}_scale"]
+        return tensor.float() / scale
+    elif state_precision == 'int8_sr':
         scale = state[f"{key}_scale"]
         return tensor.float() / scale
     elif state_precision == 'bf16_sr':
@@ -73,6 +86,20 @@ def set_state(state: dict, key: str, value: torch.Tensor, state_precision: str, 
         else:
             _copy_stochastic_core_(state[key], value, random_int_state_tensor, False)
 
+    elif state_precision == 'int8_sr':
+        # Calculate amax and derive a power-of-2 scale so that
+        # (amax * scale) fits within the int8 range [-127, 127].
+        amax = value.abs().max().clamp_min(1e-12)
+        scale = 127.0 / amax
+
+        state[f"{key}_scale"].copy_(scale)
+
+        # Quantize with stochastic rounding
+        if random_int_state_tensor is None:
+            copy_int8_stochastic_(state[key], value, scale)
+        else:
+            _copy_int8_stochastic_core_(state[key], value, scale, random_int_state_tensor)
+
     else:  # 'auto'
         if state[key] is not value:
             state[key].copy_(value)
@@ -88,7 +115,7 @@ def upcast_grad_for_precision(grad: torch.Tensor, state: dict, state_precision: 
 
     # Low-precision storage modes benefit from FP32 accumulation to 
     # maintain accuracy before quantizing back down in set_state.
-    if state_precision in ['bf16_sr', 'fp8', 'fp8_sr', 'factored']:
+    if state_precision in ['bf16_sr', 'fp8', 'fp8_sr', 'int8_sr', 'factored']:
         return grad.float()
 
     return grad
@@ -111,6 +138,8 @@ def fix_loaded_state_dtype(state: dict, p: torch.Tensor, group: dict) -> None:
         base_dtype = torch.bfloat16
     elif actual_precision in ['fp8', 'fp8_sr'] and hasattr(torch, 'float8_e4m3fn'):
         base_dtype = torch.float8_e4m3fn
+    elif actual_precision == 'int8_sr':
+        base_dtype = torch.int8
     else:
         # Fallback ('auto').
         base_dtype = torch.float32 if is_factored else p.dtype
@@ -167,6 +196,10 @@ def fix_loaded_state_dtype(state: dict, p: torch.Tensor, group: dict) -> None:
             # Apply base_dtype which accounts for `state_precision` and upcasting logic
             if val.dtype != base_dtype:
                 state[key] = val.to(base_dtype)
+
+        # Handle INT8 Stochastic-Rounded States (integer, not floating point)
+        elif actual_precision == 'int8_sr' and val.dtype != torch.int8:
+            state[key] = val.to(torch.int8)
 
         # Ensure device match
         if state[key].device != p.device:
