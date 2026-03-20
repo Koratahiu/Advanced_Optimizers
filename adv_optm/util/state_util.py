@@ -29,7 +29,7 @@ def init_state_tensor(state: dict, key: str, shape: tuple, state_precision: str,
     if store_dtype == getattr(torch, 'float8_e4m3fn', None):
         state[key] = torch.zeros(shape, device=device, dtype=store_dtype)
         state[f"{key}_scale"] = torch.tensor(1.0, device=device, dtype=torch.float32)
-    elif store_dtype == torch.int8:
+    elif store_dtype == torch.uint8:
         numel = 1
         for s in shape:
             numel *= s
@@ -71,7 +71,7 @@ def get_state(state: dict, key: str, state_precision: str) -> torch.Tensor:
         return tensor
 
 
-def _prepare_int8_blocks(
+def _prepare_uint8_blocks(
     value: torch.Tensor, block_size: int
 ) -> tuple[torch.Tensor, tuple, int]:
     """
@@ -87,13 +87,13 @@ def _prepare_int8_blocks(
     return val_flat.view(-1, block_size), orig_shape, orig_numel
 
 
-def _compute_int8_block_stats(value: torch.Tensor, block_size: int, bits: int = 8,
+def _compute_uint8_block_stats(value: torch.Tensor, block_size: int, bits: int = 8,
                                val_blocks: torch.Tensor | None = None):
     """
     Computes per-block (scale, min) for asymmetric blockwise quantization.
     """
     if val_blocks is None:
-        val_blocks, _, _ = _prepare_int8_blocks(value, block_size)
+        val_blocks, _, _ = _prepare_uint8_blocks(value, block_size)
 
     # Calc Stats
     min_vals, max_vals = torch.aminmax(val_blocks, dim=1, keepdim=True)
@@ -140,8 +140,8 @@ def set_state(state: dict, key: str, value: torch.Tensor, state_precision: str, 
 
     elif state_precision == 'unit8_sr':
         val_fp32 = value.float()
-        val_blocks, _, _ = _prepare_int8_blocks(val_fp32, _unit8_sr_BLOCK_SIZE)
-        scales, mins = _compute_int8_block_stats(
+        val_blocks, _, _ = _prepare_uint8_blocks(val_fp32, _unit8_sr_BLOCK_SIZE)
+        scales, mins = _compute_uint8_block_stats(
             val_fp32, block_size=_unit8_sr_BLOCK_SIZE, bits=8, val_blocks=val_blocks
         )
 
