@@ -2,6 +2,8 @@ import torch
 from torch import Tensor
 from torch.optim import Optimizer
 
+import torch.nn.functional as F
+
 from typing import Dict, Any
 
 from .scaled_optm import adjust_wds, scale_wds
@@ -294,7 +296,7 @@ def copy_fp8_stochastic_(target: torch.Tensor, source: torch.Tensor, scale: torc
     del random_int_tensor
 
 
-def _get_random_int_for_int8_sr(source: torch.Tensor) -> torch.Tensor:
+def _get_random_int_for_unit8_sr(source: torch.Tensor) -> torch.Tensor:
     """
     Generates a random int32 tensor for INT8 stochastic rounding.
     Values are in [0, 2^16 - 1]; they are later scaled to U[0, 1) inside
@@ -320,49 +322,63 @@ def _get_random_int_for_int8_sr(source: torch.Tensor) -> torch.Tensor:
     )
 
 
-def _copy_int8_stochastic_core_(
+def _copy_int8_blockwise_stochastic_core_(
     target: torch.Tensor,
     source: torch.Tensor,
-    scale: torch.Tensor,
-    random_int_tensor: torch.Tensor,
+    scales: torch.Tensor,
+    mins: torch.Tensor,
+    random_int_tensor: torch.Tensor | None,
+    block_size: int = 2048,
 ) -> None:
     """
-    Core logic for INT8 stochastic rounding using a pre-computed random integer tensor.
-
-    Uses the identity: stochastic_round(x) = floor(x + u), u ~ U[0, 1).
-    This is unbiased for both positive and negative values.
-
-    Args:
-        target:            INT8 destination tensor.
-        source:            FP32 source tensor (full-precision state values).
-        scale:             Scalar FP32 scale such that (source * scale) fits in [-127, 127].
-        random_int_tensor: INT32 tensor in [0, 2^16 - 1] used as the noise source.
+    Core logic for blockwise asymmetric unit8 stochastic rounding.
     """
-    # Scale to the INT8 representable range, keep in FP32 for precision
-    buffer = (source * scale).to(torch.float32)
 
-    # Convert the int32 noise to U[0, 1) and add before flooring.
-    # floor(x + u) is an unbiased stochastic round: rounds down with prob (1 - frac(x)),
-    # rounds up with prob frac(x).
-    noise = random_int_tensor.to(torch.float32).mul_(1.0 / (1 << 16))
-    buffer.add_(noise)
-    del noise
+    orig_shape = source.shape
+    orig_numel = source.numel()
 
-    buffer.floor_()
-    target.copy_(buffer.clamp_(-128, 127).to(torch.int8))
+    val_flat = source.reshape(-1).float()
+
+    pad_len = (block_size - (orig_numel % block_size)) % block_size
+    if pad_len > 0:
+        val_flat = F.pad(val_flat, (0, pad_len), mode='replicate')
+
+    # (n_blocks, block_size)
+    val_blocks = val_flat.view(-1, block_size)
+
+    # Normalise to [0, 255] per block
+    safe_scales = scales.float().clamp_min(1e-12).unsqueeze(1)  # (n_blocks, 1)
+    normalised = (val_blocks - mins.float().unsqueeze(1)) / safe_scales
+
+    # Stochastic rounding: floor(x + u), u ~ U[0, 1) — unbiased for any sign
+    if random_int_tensor is not None:
+        noise = (
+            random_int_tensor.reshape(-1)[:normalised.numel()]
+            .view(normalised.shape)
+            .float()
+            .mul_(1.0 / (1 << 16))
+        )
+        normalised = normalised + noise
+        del noise
+
+    quantised = normalised.floor_().clamp_(0, 255).to(torch.uint8)
+
+    # Strip padding and restore original shape
+    target.copy_(quantised.reshape(-1)[:orig_numel].view(orig_shape))
 
 
-def copy_int8_stochastic_(target: torch.Tensor, source: torch.Tensor, scale: torch.Tensor) -> None:
+def copy_int8_blockwise_stochastic_(
+    target: torch.Tensor,
+    source: torch.Tensor,
+    scales: torch.Tensor,
+    mins: torch.Tensor,
+    block_size: int = 2048,
+) -> None:
     """
-    Stochastic rounding implementation for INT8 states.
-
-    Args:
-        target: INT8 destination tensor.
-        source: FP32 source tensor.
-        scale:  Quantization scale such that (source * scale) fits in [-127, 127].
+    Blockwise asymmetric unit8 stochastic rounding for int8 optimizer states.
     """
-    random_int_tensor = _get_random_int_for_int8_sr(source)
-    _copy_int8_stochastic_core_(target, source, scale, random_int_tensor)
+    random_int_tensor = _get_random_int_for_unit8_sr(source)
+    _copy_int8_blockwise_stochastic_core_(target, source, scales, mins, random_int_tensor, block_size)
     del random_int_tensor
 
 

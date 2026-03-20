@@ -1,9 +1,13 @@
 import torch
+import torch.nn.functional as F
+
 from .param_update import (
     copy_stochastic_, _copy_stochastic_core_,
     copy_fp8_stochastic_, _copy_fp8_stochastic_core_,
-    copy_int8_stochastic_, _copy_int8_stochastic_core_,
+    copy_int8_blockwise_stochastic_, _copy_int8_blockwise_stochastic_core_,
 )
+
+_unit8_sr_BLOCK_SIZE = 2048
 
 
 def init_state_tensor(state: dict, key: str, shape: tuple, state_precision: str, device: torch.device, default_dtype: torch.dtype):
@@ -17,38 +21,103 @@ def init_state_tensor(state: dict, key: str, shape: tuple, state_precision: str,
         store_dtype = torch.bfloat16
     elif state_precision in ['fp8', 'fp8_sr']:
         store_dtype = torch.float8_e4m3fn
-    elif state_precision == 'int8_sr':
+    elif state_precision == 'unit8_sr':
         store_dtype = torch.int8
     else:  # 'auto'
         store_dtype = default_dtype
 
     if store_dtype == getattr(torch, 'float8_e4m3fn', None):
-        # FP8 initialization: we need to store a separate scale for dequantization
         state[key] = torch.zeros(shape, device=device, dtype=store_dtype)
         state[f"{key}_scale"] = torch.tensor(1.0, device=device, dtype=torch.float32)
     elif store_dtype == torch.int8:
-        # INT8 initialization: we need to store a separate scale for dequantization
-        state[key] = torch.zeros(shape, device=device, dtype=store_dtype)
-        state[f"{key}_scale"] = torch.tensor(1.0, device=device, dtype=torch.float32)
+        numel = 1
+        for s in shape:
+            numel *= s
+        n_blocks = (numel + _unit8_sr_BLOCK_SIZE - 1) // _unit8_sr_BLOCK_SIZE
+        state[key] = torch.zeros(shape, device=device, dtype=torch.uint8)
+        state[f"{key}_scale"] = torch.ones(n_blocks, device=device, dtype=torch.float32)
+        state[f"{key}_min"] = torch.zeros(n_blocks, device=device, dtype=torch.float32)
     else:
         state[key] = torch.zeros(shape, device=device, dtype=store_dtype)
 
 
 def get_state(state: dict, key: str, state_precision: str) -> torch.Tensor:
     """
-    Retrieves the state tensor.
+    Retrieves and dequantizes the state tensor to float32.
     """
     tensor = state[key]
     if state_precision in ['fp8', 'fp8_sr']:
         scale = state[f"{key}_scale"]
         return tensor.float() / scale
-    elif state_precision == 'int8_sr':
-        scale = state[f"{key}_scale"]
-        return tensor.float() / scale
+    elif state_precision == 'unit8_sr':
+        tensor_data = state[key] # uint8
+        scales = state[f"{key}_scale"] # (n_blocks,) fp32
+        mins = state[f"{key}_min"] # (n_blocks,) fp32
+        orig_shape = tensor_data.shape
+        orig_numel = tensor_data.numel()
+
+        flat = tensor_data.reshape(-1).float()
+        pad_len = (_unit8_sr_BLOCK_SIZE - (orig_numel % _unit8_sr_BLOCK_SIZE)) % _unit8_sr_BLOCK_SIZE
+        if pad_len > 0:
+            flat = F.pad(flat, (0, pad_len))
+
+        # (n_blocks, block_size) — dequantize: q * scale + min
+        blocks = flat.view(-1, _unit8_sr_BLOCK_SIZE)
+        result = blocks * scales.unsqueeze(1) + mins.unsqueeze(1)
+        return result.reshape(-1)[:orig_numel].view(orig_shape)
     elif state_precision == 'bf16_sr':
         return tensor.float()
     else: # 'auto', 'fp32'.
         return tensor
+
+
+def _compute_int8_block_stats(value: torch.Tensor, block_size: int, bits: int = 8):
+    """
+    Computes per-block (scale, min) for asymmetric blockwise quantization.
+    """
+    val_flat = value.flatten().float()
+    numel = val_flat.numel()
+
+    # Pad to multiple of block_size
+    pad_len = (block_size - (numel % block_size)) % block_size
+    val_padded = F.pad(val_flat, (0, pad_len), mode='replicate') if pad_len > 0 else val_flat
+
+    # Block Reshape
+    val_blocks = val_padded.view(-1, block_size)
+
+    # Calc Stats
+    min_vals, max_vals = torch.aminmax(val_blocks, dim=1, keepdim=True)
+
+    # Scale calculation
+    max_int = (1 << bits) - 1
+    scales = (max_vals - min_vals).div_(float(max_int))
+    scales.masked_fill_(scales == 0, 1.0)
+
+    return scales.squeeze(1), min_vals.squeeze(1)
+
+
+def quantize_blockwise(p: torch.Tensor, block_size: int, bits: int = 8):
+    """
+    Performs asymmetric blockwise quantization.
+    """
+    scales, mins = _compute_int8_block_stats(p, block_size, bits)
+
+    val_flat = p.flatten().float()
+    numel = val_flat.numel()
+    pad_len = (block_size - (numel % block_size)) % block_size
+    val_padded = F.pad(val_flat, (0, pad_len), mode='replicate') if pad_len > 0 else val_flat
+
+    val_blocks = val_padded.view(-1, block_size)
+    max_int    = (1 << bits) - 1
+    quantized  = (
+        val_blocks
+        .sub_(mins.unsqueeze(1))
+        .div_(scales.unsqueeze(1).clamp_min_(1e-12))
+        .round_()
+        .clamp_(0, max_int)
+        .to(torch.uint8)
+    )
+    return quantized, scales, mins
 
 
 def set_state(state: dict, key: str, value: torch.Tensor, state_precision: str, random_int_state_tensor: torch.Tensor | None):
@@ -60,12 +129,9 @@ def set_state(state: dict, key: str, value: torch.Tensor, state_precision: str, 
             state[key].copy_(value)
 
     elif state_precision in ['fp8', 'fp8_sr']:
-        # Calculate amax
         amax = value.abs().max().clamp_min(1e-12)
-        # We find the largest power of 2 such that (amax * scale) <= 448
-        raw_scale = 448.0 / amax
-        log_scale = torch.floor(torch.log2(raw_scale))
-        scale = 2.0 ** log_scale
+        # Calculate amax
+        scale = 448.0 / amax
 
         state[f"{key}_scale"].copy_(scale)
 
@@ -86,19 +152,27 @@ def set_state(state: dict, key: str, value: torch.Tensor, state_precision: str, 
         else:
             _copy_stochastic_core_(state[key], value, random_int_state_tensor, False)
 
-    elif state_precision == 'int8_sr':
-        # Calculate amax and derive a power-of-2 scale so that
-        # (amax * scale) fits within the int8 range [-127, 127].
-        amax = value.abs().max().clamp_min(1e-12)
-        scale = 127.0 / amax
+    elif state_precision == 'unit8_sr':
+        scales, mins = _compute_int8_block_stats(value.float(), block_size=_unit8_sr_BLOCK_SIZE, bits=8)
 
-        state[f"{key}_scale"].copy_(scale)
+        state[f"{key}_scale"].copy_(scales)
+        state[f"{key}_min"].copy_(mins)
 
-        # Quantize with stochastic rounding
-        if random_int_state_tensor is None:
-            copy_int8_stochastic_(state[key], value, scale)
+        # Apply stochastic rounding for unit8 states
+        if random_int_state_tensor is not None:
+            _copy_int8_blockwise_stochastic_core_(
+                state[key], value.float(),
+                scales, mins,
+                random_int_state_tensor,
+                block_size=_unit8_sr_BLOCK_SIZE,
+            )
         else:
-            _copy_int8_stochastic_core_(state[key], value, scale, random_int_state_tensor)
+            # Uncompiled path: blockwise SR with internally-generated noise.
+            copy_int8_blockwise_stochastic_(
+                state[key], value.float(),
+                scales, mins,
+                block_size=_unit8_sr_BLOCK_SIZE,
+            )
 
     else:  # 'auto'
         if state[key] is not value:
@@ -115,7 +189,7 @@ def upcast_grad_for_precision(grad: torch.Tensor, state: dict, state_precision: 
 
     # Low-precision storage modes benefit from FP32 accumulation to 
     # maintain accuracy before quantizing back down in set_state.
-    if state_precision in ['bf16_sr', 'fp8', 'fp8_sr', 'int8_sr', 'factored']:
+    if state_precision in ['bf16_sr', 'fp8', 'fp8_sr', 'unit8_sr', 'factored']:
         return grad.float()
 
     return grad
@@ -138,8 +212,8 @@ def fix_loaded_state_dtype(state: dict, p: torch.Tensor, group: dict) -> None:
         base_dtype = torch.bfloat16
     elif actual_precision in ['fp8', 'fp8_sr'] and hasattr(torch, 'float8_e4m3fn'):
         base_dtype = torch.float8_e4m3fn
-    elif actual_precision == 'int8_sr':
-        base_dtype = torch.int8
+    elif actual_precision == 'unit8_sr':
+        base_dtype = torch.uint8
     else:
         # Fallback ('auto').
         base_dtype = torch.float32 if is_factored else p.dtype
@@ -185,8 +259,8 @@ def fix_loaded_state_dtype(state: dict, p: torch.Tensor, group: dict) -> None:
                 state[key] = val.to(torch.uint8)
             continue
 
-        # Handle Factorized Tensors and FP8 Scales (Must be float32)
-        if key in fp32_keys or (key.endswith('_scale') and key != 'anchor_scale'):
+        # Handle Factorized Tensors, FP8 Scales, and blockwise INT8 scale/min
+        if key in fp32_keys or (key.endswith('_scale') and key != 'anchor_scale') or (key.endswith('_min') and actual_precision == 'unit8_sr'):
             if val.dtype != torch.float32:
                 state[key] = val.to(torch.float32)
             continue
@@ -197,9 +271,9 @@ def fix_loaded_state_dtype(state: dict, p: torch.Tensor, group: dict) -> None:
             if val.dtype != base_dtype:
                 state[key] = val.to(base_dtype)
 
-        # Handle INT8 Stochastic-Rounded States (integer, not floating point)
-        elif actual_precision == 'int8_sr' and val.dtype != torch.int8:
-            state[key] = val.to(torch.int8)
+        # Handle INT8 Stochastic-Rounded States
+        elif actual_precision == 'unit8_sr' and val.dtype != torch.uint8:
+            state[key] = val.to(torch.uint8)
 
         # Ensure device match
         if state[key].device != p.device:
