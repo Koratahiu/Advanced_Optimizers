@@ -112,7 +112,7 @@ class Adopt_adv(torch.optim.Optimizer):
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
         factored_2nd (bool): whether to keep the first moment uncompressed (dense)
-            while only factorizing the second moment. (default: True)  Legacy fallback. (default: False)
+            while only factorizing the second moment. (default: False)
         state_precision (str): Precision method for Adopt states. Options: 'auto'
             (parameter precision), 'fp32', 'factored' (SMMF low-rank FP32), 'bf16_sr' (with
             stochastic rounding), 'fp8_sr', 'uint8_sr'. (default: 'auto')
@@ -268,7 +268,6 @@ class Adopt_adv(torch.optim.Optimizer):
         grad = p.grad
         state = self.state[p]
 
-
         beta1, beta2 = group['betas']
 
         if group.get('kourkoutas_beta', False):
@@ -286,56 +285,56 @@ class Adopt_adv(torch.optim.Optimizer):
             state['step'] = 0
 
             req_precision = group['state_precision']
+            is_vector = len(p.shape) == 1 and not group['vector_reshape']
 
-            state['factored'] = (
-                req_precision == 'factored' and
-                not (len(p.shape) == 1 and not group['vector_reshape'])
-            )
+            state['factored'] = req_precision == 'factored' and not is_vector
+            state['factored_2nd'] = group.get('factored_2nd', False) and not is_vector
 
             actual_precision = 'auto' if req_precision == 'factored' else req_precision
             state['actual_state_precision'] = actual_precision
 
-            dtype = torch.float32 if state['factored'] else p.dtype
+            dtype = torch.float32 if (state['factored'] or req_precision == 'factored') else p.dtype
 
-            vt_init = grad.pow(2).to(dtype)
+            vt_dtype = torch.float32 if (state['factored'] or state['factored_2nd'] or req_precision == 'factored') else dtype
+            vt_init = grad.pow(2).to(vt_dtype)
             if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
-                vt_init.mul_(beta2).addcmul_(grad.to(dtype), grad.to(dtype) * (1.0 - beta2))
+                vt_init.mul_(beta2).addcmul_(grad.to(vt_dtype), grad.to(vt_dtype) * (1.0 - beta2))
             else:
-                vt_init.mul_(beta2).addcmul_(grad.to(dtype), grad.to(dtype), value=1.0 - beta2)
+                vt_init.mul_(beta2).addcmul_(grad.to(vt_dtype), grad.to(vt_dtype), value=1.0 - beta2)
 
             if state['factored']:
                 state['effective_shape'] = _get_effective_shape(p.numel())
                 d1, d2 = state['effective_shape']
-                dtype = torch.float32
 
-                if not group.get('factored_2nd', False):
-                    # First moment (m)
-                    if group['betas'][0] > 0:
-                        state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
-                        state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                        packed_d2 = (d2 + 7) // 8
-                        state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
-                    # AdEMAMix slow moment (m_slow)
-                    if self.use_AdEMAMix:
-                        state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
-                        state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                        packed_d2 = (d2 + 7) // 8
-                        state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
-                else:
-                    if group['betas'][0] > 0:
-                        state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
-                    if self.use_AdEMAMix:
-                        state['exp_avg_slow'] = torch.zeros_like(p, device=p.device, dtype=dtype)
+                # First moment (m)
+                if group['betas'][0] > 0:
+                    state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=torch.float32)
+                    state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=torch.float32)
+                    packed_d2 = (d2 + 7) // 8
+                    state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+                # AdEMAMix slow moment (m_slow)
+                if self.use_AdEMAMix:
+                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=torch.float32)
+                    state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=torch.float32)
+                    packed_d2 = (d2 + 7) // 8
+                    state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+
                 # Second moment (v)
                 state['mu_v_nmf'], state['mv_v_nmf'] = _nnmf(vt_init.view(d1, d2))
                 del vt_init
-            else: # Fallback for non-factored tensors
+            else: # Fallback for non-factored tensors (or factored_2nd)
                 if group['betas'][0] > 0:
                     init_state_tensor(state, 'exp_avg', p.shape, actual_precision, p.device, dtype)
                 if self.use_AdEMAMix:
                     init_state_tensor(state, 'exp_avg_slow', p.shape, actual_precision, p.device, dtype)
-                init_state_tensor(state, 'exp_avg_sq', p.shape, actual_precision, p.device, dtype)
-                set_state(state, 'exp_avg_sq', vt_init, actual_precision, None)
+
+                if state['factored_2nd']:
+                    state['effective_shape'] = _get_effective_shape(p.numel())
+                    d1, d2 = state['effective_shape']
+                    state['mu_v_nmf'], state['mv_v_nmf'] = _nnmf(vt_init.view(d1, d2))
+                else:
+                    init_state_tensor(state, 'exp_avg_sq', p.shape, actual_precision, p.device, dtype)
+                    set_state(state, 'exp_avg_sq', vt_init, actual_precision, None)
                 del vt_init
 
             if group.get('scaled_optm', False) and is_spectral(p):
@@ -395,9 +394,6 @@ class Adopt_adv(torch.optim.Optimizer):
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
 
-        # Determine if we are using dense first-moments alongside a factored second-order second-moment
-        factored_2nd = group.get('factored_2nd', False)
-
         adaptive_eps = scale_eps(group, p)
 
         if state['factored']:
@@ -430,34 +426,26 @@ class Adopt_adv(torch.optim.Optimizer):
 
             # ADOPT Step B: Update momentum m_t using normalized gradient
             if beta1 > 0:
-                if factored_2nd:
-                    mt = state['exp_avg'].view(d1, d2)
-                else:
-                    # Reconstruct m_{t-1}
-                    mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
+                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
                 if self.Simplified_AdEMAMix:
                     mt.mul_(beta1).add_(normalized_grad, alpha=1.0)
                 else:
                     mt.lerp_(normalized_grad, 1.0 - beta1)
 
-                if not factored_2nd:
-                    # Factorize
-                    state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
+                # Factorize
+                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
 
                 if self.grams_moment:
-                    update_mt = _grams_update(mt, grad_reshaped, inplace=not factored_2nd)
+                    update_mt = _grams_update(mt, grad_reshaped, inplace=True)
                 elif self.cautious_mask:
-                    update_mt = _cautious_update(mt, grad_reshaped, inplace=not factored_2nd)
+                    update_mt = _cautious_update(mt, grad_reshaped, inplace=True)
                 else:
-                    update_mt = mt if not factored_2nd else mt.clone()
+                    update_mt = mt
 
             if self.use_AdEMAMix:
-                if factored_2nd:
-                    mt_slow = state['exp_avg_slow'].view(d1, d2)
-                else:
-                    # Reconstruct AdEMAMix EMA
-                    mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
+                # Reconstruct AdEMAMix EMA
+                mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
 
                 mt_slow.lerp_(normalized_grad, 1.0 - beta3_ema)
 
@@ -466,10 +454,9 @@ class Adopt_adv(torch.optim.Optimizer):
                     del normalized_grad
                 else:
                     update = normalized_grad.add_(mt_slow, alpha=alpha)
-                if not factored_2nd:
-                    # Factorize
-                    state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
-                    del mt_slow
+                # Factorize
+                state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
+                del mt_slow
 
             elif self.Simplified_AdEMAMix:
                 update = update_mt.add_(normalized_grad, alpha=alpha_grad)
@@ -483,10 +470,16 @@ class Adopt_adv(torch.optim.Optimizer):
 
             update = update.view(p.shape)
 
-        else: # Standard ADOPT logic for non-factored tensors
+        else: # Standard ADOPT logic for non-factored tensors (or factored_2nd)
             actual_precision = state.get('actual_state_precision', 'auto')
+            factored_2nd = state.get('factored_2nd', False)
 
-            vt = get_state(state, 'exp_avg_sq', actual_precision) # v_{t-1}
+            if factored_2nd:
+                d1, d2 = state['effective_shape']
+                vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
+                vt = vt.view(p.shape).to(grad.dtype)
+            else:
+                vt = get_state(state, 'exp_avg_sq', actual_precision) # v_{t-1}
 
             # ADOPT Step A: Decorrelate g_t using v_{t-1}
             denom = vt.sqrt()
@@ -535,12 +528,18 @@ class Adopt_adv(torch.optim.Optimizer):
                 else:
                     update = normalized_grad
 
+            grad_vt, vt = (grad.float(), vt.float()) if factored_2nd else (grad, vt)
+
             # Update second moment v_t for the next step using raw g_t
             if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
-                vt.mul_(beta2).addcmul_(grad, grad * (1.0 - beta2))
+                vt.mul_(beta2).addcmul_(grad_vt, grad_vt * (1.0 - beta2))
             else:
-                vt.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
-            set_state(state, 'exp_avg_sq', vt, actual_precision, random_int_state_tensor)
+                vt.mul_(beta2).addcmul_(grad_vt, grad_vt, value=1 - beta2)
+
+            if factored_2nd:
+                state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt.view(d1, d2), signed=False)
+            else:
+                set_state(state, 'exp_avg_sq', vt, actual_precision, random_int_state_tensor)
             del random_int_state_tensor
 
         update_scaling = lr * A if self.use_atan2 else lr
