@@ -329,6 +329,7 @@ def _copy_int8_blockwise_stochastic_core_(
     mins: torch.Tensor,
     random_int_tensor: torch.Tensor | None,
     block_size: int = 2048,
+    val_blocks: torch.Tensor | None = None,
 ) -> None:
     """
     Core logic for blockwise asymmetric unit8 stochastic rounding.
@@ -337,14 +338,13 @@ def _copy_int8_blockwise_stochastic_core_(
     orig_shape = source.shape
     orig_numel = source.numel()
 
-    val_flat = source.reshape(-1).float()
-
-    pad_len = (block_size - (orig_numel % block_size)) % block_size
-    if pad_len > 0:
-        val_flat = F.pad(val_flat, (0, pad_len), mode='replicate')
-
-    # (n_blocks, block_size)
-    val_blocks = val_flat.view(-1, block_size)
+    if val_blocks is None:
+        val_flat = source.reshape(-1).float()
+        pad_len = (block_size - (orig_numel % block_size)) % block_size
+        if pad_len > 0:
+            val_flat = F.pad(val_flat, (0, pad_len), mode='replicate')
+        # (n_blocks, block_size)
+        val_blocks = val_flat.view(-1, block_size)
 
     # Normalise to [0, 255] per block
     safe_scales = scales.float().clamp_min(1e-12).unsqueeze(1)  # (n_blocks, 1)
