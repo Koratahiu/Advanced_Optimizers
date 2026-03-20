@@ -50,20 +50,11 @@ def get_state(state: dict, key: str, state_precision: str) -> torch.Tensor:
         scale = state[f"{key}_scale"]
         return tensor.float() / scale
     elif state_precision == 'unit8_sr':
-        tensor_data = state[key] # uint8
         scales = state[f"{key}_scale"] # (n_blocks,) fp32
         mins = state[f"{key}_min"] # (n_blocks,) fp32
-        orig_shape = tensor_data.shape
-        orig_numel = tensor_data.numel()
-
-        flat = tensor_data.reshape(-1).float()
-        pad_len = (_unit8_sr_BLOCK_SIZE - (orig_numel % _unit8_sr_BLOCK_SIZE)) % _unit8_sr_BLOCK_SIZE
-        if pad_len > 0:
-            flat = F.pad(flat, (0, pad_len), mode='replicate')
-
-        # (n_blocks, block_size) — dequantize: q * scale + min
-        blocks = flat.view(-1, _unit8_sr_BLOCK_SIZE)
-        result = blocks * scales.unsqueeze(1) + mins.unsqueeze(1)
+        # dequantize: q * scale + min
+        blocks, orig_shape, orig_numel = _prepare_uint8_blocks(state[key], _unit8_sr_BLOCK_SIZE)
+        result = torch.addcmul(mins.unsqueeze(1), blocks, scales.unsqueeze(1))
         return result.reshape(-1)[:orig_numel].view(orig_shape)
     elif state_precision == 'bf16_sr':
         return tensor.float()

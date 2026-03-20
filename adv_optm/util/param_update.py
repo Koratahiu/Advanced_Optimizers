@@ -425,9 +425,9 @@ def _get_random_noise_for_sso(source: torch.Tensor) -> torch.Tensor:
     # TODO, this is a workaround until torch compile error
     # NotImplementedError: UserDefinedObjectVariable(generator) is fixed
     generator = _generators[device]
-    # create a random noise tensor
-    return torch.randint(
-        size=source.shape,
+    # create a uniform noise tensor in [0, 1) for stochastic sign decisions
+    return torch.rand(
+        source.shape,
         device=source.device,
         dtype=source.dtype,
         generator=generator,
