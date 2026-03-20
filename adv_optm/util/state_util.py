@@ -22,7 +22,7 @@ def init_state_tensor(state: dict, key: str, shape: tuple, state_precision: str,
     elif state_precision in ['fp8', 'fp8_sr']:
         store_dtype = torch.float8_e4m3fn
     elif state_precision == 'unit8_sr':
-        store_dtype = torch.int8
+        store_dtype = torch.uint8
     else:  # 'auto'
         store_dtype = default_dtype
 
