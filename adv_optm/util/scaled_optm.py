@@ -8,7 +8,8 @@ def scale_update(
     p: torch.Tensor,
     update: torch.Tensor,
     lr: float,
-    vector_state: torch.Tensor | None = None
+    vector_state: torch.Tensor | None = None,
+    depth: int = 1,
 ) -> torch.Tensor:
     """
     Applies adaptive scaling to the parameter update based on the parameter's
@@ -46,7 +47,7 @@ def scale_update(
     # LoRA Factors or Full Finetuning weights
     # Scales update to maintain consistent spectral norm across different layer sizes and ranks.
     if p.ndim >= 2:
-        return spectral_normalization(update, vector_state, lr)
+        return spectral_normalization(update, vector_state, lr/depth)
 
     return update.mul_(lr)
 
@@ -56,9 +57,10 @@ def scale_eps(group: dict, p) -> float:
     Scales Adam eps to be scale-invariant.
     """
     if group.get('scaled_optm', False):
-        if getattr(p, '_is_lora_A', False):
-            # Apply 1/depth only to B factor (zero init)
-            # To achieve O(1)
+        if getattr(p, '_is_lora_A', False) or getattr(p, '_is_dora_scale', False) or getattr(p, '_is_oft', False) or p.ndim < 2:
+            # No depth scaling for:
+            # - lora_A: non-zero init, different gradient dynamics than B
+            # - 1D params (biases, norms, DoRA scales): additive, don't compound through depth.
             adaptive_eps = (1.0 / math.sqrt(p.numel()))
         else:
             adaptive_eps = (1.0 / group['n_layers']) * (1.0 / math.sqrt(p.numel()))

@@ -344,7 +344,7 @@ def _copy_int8_blockwise_stochastic_core_(
 
     if val_blocks is None:
         val_flat = source.reshape(-1).float()
-        val_flat = F.pad(val_flat, (0, pad_len), mode='replicate')
+        val_flat = F.pad(val_flat.reshape(1, -1), (0, pad_len), mode='replicate')
         val_blocks = val_flat.view(n_blocks, block_size)
 
     # Normalise to [0, 255] per block
