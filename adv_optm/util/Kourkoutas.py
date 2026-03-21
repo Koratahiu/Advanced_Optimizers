@@ -209,6 +209,12 @@ class KourkoutasHelper:
 
     def compute_current_step_norms(self):
         """Computes gradient norms for the current step before beta calculation."""
+        if not hasattr(self, 'kourkoutas_helper') or self.kourkoutas_helper is None:
+            return
+
+        if not getattr(self.kourkoutas_helper, 'use_current_step', False):
+            return
+
         for layer_key in self.layer_state:
             if 'sum_sq_accumulator' in self.layer_state[layer_key]:
                 if isinstance(self.layer_state[layer_key]['sum_sq_accumulator'], torch.Tensor):
