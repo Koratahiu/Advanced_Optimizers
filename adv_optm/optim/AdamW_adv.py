@@ -145,6 +145,8 @@ class AdamW_adv(torch.optim.Optimizer):
             "nnmf_factor": nnmf_factor
         }
         self.stochastic_rounding = stochastic_rounding
+        print("Stochastic rounding of momentums enabled!")
+        self.momentum_stochastic_rounding = True
         self.cautious_mask = cautious_mask
         self.grams_moment = grams_moment
         self.use_AdEMAMix = use_AdEMAMix
@@ -336,7 +338,20 @@ class AdamW_adv(torch.optim.Optimizer):
         else:  # Standard AdamW logic for non-factored tensors
             if beta1 > 0:
                 exp_avg = state['exp_avg']
-                exp_avg.lerp_(grad, 1.0 - beta1)
+                if exp_avg.dtype == torch.bfloat16 and self.momentum_stochastic_rounding:
+                    exp_avg_fp32 = exp_avg.float()
+                    grad_fp32 = grad.float()
+                    #TODO duplicated code
+                    exp_avg_fp32.lerp_(grad_fp32, 1.0 - beta1)
+                    if random_int_tensor is not None:
+                        # Compiled path: use the pre-computed random tensor
+                        #TODO use the same random int tensor?
+                        param_update._copy_stochastic_core_(exp_avg, exp_avg_fp32, random_int_tensor)
+                    else:
+                        # Uncompiled path: generate randoms inside
+                        param_update.copy_stochastic_(exp_avg, exp_avg_fp32)
+                else:
+                    exp_avg.lerp_(grad, 1.0 - beta1)
 
                 if self.grams_moment:
                     update_mt = _grams_update(exp_avg, grad)
@@ -357,7 +372,19 @@ class AdamW_adv(torch.optim.Optimizer):
                 update = update_mt if beta1 > 0 else grad.clone()
 
             exp_avg_sq = state['exp_avg_sq']
-            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+            if exp_avg_sq.dtype == torch.bfloat16 and self.momentum_stochastic_rounding:
+                exp_avg_sq_fp32 = exp_avg_sq.float()
+                grad_fp32 = grad.float()
+                #TODO duplicated code
+                exp_avg_sq_fp32.mul_(beta2).addcmul_(grad_fp32, grad_fp32, value=1 - beta2)
+                if random_int_tensor is not None:
+                    # Compiled path: use the pre-computed random tensor
+                    param_update._copy_stochastic_core_(exp_avg_sq, exp_avg_sq_fp32, random_int_tensor)
+                else:
+                    # Uncompiled path: generate randoms inside
+                    param_update.copy_stochastic_(exp_avg_sq, exp_avg_sq_fp32)
+            else:
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
             if group['use_atan2']:
                 denom = exp_avg_sq.sqrt()
