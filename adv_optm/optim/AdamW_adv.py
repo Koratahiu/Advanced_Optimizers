@@ -145,6 +145,7 @@ class AdamW_adv(torch.optim.Optimizer):
             "nnmf_factor": nnmf_factor
         }
         self.stochastic_rounding = stochastic_rounding
+        print("Stochastic rounding of momentums enabled!")
         self.momentum_stochastic_rounding = True
         self.cautious_mask = cautious_mask
         self.grams_moment = grams_moment
