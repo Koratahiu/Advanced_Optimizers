@@ -1,12 +1,15 @@
 import torch
 
 from ..util import param_update
-from ..util.Muon_util import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update, approx_mars, spectral_norm_update, get_spectral_scaling
+from ..util.Muon_util import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update, approx_mars, get_spectral_scaling
+from ..util.scaled_optm import spectral_normalization, init_spectral_norm
 from ..util.factorization_util import _get_effective_shape, _factorize_state, _reconstruct_state
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util import Muon_AuxAdam
 from ..util.centered_decay import _init_anchor
+from typing import Optional
+from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 
 class Muon_adv(torch.optim.Optimizer):
     """
@@ -51,6 +54,9 @@ class Muon_adv(torch.optim.Optimizer):
             the uncompressed optimizer. (default: False)
         use_muon (bool | None): whether to use Muon or AuxAdamW. MUST be provided
             either here or via `optim_type` in parameter groups. (default: None)
+        state_precision (str): Precision for Muon optimizer states. Options: 'auto' (parameter dtype), 'fp32',
+            'bf16_sr' (BF16 with stochastic rounding), 'fp8_sr', 'uint8_sr'.
+            (default: 'auto')
         low_rank_ortho (bool): If True, enables low-rank orthogonalization, which
             projects the update to a lower rank before orthogonalization.
             (default: False)
@@ -127,6 +133,8 @@ class Muon_adv(torch.optim.Optimizer):
         vector_reshape: bool = False,
         # Boolean to spilt param
         use_muon: bool | None = None,
+        # States precision (Muon path)
+        state_precision: str = "auto",  # 'fp32', 'bf16_sr', 'fp8_sr', 'uint8_sr'
         # Low-rank Muon
         low_rank_ortho: bool = False,
         ortho_rank: int = 128,
@@ -186,6 +194,11 @@ class Muon_adv(torch.optim.Optimizer):
         if spectral_normalization and accelerated_ns:
             ValueError("spectral_normalization violates accelerated Newton-Schulz assumptions. Pick one of them.")
 
+        state_precision = state_precision.lower()
+        valid_precisions = {"auto", "fp32", "bf16_sr", "fp8_sr", "uint8_sr"}
+        if state_precision not in valid_precisions:
+            raise ValueError(f"state_precision must be one of {valid_precisions}. Got {state_precision}")
+
         defaults = {
             "lr": lr, "beta1": beta1, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
             "nesterov": nesterov, "ns_steps": ns_steps, "ns_eps": ns_eps,
@@ -195,6 +208,8 @@ class Muon_adv(torch.optim.Optimizer):
             "orthogonal_gradient": orthogonal_gradient,
             'compiled_optimizer': compiled_optimizer,
             "use_muon": use_muon,
+            # States precision (Muon path)
+            "state_precision": state_precision,
             # Low-rank Ortho
             "low_rank_ortho": low_rank_ortho, "ortho_rank": ortho_rank,
             # NorMuon
@@ -311,29 +326,19 @@ class Muon_adv(torch.optim.Optimizer):
                 packed_d2 = (d2 + 7) // 8
                 state['sign_buf'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
             else:
-                state['momentum_buffer'] = torch.zeros_like(p)
+                # Determine effective state precision (small tensors always use fp32)
+                req_precision = group.get('state_precision', 'auto')
+                actual_precision = req_precision
+                if actual_precision != 'auto' and (p.numel() < 10000 or p.ndim == 1):
+                    actual_precision = 'fp32'
+                state['actual_state_precision'] = actual_precision
+
+                default_dtype = p.dtype
+                init_state_tensor(state, 'momentum_buffer', p.shape, actual_precision, p.device, default_dtype)
 
             # Spectral Normalization
             if group.get('spectral_normalization', False):
-                gen = param_update.get_generator(device)
-
-                # Case A: Factored Muon
-                if state['factored']:
-                    d1, d2 = state['effective_shape']
-                    # We need a vector matching the 'inner' dimension d2
-                    state['spectral_v'] = torch.randn(d2, device=device, dtype=dtype, generator=gen)
-
-                # Case B: Standard Muon (Linear, Conv2d, etc.)
-                elif len(p.shape) >= 2:
-                    # Since Muon performs `update.flatten(1)`, the matrix becomes
-                    # (p.shape[0], product_of_rest).
-                    d_in_flat = p.numel() // p.shape[0]
-
-                    state['spectral_v'] = torch.randn(d_in_flat, device=device, dtype=dtype, generator=gen)
-
-                # Normalize initial vector for stability
-                if 'spectral_v' in state:
-                    state['spectral_v'].div_(state['spectral_v'].norm())
+                init_spectral_norm(group, state, p)
 
             # MARS-M state initialization
             if group.get('approx_mars', False):
@@ -410,19 +415,31 @@ class Muon_adv(torch.optim.Optimizer):
             if is_compiled:
                 lr = torch.as_tensor(group['lr'])
                 muon_step_param = self._compiled_muon_step_parameter
+
+                # Generate state SR random tensor when compiled
+                actual_precision = state.get('actual_state_precision', 'auto')
+                random_int_state_tensor = random_int_tensor
+                if actual_precision == 'bf16_sr' and random_int_state_tensor is not None:
+                    random_int_state_tensor = param_update._get_random_int_for_sr(p)
+                elif actual_precision == 'uint8_sr':
+                    random_int_state_tensor = param_update._get_random_int_for_uint8_sr(p)
+                elif actual_precision == 'fp8_sr':
+                    random_int_state_tensor = param_update._get_random_int_for_fp8_sr(p)
             else:
                 lr = group['lr']
                 muon_step_param = self._muon_step_parameter
+                random_int_state_tensor = None
 
-            muon_step_param(p, grad, state, group, lr, random_int_tensor)
+            muon_step_param(p, grad, state, group, lr, random_int_tensor, random_int_state_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_muon_step_parameter = torch.compile(self._muon_step_parameter, *args, **kwargs)
         self._compiled_adam_step_parameter = torch.compile(Muon_AuxAdam._adam_step_parameter, *args, **kwargs)
 
     @torch.no_grad()
-    def _muon_step_parameter(self, p, grad, state, group, lr, random_int_tensor):
-
+    def _muon_step_parameter(self, p, grad, state, group, lr, random_int_tensor, random_int_state_tensor=None):
+        # Upcast grad for low-precision state modes (non-factored path)
+        grad = upcast_grad_for_precision(grad, state, group.get('state_precision', 'auto'))
 
         beta1 = group['beta1']
         nesterov = group['nesterov']
@@ -502,7 +519,7 @@ class Muon_adv(torch.optim.Optimizer):
 
             if group.get('spectral_normalization', False):
                 # Spectral Normalization
-                spectral_norm_update(update, state['spectral_v'], spectral_target, lr)
+                spectral_normalization(update, state['spectral_v'], lr / group['n_layers'])
             else:
                 # Factored RMS-aligned scaling
                 rms_adjustment(update, group['rms_rescaling'], lr)
@@ -514,9 +531,10 @@ class Muon_adv(torch.optim.Optimizer):
             if len(p.shape) >= 2:
 
                 original_shape = p.shape
+                actual_precision = state.get('actual_state_precision', 'auto')
 
                 # Momentum update
-                mt_buf = state['momentum_buffer']
+                mt_buf = get_state(state, 'momentum_buffer', actual_precision)
                 if not Simplified_AdEMAMix:
                     mt_buf.lerp_(grad, 1 - beta1)
                 else:
@@ -526,10 +544,12 @@ class Muon_adv(torch.optim.Optimizer):
                     # Nesterov momentum
                     update = grad.lerp(mt_buf, beta1)
                 elif Simplified_AdEMAMix:
-                    update = torch.add(mt_buf, grad, alpha=alpha_grad)
+                    update = mt_buf.add(grad, alpha=alpha_grad)
                 else:
                     # Standard momentum
                     update = mt_buf.clone()
+
+                set_state(state, 'momentum_buffer', mt_buf, actual_precision, random_int_state_tensor)
 
                 # Flatten if necessary (e.g., for Conv layers)
                 update = update.flatten(1)
@@ -554,7 +574,7 @@ class Muon_adv(torch.optim.Optimizer):
 
                 if group.get('spectral_normalization', False):
                     # Spectral Normalization
-                    spectral_norm_update(update, state['spectral_v'], spectral_target, lr)
+                    spectral_normalization(update, state['spectral_v'], lr / group['n_layers'])
                 else:
                     # RMS-aligned rescaling
                     rms_adjustment(update, group['rms_rescaling'], lr)
