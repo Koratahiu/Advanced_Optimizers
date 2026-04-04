@@ -297,7 +297,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
             dtype = torch.float32 if (state['factored'] or req_precision == 'factored') else p.dtype
 
-            vt_dtype = torch.float32 if (state['factored'] or state['factored_2nd'] or req_precision == 'factored') else dtype
+            vt_dtype = torch.float32 if (state['factored'] or state['factored_2nd'] or req_precision in ['factored', 'bf16_sr', 'fp8_sr', 'uint8_sr']) else dtype
             vt_init = grad.pow(2).to(vt_dtype)
             if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
                 vt_init.mul_(beta2).addcmul_(grad.to(vt_dtype), grad.to(vt_dtype) * (1.0 - beta2))
