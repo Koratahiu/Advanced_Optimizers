@@ -60,8 +60,11 @@ def _get_fisher_wd_scaler(group: dict, stored_scaler: torch.Tensor, p: torch.Ten
     # Reshape scaler if necessary to match parameter shape (for factored states)
     wd_scaler = wd_scaler.view(p.shape)
 
-    gw_rms = torch.sqrt(torch.mean((p * wd_scaler) ** 2))
-    clip_coef = torch.clamp(gw_rms / 1.0, min=1.0)
+    if not atan2:
+        gw_rms = torch.sqrt(torch.mean((p * wd_scaler) ** 2))
+        clip_coef = torch.clamp(gw_rms / 1.0, min=1.0)
+    else:
+        clip_coef = 1
     return wd_scaler / clip_coef
 
 def _get_l1_adaptive_lr(
