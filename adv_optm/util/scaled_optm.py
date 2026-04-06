@@ -38,13 +38,12 @@ def scale_update(
         # Calculate block size (b)
         b = (1 + math.sqrt(1 + 8 * n)) / 2
         target_norm = math.sqrt(b / 8)
-        scale = target_norm / math.sqrt(n)
-        return rms_normalization(update, dim=1, lr=lr * scale)
+        return l2_normalization(update, dim=1, lr=lr * target_norm)
 
     # LoRA Factors or Full Finetuning weights
     # Scales update to maintain consistent spectral norm across different layer sizes and ranks.
     if p.ndim >= 2:
-        return spectral_normalization(update, vector_state, lr/depth)
+        return spectral_normalization(update, vector_state, lr, depth)
 
     return update.mul_(lr)
 
@@ -54,10 +53,9 @@ def scale_eps(group: dict, p) -> float:
     Scales Adam eps to be scale-invariant.
     """
     if group.get('scaled_optm', False):
-        if getattr(p, '_is_lora_A', False) or getattr(p, '_is_dora_scale', False) or getattr(p, '_is_oft', False) or p.ndim < 2:
+        if getattr(p, '_is_dora_scale', False) or getattr(p, '_is_oft', False) or p.ndim < 2:
             # No depth scaling for:
-            # - lora_A: non-zero init, different gradient dynamics than B
-            # - 1D params (biases, norms, DoRA scales): additive, don't compound through depth.
+            # - 1D params (biases, norms, DoRA scales): don't compound through depth.
             adaptive_eps = (1.0 / math.sqrt(p.numel()))
         else:
             adaptive_eps = (1.0 / group['n_layers']) * (1.0 / math.sqrt(p.numel()))
@@ -94,6 +92,10 @@ def scale_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
     Scales standard weight decay and centered weight decay based on the parameter's
     shape and type to maintain effective regularization strength.
     """
+    is_lora = getattr(p, '_is_lora_A', False) or getattr(p, '_is_lora_B', False)
+    if is_lora:
+        return wd, cwd
+
     if p.ndim >= 2:
         fan_in = p.numel() // p.shape[0]
         return wd / fan_in, cwd / fan_in
@@ -105,8 +107,10 @@ def scale_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
 @torch.no_grad()
 def l2_normalization(update: torch.Tensor, dim: int | None, lr: float) -> torch.Tensor:
     """Performs L2 normalization on the update tensor."""
-    norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).clamp_min_(1e-12)
-    return update.mul_(lr / norm)
+    n = update.numel() if dim is None else update.shape[dim]
+    adaptive_eps = 1 / math.sqrt(n)
+    norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True)
+    return update.mul_(lr / norm.add_(adaptive_eps))
 
 
 @torch.no_grad()
@@ -134,7 +138,7 @@ def init_spectral_norm(group: dict, state: dict, p: torch.Tensor):
     state['spectral_v'] = v.div_(v.norm().clamp_min_(1e-12))
 
 @torch.no_grad()
-def spectral_normalization(update: torch.Tensor, vector_state: torch.Tensor, lr: float) -> torch.Tensor:
+def spectral_normalization(update: torch.Tensor, vector_state: torch.Tensor, lr: float, depth: int) -> torch.Tensor:
     """
     Applies Spectral Normalization via a single step of Power Iteration.
     Implementation follows: "Scalable Optimization in the Modular Norm" (arXiv:2405.14813).
@@ -144,7 +148,7 @@ def spectral_normalization(update: torch.Tensor, vector_state: torch.Tensor, lr:
     update = update.to(vector_state.dtype)
     update_flat = update.view(d_out, d_in)
     # Target scale derived from the "Modular Norm" paper
-    target_scale = math.sqrt(d_out / d_in)
+    target_scale = math.sqrt(d_out / d_in) / depth
     # Power Iteration step to estimate the largest singular value (sigma)
     # u = Wv
     u = torch.mv(update_flat, vector_state)
@@ -163,6 +167,9 @@ def spectral_normalization(update: torch.Tensor, vector_state: torch.Tensor, lr:
     # Calculate sigma (the spectral norm)
     sigma = torch.linalg.vector_norm(Av)
 
+    # Calculate scale-invariant eps: (1/L) * (1/sqrt(d_in) + 1/sqrt(d_out))
+    adaptive_eps = (1.0 / depth) * ((1.0 / math.sqrt(d_out)) + (1.0 / math.sqrt(d_in)))
+
     # Rescale update
-    scale = lr * (target_scale / sigma.clamp_min_(1e-12))
+    scale = lr * (target_scale / sigma.add_(adaptive_eps))
     return update.mul_(scale)

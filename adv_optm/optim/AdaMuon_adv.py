@@ -595,7 +595,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             step_scale = lr * A if group['use_atan2'] and not group['normuon_variant'] else lr
             # Spectral Normalization
             if group.get('spectral_normalization', False):
-                spectral_normalization(update, state['spectral_v'], step_scale/group['n_layers'])
+                spectral_normalization(update, state['spectral_v'], step_scale, group.get('n_layers', 1))
             else:
                 # Factored RMS-aligned scaling
                 rms_adjustment(update, group['rms_rescaling'], step_scale)
@@ -681,7 +681,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             if group.get('spectral_normalization', False):
                 # Spectral Normalization
-                spectral_normalization(update, state['spectral_v'], step_scale/group['n_layers'])
+                spectral_normalization(update, state['spectral_v'], step_scale, group.get('n_layers', 1))
             else:
                 # RMS-aligned rescaling
                 rms_adjustment(update, group['rms_rescaling'], step_scale)

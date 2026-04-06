@@ -519,7 +519,7 @@ class Muon_adv(torch.optim.Optimizer):
 
             if group.get('spectral_normalization', False):
                 # Spectral Normalization
-                spectral_normalization(update, state['spectral_v'], lr / group['n_layers'])
+                spectral_normalization(update, state['spectral_v'], lr, group.get('n_layers', 1))
             else:
                 # Factored RMS-aligned scaling
                 rms_adjustment(update, group['rms_rescaling'], lr)
@@ -574,7 +574,7 @@ class Muon_adv(torch.optim.Optimizer):
 
                 if group.get('spectral_normalization', False):
                     # Spectral Normalization
-                    spectral_normalization(update, state['spectral_v'], lr / group['n_layers'])
+                    spectral_normalization(update, state['spectral_v'], lr, group.get('n_layers', 1))
                 else:
                     # RMS-aligned rescaling
                     rms_adjustment(update, group['rms_rescaling'], lr)
