@@ -4,6 +4,8 @@ from torch import Tensor
 
 from typing import Dict, Any
 
+from ..util.Muon_util import newton_schulz
+
 def trangent_proj(p, update, lr):
     """
     [Stiefel-LoRA] Step 1: Tangent Space Projection
@@ -17,11 +19,9 @@ def trangent_proj(p, update, lr):
     rms_rescaling(update, lr)
     return update
 
-def qr_retraction(p):
-    """[Stiefel-LoRA] Step 2: Manifold Retraction (QR Decomposition)"""
-    Q, R = torch.linalg.qr(p)
-    d = R.diagonal().sign_()
-    Q *= d
+def newton_schulz_retraction(p):
+    """[Stiefel-LoRA] Step 2: Manifold Retraction (Newton-Schulz iteration)"""
+    Q = newton_schulz(p, steps=5)
     return p.copy_(Q)
 
 def rms_rescaling(update, lr):
@@ -77,10 +77,6 @@ def apply_stiefel_update(
         # Disable weight decay for the ortho matrix B or DoRA norm
         wd = 0
 
-    if is_A:
-        # For matrix A, normalize weight decay by rank to make it invariant
-        wd = wd / p.shape[0]
-
     scaled_wd = wd * (lr / self._init_lr)
 
     # Compute full update in float32 if using bfloat16 with stochastic rounding
@@ -91,7 +87,7 @@ def apply_stiefel_update(
         if is_B:
             update_fp32 = trangent_proj(p_fp32, update_fp32, lr)
             p_fp32.add_(-update_fp32)
-            p_fp32 = qr_retraction(p_fp32)
+            p_fp32 = newton_schulz_retraction(p_fp32)
             if random_int_tensor is not None:
                 _copy_stochastic_core_(p, p_fp32, random_int_tensor)
                 del random_int_tensor
@@ -130,7 +126,7 @@ def apply_stiefel_update(
         if is_B:
             update = trangent_proj(p, update, lr)
             p.add_(-update)
-            p = qr_retraction(p)
+            p = newton_schulz_retraction(p)
             return
 
         if wd != 0:

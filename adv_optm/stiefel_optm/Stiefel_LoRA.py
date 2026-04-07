@@ -1,86 +1,114 @@
 import torch
+import math
 
-from typing import Optional
+from typing import Optional, Callable
 
 from ..util import param_update
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
+from ..util.update_util import _grams_update, _cautious_update
+from ..util.OrthoGrad import _orthogonalize_gradient
+from ..util.Kourkoutas import KourkoutasHelper
 from . import stiefel_util
 
+A = 4 / math.pi
 
 class Stiefel_LoRA(torch.optim.Optimizer):
     """
-    Implements an advanced Stiefel_LoRA algorithm.
-
-    based on the paper:
-    ""
-    In disguise it's modified SignSGD with momentum (SignUM).
+    Implements an advanced Stiefel_LoRA algorithm built on top of AdamW_adv.
+    Computes Adam updates for both A and B factors, mapping the B updates to the Stiefel
+    manifold with Newton-Schulz retraction.
 
     Args:
-        params (iterable): iterable of parameters to optimize or dicts defining
-            parameter groups.
-        lr (float, optional): learning rate (default: 1e-4).
-        momentum (float, optional): coefficients for computing
-            running average of the gradients (default: 0.9).
-        weight_decay (float, optional): weight decay (L2 penalty) (default: 0.0).
-        cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
-            applied only to parameter coordinates where the sign of the parameter
-            and the sign of the optimizer update align (default: False).
-        vector_reshape (bool, optional): whether to reshape 1D vectors into 2D
-            matrices to apply low-rank compression (default: True).
-        stochastic_rounding (bool, optional): whether to use stochastic
-            rounding for BF16 parameter updates (default: True).
-        Simplified_AdEMAMix (bool): whether to use the Simplified AdEMAMix update rule.
-            This changes the EMA to accumulator and the update numerator to `alpha_grad * grad + mt`, which can be
-            more responsive, especially for small batch sizes. (default: False)
-        alpha_grad (float): Mixing coefficient for the Simplified AdEMAMix update rule
-            (only used when `Simplified_AdEMAMix` is `True`). Controls the weight of the
-            current gradient. For small batch sizes, use high values (e.g., 10-100) to be
-            more responsive. For large batch sizes, use low values (e.g., 0-1) for
-            stability. (default: 100.0)
-        nnmf_factor (bool): whether to use the factorization or use the
-            uncompressed optimizer. (default: True)
+        params (iterable): iterable of parameters to optimize or dicts defining parameter groups.
+        lr (float): learning rate (default: 1e-3)
+        betas (tuple[float, float]): coefficients used for computing running averages (default: (0.9, 0.999))
+        eps (float): term added to the denominator to improve numerical stability (default: 1e-8)
+        weight_decay (float): weight decay (L2 penalty) (default: 0).
+        cautious_wd (bool): Enables Cautious Weight Decay.
+        use_bias_correction (bool): whether to use bias correction for moment estimates.
+        vector_reshape (bool): reshape 1D vectors into 2D matrices to apply low-rank compression.
+        stochastic_rounding (bool): use stochastic rounding for BF16 parameter updates.
+        use_atan2 (bool): whether to use the atan2 update rule. (default: False)
+        grams_moment (bool): whether to use Grams-style updates. (default: False)
+        cautious_mask (bool): use cautious masking to align gradient direction. (default: False)
+        orthogonal_gradient (bool): whether to use OrthoGrad. (default: False)
+        use_AdEMAMix (bool): whether to enable the AdEMAMix feature. (default: False)
+        beta3_ema (float): The decay rate for the slow exponential moving average of AdEMAMix.
+        alpha (float): The mixing coefficient for AdEMAMix.
+        kourkoutas_beta (bool): whether to enable the layer-wise dynamic β₂ logic. (default: False)
+        beta2_min (float): The minimum value for dynamic β₂.
+        ema_alpha (float): The decay rate for the EMA of the pooled gradient norms.
+        tiny_spike (float): Small constant to prevent division by zero in "sunspike" calculation.
+        k_warmup_steps (int): Initial steps during which β₂ is held fixed.
+        k_logging (int): if > 0 and kourkoutas_beta=True, enables periodic console logging.
+        layer_key_fn (Optional[Callable]): function for Kourkoutas bucket mapping.
+        nnmf_factor (bool): whether to use factorization (SMMF). (default: False)
     """
 
     def __init__(
         self,
         params,
-        lr: float = 1e-4,
-        momentum: float = 0.9,
-        # Decoupled/cautious weight decay
+        lr: float = 1e-3,
+        betas: tuple[float, float] = (0.9, 0.999),
+        eps: float = 1e-8,
         weight_decay: float = 0.0,
         cautious_wd: bool = False,
-        # Stochastic Rounding for BF16
+        use_bias_correction: bool = True,
         stochastic_rounding: bool = True,
-        # Simplified_AdEMAMix
-        alpha_grad: float = 1.0,
-        Simplified_AdEMAMix: bool = False,
-        # SMMF factorization
+        use_atan2: bool = False,
+        cautious_mask: bool = False,
+        grams_moment: bool = False,
+        orthogonal_gradient: bool = False,
+        use_AdEMAMix: bool = False,
+        beta3_ema: float = 0.9999,
+        alpha: float = 5.0,
+        kourkoutas_beta: bool = False,
+        beta2_min: float = 0.9,
+        ema_alpha: float = 0.95,
+        tiny_spike: float = 1e-9,
+        k_warmup_steps: int = 0,
+        k_logging: int = 0,
+        layer_key_fn: Optional[Callable] = None,
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
-        # torch.compile
         compiled_optimizer: bool = False,
     ):
-        if not lr > 0.0:
-            raise ValueError(f"Learning rate must be > 0.0, but got {lr}")
-        if not 0.0 <= momentum <= 1.0:
-            raise ValueError(f"momentum should be in [0.0, 1.0], but got {momentum}")
-        if not weight_decay >= 0.0:
-            raise ValueError(f"Weight decay must be >= 0.0, but got {weight_decay}")
+        if not (lr >= 0.0):
+            raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
+        if not (0.0 <= betas[0] < 1.0 and 0.0 <= betas[1] < 1.0):
+            raise ValueError(f"Betas should be in [0.0, 1.0). Got {betas}")
+        if not (eps >= 0.0):
+            raise ValueError(f"Epsilon should be >= 0.0. Got {eps}")
+        if not (weight_decay >= 0.0):
+            raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
+        if kourkoutas_beta and not (betas[1] > beta2_min):
+            raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
 
-        defaults = dict(
-            lr=lr,
-            momentum=momentum,
-            weight_decay=weight_decay,
-            cautious_wd=cautious_wd,
-            vector_reshape=vector_reshape,
-            alpha_grad=alpha_grad,
-            Simplified_AdEMAMix=Simplified_AdEMAMix,
-            nnmf_factor=nnmf_factor,
-        )
+        if cautious_mask and grams_moment:
+            print("Warning: cautious is incompatible with grams, Disabling cautious.")
+            cautious_mask = False
+
+        defaults = {
+            "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
+            "vector_reshape": vector_reshape, "use_atan2": use_atan2,
+            "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
+            "beta3_ema": beta3_ema, "alpha": alpha, "compiled_optimizer": compiled_optimizer,
+            "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
+            "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
+            "nnmf_factor": nnmf_factor
+        }
         self.stochastic_rounding = stochastic_rounding
+        self.cautious_mask = cautious_mask
+        self.grams_moment = grams_moment
+        self.use_AdEMAMix = use_AdEMAMix
+        self.kourkoutas_beta = kourkoutas_beta
+        self.layer_key_fn = layer_key_fn
         self._init_lr = lr
 
         super().__init__(params, defaults)
+
+        if self.kourkoutas_beta:
+            self.kourkoutas_helper = KourkoutasHelper(self)
 
         if self.stochastic_rounding:
             # For deterministic stochastic rounding, we need to seed the generator
@@ -116,99 +144,201 @@ class Stiefel_LoRA(torch.optim.Optimizer):
         state = self.state[p]
 
         # State Initialization
-        if group["momentum"] > 0 and len(state) == 0:
+        if 'step' not in state:
+            state['step'] = 0
+
             state['factored'] = (
                 group['nnmf_factor'] and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
             )
 
             dtype = torch.float32 if state['factored'] else p.dtype
+            device = p.device
 
             if state['factored']:
                 state['effective_shape'] = _get_effective_shape(p.numel())
                 d1, d2 = state['effective_shape']
-                state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
-                state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                packed_d2 = (d2 + 7) // 8
-                state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
-            else:
-                state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
 
-        lr = group["lr"]
+                # First moment (m)
+                if group['betas'][0] > 0:
+                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
+                    state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+                    packed_d2 = (d2 + 7) // 8
+                    state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                # AdEMAMix slow moment (m_slow)
+                if self.use_AdEMAMix:
+                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
+                    state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
+                    packed_d2 = (d2 + 7) // 8
+                    state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+                # Second moment (v)
+                state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
+                state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+            else:  # Fallback to standard AdamW logic
+                # First moment
+                if group['betas'][0] > 0:
+                    state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
+                # AdEMAMix slow moment
+                if self.use_AdEMAMix:
+                    state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
+                # Second moment (v)
+                state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
+
+        beta1, beta2 = group['betas']
+
+        current_step = state['step']
+        if group.get('kourkoutas_beta', False):
+            # Call prepare_step() once at the beginning of the step for all params
+            self.kourkoutas_helper.maybe_prepare_step(current_step, p.device)
+            # Get the dynamic beta2 calculated in prepare_step()
+            beta2 = self.kourkoutas_helper.get_beta2(p, group)
+
+        if group['use_bias_correction']:
+            step = current_step + 1
+            bias_correction1 = 1.0 - beta1 ** step
+            sqrt_bias_correction2 = (1.0 - group['betas'][1] ** step) ** 0.5
+        else:
+            bias_correction1 = 1
+            sqrt_bias_correction2 = 1
+        step_size = group['lr'] / bias_correction1
 
         random_int_tensor = None
 
         if group.get('compiled_optimizer', False):
+            step_size = torch.as_tensor(step_size, dtype=torch.float64)
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
-            lr = torch.as_tensor(lr, dtype=torch.float64)
             step_param_fn = self._compiled_step_parameter
         else:
             step_param_fn = self._step_parameter
 
-        step_param_fn(p, grad, state, group, lr, random_int_tensor)
+        step_param_fn(p, grad, state, group, step_size, beta1, beta2, sqrt_bias_correction2, random_int_tensor)
 
-    def _step_parameter(self, p, grad, state, group, lr, random_int_tensor):
+        state['step'] += 1
+
+    def _step_parameter(self, p, grad, state, group, step_size, beta1, beta2, sqrt_bias_correction2, random_int_tensor):
         if grad.dtype != torch.float32 and state['factored']:
             grad = grad.float()
+        if group["orthogonal_gradient"]:
+            grad = _orthogonalize_gradient(p, grad)
 
-        is_stiefel, is_stiefel_euclidean, is_scale = stiefel_util.set_flags_AB(p)
+        # Flag B or A matrices to apply distinct Stiefel update paths at the very end
+        is_B, is_A, is_scale = stiefel_util.set_flags_AB(p)
 
-        momentum = group["momentum"]
-        Simplified_AdEMAMix = group["Simplified_AdEMAMix"]
-        alpha_grad = group["alpha_grad"]
+        if self.use_AdEMAMix:
+            beta3_ema = group['beta3_ema']
+            alpha = group['alpha']
 
-        if state.get('factored'):
-            # Factored Path
+        if group.get('kourkoutas_beta', False):
+            # Accumulate current grad's norm for the *next* step
+            self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
+
+        if state['factored']:
             d1, d2 = state['effective_shape']
             grad_reshaped = grad.view(d1, d2)
 
-            if momentum > 0:
-                # Reconstruct momentum m_{t-1}
-                exp_avg = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
-                exp_avg.mul_(momentum).add_(grad_reshaped)
+            # Reconstruct momentum from previous step's factors
+            if beta1 > 0:
+                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
-                if Simplified_AdEMAMix:
-                    raw_update = exp_avg + (grad_reshaped * alpha_grad)
+                # Update momentum in full-size
+                mt.lerp_(grad_reshaped, 1.0 - beta1)
+
+                # Factorize
+                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
+
+                if self.grams_moment:
+                    update_mt = _grams_update(mt, grad_reshaped, inplace=True)
+                elif self.cautious_mask:
+                    update_mt = _cautious_update(mt, grad_reshaped, inplace=True)
                 else:
-                    raw_update = exp_avg.clone()
+                    update_mt = mt
 
-                # Compress new momentum m_t and store factors
-                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True)
-            else:
-                raw_update = grad_reshaped.clone()
+            vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
+            vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
 
-            raw_update = raw_update.view(p.shape)
+            if self.use_AdEMAMix:
+                mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
 
-        else:
-            # Fallback to standard SignSGD logic
-            if momentum > 0:
-                exp_avg = state["exp_avg"]
-                exp_avg.mul_(momentum).add_(grad)
+                mt_slow.lerp_(grad_reshaped, 1.0 - beta3_ema)
 
-                if Simplified_AdEMAMix:
-                    raw_update = exp_avg + (grad * alpha_grad)
+                if beta1 > 0:
+                    update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
-                    raw_update = exp_avg.clone()
+                    update = grad_reshaped.add(mt_slow, alpha=alpha)
+                # Factorize
+                state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
+                del mt_slow
             else:
-                raw_update = grad.clone()
+                if beta1 > 0:
+                    update = update_mt
+                else:
+                    update = grad_reshaped.clone()
 
-        if is_stiefel:
-            update = raw_update
-        else:
-            update = raw_update.sign_()
+            # Factorize
+            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
 
-        if not is_stiefel:
-            # The RMS of a sign() tensor is 1.
-            # We scale it to 0.2 to match the approx RMS of AdamW
-            update = update.mul_(lr * 0.2)
+            if group['use_atan2']:
+                denom = vt.sqrt_()
+                denom.div_(sqrt_bias_correction2)
+                update.atan2_(denom)
+            else:
+                denom = vt.sqrt_()
+                denom.div_(sqrt_bias_correction2).add_(group['eps'])
+                update.div_(denom)
+            del vt
 
+            update_scaling = step_size * A if group['use_atan2'] else step_size
+            update = update.view(p.shape).mul_(update_scaling)
+
+        else:  # Standard AdamW logic for non-factored tensors
+            if beta1 > 0:
+                exp_avg = state['exp_avg']
+                exp_avg.lerp_(grad, 1.0 - beta1)
+
+                if self.grams_moment:
+                    update_mt = _grams_update(exp_avg, grad)
+                elif self.cautious_mask:
+                    update_mt = _cautious_update(exp_avg, grad)
+                else:
+                    update_mt = exp_avg.clone()
+
+            if self.use_AdEMAMix:
+                exp_avg_slow = state['exp_avg_slow']
+                exp_avg_slow.lerp_(grad, 1.0 - beta3_ema)
+
+                if beta1 > 0:
+                    update = update_mt.add_(exp_avg_slow, alpha=alpha)
+                else:
+                    update = torch.add(grad, exp_avg_slow, alpha=alpha)
+            else:
+                update = update_mt if beta1 > 0 else grad.clone()
+
+            exp_avg_sq = state['exp_avg_sq']
+            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+            if group['use_atan2']:
+                denom = exp_avg_sq.sqrt()
+                denom.div_(sqrt_bias_correction2)
+                update.atan2_(denom)
+            else:
+                denom = exp_avg_sq.sqrt()
+                denom.div_(sqrt_bias_correction2).add_(group['eps'])
+                update.div_(denom)
+            del denom
+
+            update_scaling = step_size * A if group['use_atan2'] else step_size
+            update.mul_(update_scaling)
+
+        # Apply using Stiefel mechanism
+        # The Adam update for B gets projected onto the tangent space, followed by NS retraction.
+        # The Adam update for A gets passed through cleanly.
         stiefel_util.apply_stiefel_update(
-            self, p, group, update, lr,
-            random_int_tensor=random_int_tensor, 
-            is_B=is_stiefel,
-            is_A=is_stiefel_euclidean,
+            self, p, group, update, step_size,
+            random_int_tensor=random_int_tensor,
+            is_B=is_B,
+            is_A=is_A,
             is_scale=is_scale
         )
 
