@@ -9,7 +9,8 @@ from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
-from ..util.update_util import _grams_update, _cautious_update, _scale_sim_AdEMAMix_update
+from ..util.update_util import _grams_update, _cautious_update, _scale_sim_AdEMAMix_update, _init_fisher_wd_scaler, _get_fisher_wd_scaler
+from ..util.centered_decay import _init_anchor
 
 A = 4 / math.pi
 
@@ -28,6 +29,9 @@ class Prodigy_adv(torch.optim.Optimizer):
         eps (float): term added to the denominator to improve
             numerical stability (default: 1e-8)
         weight_decay (float): weight decay (L2 penalty) (default: 0)
+        fisher_wd (bool): whether to use Fisher Adam (FAdam) weight decay, mapping
+            the decay direction through the empirical Fisher information matrix and
+            clipping its RMS. (default: False)
         cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
             applied only to parameter coordinates where the sign of the parameter
             and the sign of the optimizer update align (default: False).
@@ -66,6 +70,8 @@ class Prodigy_adv(torch.optim.Optimizer):
             stability. (default: 100.0)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
+        factored_2nd (bool): whether to keep the first moment uncompressed (dense)
+            while only factorizing the second moment. (default: True)
         d0 (float):
             Initial D estimate for D-adaptation (default 1e-6). Rarely needs changing.
         d_coef (float):
@@ -111,6 +117,15 @@ class Prodigy_adv(torch.optim.Optimizer):
             and returns a unique, hashable key representing its "layer" or "bucket".
             If `None`, parameters are bucketed by their memory ID (tensor-wise).
             (default: None)
+        centered_wd (float): Centered Weight Decay coefficient. Instead of decaying weights
+            toward zero, they are decayed toward their initial values (anchors). This
+            can be used together with standard weight decay. (default: 0.0)
+        centered_wd_mode (str): The quantization format used to store the anchor
+            weights to save VRAM. Options include:
+            'full': Stores anchors in the original parameter's precision.
+            'float8': Uses torch.float8_e4m3fn for a balance of precision and memory.
+            'int8': Uses 8-bit block-wise quantization (block size 128).
+            'int4': Uses 4-bit block-wise quantization (block size 32).
     """
 
     def __init__(
@@ -121,6 +136,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         eps: float = 1e-8,
         # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
+        fisher_wd: bool = False,
         cautious_wd: bool = False,
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
@@ -141,6 +157,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
+        factored_2nd: bool = False,
         # torch.compile
         compiled_optimizer: bool = False,
         # prodigy parameters
@@ -161,6 +178,9 @@ class Prodigy_adv(torch.optim.Optimizer):
         k_warmup_steps: int = 0,
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
+        # Centered WD
+        centered_wd: float = 0.0,
+        centered_wd_mode: str = 'float8',
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -190,8 +210,9 @@ class Prodigy_adv(torch.optim.Optimizer):
             raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
 
         defaults = {
-            "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
-            "vector_reshape": vector_reshape, "use_atan2": use_atan2,
+            "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
+            "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
+            "use_atan2": use_atan2,
             "orthogonal_gradient": orthogonal_gradient,
             "beta3_ema": beta3_ema, "alpha": alpha, "compiled_optimizer": compiled_optimizer,
             "beta3": beta3, "d": d0, "d0": d0, "d_max": d0, "d_numerator": 0.0, "d_coef": d_coef,
@@ -200,7 +221,8 @@ class Prodigy_adv(torch.optim.Optimizer):
             "alpha_grad": alpha_grad,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
-            "nnmf_factor": nnmf_factor,
+            "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
+            "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape, "factored_2nd": factored_2nd
         }
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask and not Simplified_AdEMAMix
@@ -234,6 +256,16 @@ class Prodigy_adv(torch.optim.Optimizer):
 
         if compiled_optimizer:
             self.compile(fullgraph=True)
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        """
+        Overrides default load_state_dict to implement a workaround for PyTorch's
+        automatic dtype casting. It ensures factorized states remain float32 for
+        stability, preserves integer/float8 quantized anchor states, and forces
+        standard states onto the parameter's current dtype/device.
+        """
+        super().load_state_dict(state_dict)
+        param_update.post_process_loaded_state(self)
 
     @property
     def supports_fused_back_pass(self):
@@ -278,6 +310,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             state['factored'] = (
                 group['nnmf_factor'] and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
+                or group["factored_2nd"]
             )
 
             slice_p = group['slice_p']
@@ -289,17 +322,24 @@ class Prodigy_adv(torch.optim.Optimizer):
                 state['effective_shape'] = _get_effective_shape(p.numel())
                 d1, d2 = state['effective_shape']
 
-                # First moment (m)
-                if self.beta1 > 0:
-                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
-                    state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
-                    packed_d2 = (d2 + 7) // 8
-                    state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
-                if self.use_AdEMAMix:
-                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
-                    state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
-                    packed_d2 = (d2 + 7) // 8
-                    state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+                if not group.get('factored_2nd', False):
+                    # First moment (m)
+                    if self.beta1 > 0:
+                        state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
+                        state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+                        packed_d2 = (d2 + 7) // 8
+                        state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                    if self.use_AdEMAMix:
+                        state['mu_m_slow_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
+                        state['mv_m_slow_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+                        packed_d2 = (d2 + 7) // 8
+                        state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                else:
+                    if self.beta1 > 0:
+                        state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
+                    if self.use_AdEMAMix:
+                        state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
+
                 # Second moment (v)
                 state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                 state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
@@ -316,6 +356,10 @@ class Prodigy_adv(torch.optim.Optimizer):
                 state['p0'] = p.flatten()[::slice_p].detach().clone()
             else:
                 state['p0'] = torch.tensor(0, device=device, dtype=p.dtype)
+
+            _init_anchor(p, state, group)
+
+            _init_fisher_wd_scaler(group, state, p)
 
         if not hasattr(self, 'd_denom'):
             self.d_denom = torch.tensor(0.0, device=p.device)
@@ -339,15 +383,15 @@ class Prodigy_adv(torch.optim.Optimizer):
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
             # TODO, workaround until pytorch#169634 is fixed
-            d = torch.as_tensor(group['d'], dtype=torch.float64)
-            dlr = torch.as_tensor(dlr, dtype=torch.float64)
+            d = torch.as_tensor(group['d'])
+            dlr = torch.as_tensor(dlr)
             step_param_fn = self._compiled_step_parameter
         else:
             d = group['d']
             step_param_fn = self._step_parameter
 
         if self.Simplified_AdEMAMix:
-            dlr = _scale_sim_AdEMAMix_update(self.beta1, state['step'] + 1, group["alpha_grad"], dlr)
+            dlr = _scale_sim_AdEMAMix_update(self.beta1, state['step'] + 1, group["alpha_grad"], dlr, False)
 
         step_param_fn(p, grad, state, group, beta2, d, dlr, random_int_tensor)
 
@@ -369,13 +413,19 @@ class Prodigy_adv(torch.optim.Optimizer):
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
 
+        # Determine if we are using dense first-moments alongside a factored second-order second-moment
+        factored_2nd = group.get('factored_2nd', False)
+
         if state['factored']:
             d1, d2 = state['effective_shape']
             grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct momentum from previous step's factors
             if self.beta1 > 0:
-                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
+                if factored_2nd:
+                    mt = state['exp_avg'].view(d1, d2)
+                else:
+                    mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
                 # Update momentum in full-size
                 if self.Simplified_AdEMAMix:
@@ -385,30 +435,39 @@ class Prodigy_adv(torch.optim.Optimizer):
 
                 mt.mul_(self.beta1).add_(grad_reshaped, alpha=alpha_mt)
 
-                # Factorize
-                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
+                if not factored_2nd:
+                    # Factorize
+                    state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
 
                 if self.grams_moment:
-                    update_mt = _grams_update(mt, grad_reshaped, inplace=True)
+                    update_mt = _grams_update(mt, grad_reshaped, inplace=not factored_2nd)
                 elif self.cautious_mask:
-                    update_mt = _cautious_update(mt, grad_reshaped, inplace=True)
+                    update_mt = _cautious_update(mt, grad_reshaped, inplace=not factored_2nd)
                 else:
-                    update_mt = mt
+                    update_mt = mt if not factored_2nd else mt.clone()
 
             vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
-            vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=d * d * (1.0 - beta2))
+            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
+                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped * (d * d * (1.0 - beta2)))
+            else:
+                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=d * d * (1.0 - beta2))
 
             if self.use_AdEMAMix:
-                mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
+                if factored_2nd:
+                    mt_slow = state['exp_avg_slow'].view(d1, d2)
+                else:
+                    mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
 
                 mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=d * (1.0 - beta3_ema))
                 if self.beta1 > 0:
                     update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
                     update = grad_reshaped.mul(d).add_(mt_slow, alpha=alpha)
-                # Factorize
-                state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
-                del mt_slow
+
+                if not factored_2nd:
+                    # Factorize
+                    state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
+                    del mt_slow
             elif self.Simplified_AdEMAMix:
                 update = update_mt.add_(grad_reshaped, alpha=alpha_grad * d)
             else:
@@ -426,6 +485,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             else:
                 denom = vt.sqrt_()
                 update.div_(denom.add_(d * group['eps']))
+            wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, group['use_atan2'])
             del vt
 
             update_scaling = dlr * A if group['use_atan2'] else dlr
@@ -465,7 +525,10 @@ class Prodigy_adv(torch.optim.Optimizer):
                     update = grad.mul(d)
 
             exp_avg_sq = state['exp_avg_sq']
-            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=d * d * (1.0 - beta2))
+            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad * (d * d * (1.0 - beta2)))
+            else:
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=d * d * (1.0 - beta2))
 
             if group['use_atan2']:
                 denom = exp_avg_sq.sqrt()
@@ -473,6 +536,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             else:
                 denom = exp_avg_sq.sqrt()
                 update.div_(denom.add_(d * group['eps']))
+            wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, group['use_atan2'])
             del denom
 
             update_scaling = dlr * A if group['use_atan2'] else dlr
@@ -502,7 +566,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             if 'p0' in state:
                 del state['p0']
 
-        param_update.apply_parameter_update(self, p, group, update, dlr, random_int_tensor=random_int_tensor)
+        param_update.apply_parameter_update(self, p, group, update, dlr, random_int_tensor=random_int_tensor, wd_scaler=wd_scaler)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)

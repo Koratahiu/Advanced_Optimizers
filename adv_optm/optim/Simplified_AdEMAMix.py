@@ -8,6 +8,8 @@ from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.update_util import _scale_sim_AdEMAMix_update
+from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
+from ..util.centered_decay import _init_anchor
 
 # A little helper from the original simplified_AdEMAMix
 def linear_hl_warmup_scheduler(step, beta_end, beta_start=0, warmup=1):
@@ -73,8 +75,19 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             and returns a unique, hashable key representing its "layer" or "bucket".
             If `None`, parameters are bucketed by their memory ID (tensor-wise).
             (default: None)
+        centered_wd (float): Centered Weight Decay coefficient. Instead of decaying weights
+            toward zero, they are decayed toward their initial values (anchors). This
+            can be used together with standard weight decay. (default: 0.0)
+        centered_wd_mode (str): The quantization format used to store the anchor
+            weights to save VRAM. Options include:
+            'full': Stores anchors in the original parameter's precision.
+            'float8': Uses torch.float8_e4m3fn for a balance of precision and memory.
+            'int8': Uses 8-bit block-wise quantization (block size 128).
+            'int4': Uses 4-bit block-wise quantization (block size 32).
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
+        factored_2nd (bool): whether to keep the first moment uncompressed (dense)
+            while only factorizing the second moment. (default: True)
     """
 
     def __init__(
@@ -104,9 +117,15 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         k_warmup_steps: int = 0,
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
+        # Centered WD
+        centered_wd: float = 0.0,
+        centered_wd_mode: str = 'float8',
+        # Scaled Optimizer
+        scaled_optm: bool = False,
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
+        factored_2nd: bool = False,
         # torch.compile
         compiled_optimizer: bool = False,
     ):
@@ -126,15 +145,17 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
             "alpha_grad": alpha_grad, "beta1_warmup": beta1_warmup, "min_beta1": min_beta1,
-            "vector_reshape": vector_reshape,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
-            "nnmf_factor": nnmf_factor,
+            "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
+            "scaled_optm": scaled_optm,
+            "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape,"factored_2nd": factored_2nd
         }
         self.stochastic_rounding = stochastic_rounding
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
+        self._init_lr = lr
         super().__init__(params, defaults)
 
         if self.kourkoutas_beta:
@@ -151,6 +172,16 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         self._compiled_step_parameter = None
         if compiled_optimizer:
             self.compile(fullgraph=True)
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        """
+        Overrides default load_state_dict to implement a workaround for PyTorch's
+        automatic dtype casting. It ensures factorized states remain float32 for
+        stability, preserves integer/float8 quantized anchor states, and forces
+        standard states onto the parameter's current dtype/device.
+        """
+        super().load_state_dict(state_dict)
+        param_update.post_process_loaded_state(self)
 
     @property
     def supports_fused_back_pass(self):
@@ -179,6 +210,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             state['factored'] = (
                 group['nnmf_factor'] and
                 not (len(p.shape) == 1 and not group['vector_reshape'])
+                or group["factored_2nd"]
             )
 
             dtype = torch.float32 if state['factored'] else p.dtype
@@ -188,11 +220,15 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
                 state['effective_shape'] = _get_effective_shape(p.numel())
                 d1, d2 = state['effective_shape']
 
-                # First moment (m)
-                state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
-                state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
-                packed_d2 = (d2 + 7) // 8
-                state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                if not group.get('factored_2nd', False):
+                    # First moment (m)
+                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
+                    state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+                    packed_d2 = (d2 + 7) // 8
+                    state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                else:
+                    state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
+
                 # Second moment (v)
                 state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                 state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
@@ -206,6 +242,11 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             else:
                 state['num_sum'] = 1.0
                 state['den_sum'] = 1.0
+
+            if group.get('scaled_optm', False) and is_spectral(p):
+                init_spectral_norm(group, state, p)
+
+            _init_anchor(p, state, group)
 
         beta1_final, beta2 = group["betas"]
 
@@ -238,7 +279,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
         lr = group["lr"]
 
-        lr = _scale_sim_AdEMAMix_update(beta1, state['step'] + 1, group["alpha_grad"], lr)
+        lr = _scale_sim_AdEMAMix_update(beta1, state['step'] + 1, group["alpha_grad"], lr, group.get('scaled_optm', False))
 
         random_int_tensor = None
 
@@ -247,7 +288,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
             # TODO, workaround until pytorch#169634 is fixed
-            lr = torch.as_tensor(lr, dtype=torch.float64)
+            lr = torch.as_tensor(lr)
             step_param_fn = self._compiled_step_parameter
         else:
             step_param_fn = self._step_parameter
@@ -263,26 +304,34 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             grad = _orthogonalize_gradient(p, grad)
 
         alpha_grad = group["alpha_grad"]
+        factored_2nd = group.get('factored_2nd', False)
 
         if state['factored']:
             d1, d2 = state['effective_shape']
             grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct momentum from previous step's factors
-            mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
+            if factored_2nd:
+                mt = state['exp_avg'].view(d1, d2)
+            else:
+                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
             # Update momentum in full-size
             mt.mul_(beta1).add_(grad_reshaped)
 
             vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
-            vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
+            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
+                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped * (1.0 - beta2))
+            else:
+                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
 
             # update = mt + (grad_reshaped * alpha_grad)
             update = torch.add(mt, grad_reshaped, alpha=alpha_grad)
 
-            # Factorize
-            state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
-            del mt
+            if not factored_2nd:
+                # Factorize
+                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt, signed=True)
+                del mt
 
             # Factorize
             state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
@@ -291,7 +340,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             update.div_(denom)
             del vt
 
-            update = update.view(p.shape).mul_(lr * sqrt_den_num)
+            update = update.view(p.shape)
 
         else:  # Standard optimizer logic for non-factored tensors
             exp_avg_sq = state['exp_avg_sq']
@@ -301,12 +350,18 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
             update = torch.add(exp_avg, grad, alpha=alpha_grad)
 
-            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad * (1.0 - beta2))
+            else:
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
 
             denom = exp_avg_sq.sqrt().add_(sqrt_den_eps)
             update.div_(denom)
             del denom
 
+        if group.get('scaled_optm', False):
+            update = scale_update(p, update, lr * sqrt_den_num, vector_state=state.get('spectral_v'))
+        else:
             update.mul_(lr * sqrt_den_num)
 
         param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)

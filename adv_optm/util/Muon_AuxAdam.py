@@ -6,6 +6,7 @@ from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.update_util import _grams_update, _cautious_update
+from ..util.centered_decay import _init_anchor
 
 A = 4 / math.pi
 
@@ -46,6 +47,8 @@ def _init_auxadam_state(self, p, group):
             state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
         state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
 
+    _init_anchor(p, state, group)
+
 
 @torch.no_grad()
 def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sqrt_bias_correction2, step_size, random_int_tensor):
@@ -84,7 +87,10 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
                 update_mt = mt
 
         vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
-        vt.mul_(beta2_adam).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2_adam)
+        if isinstance(beta2_adam, torch.Tensor) and beta2_adam.dim() > 0:
+            vt.mul_(beta2_adam).addcmul_(grad_reshaped, grad_reshaped * (1.0 - beta2_adam))
+        else:
+            vt.mul_(beta2_adam).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2_adam)
 
         if group.get('adam_use_AdEMAMix'):
             mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
@@ -145,7 +151,10 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
             update = update_mt if beta1_adam > 0 else grad.clone()
 
         exp_avg_sq = state['exp_avg_sq']
-        exp_avg_sq.mul_(beta2_adam).addcmul_(grad, grad, value=1 - beta2_adam)
+        if isinstance(beta2_adam, torch.Tensor) and beta2_adam.dim() > 0:
+            exp_avg_sq.mul_(beta2_adam).addcmul_(grad, grad * (1.0 - beta2_adam))
+        else:
+            exp_avg_sq.mul_(beta2_adam).addcmul_(grad, grad, value=1.0 - beta2_adam)
 
         if group.get('adam_use_atan2'):
             denom = exp_avg_sq.sqrt()
