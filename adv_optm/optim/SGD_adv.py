@@ -9,6 +9,7 @@ from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 from ..util.centered_decay import _init_anchor
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
+from ..util.sinkhorn import apply_sr_sinkhorn
 
 class SGD_adv(torch.optim.Optimizer):
     """
@@ -63,6 +64,9 @@ class SGD_adv(torch.optim.Optimizer):
         stochastic_rounding: bool = True,
         # OrthoGrad
         orthogonal_gradient: bool = False,
+        # sinkhorn iterative
+        sinkhorn: bool = False,
+        sinkhorn_iterations: int = 5,
         # Spectral Normed Optimizer
         spectral_normalization: bool = False,
         # Centered WD
@@ -97,6 +101,7 @@ class SGD_adv(torch.optim.Optimizer):
             "decoupled_wd": decoupled_wd, "cautious_wd": cautious_wd,
             "orthogonal_gradient": orthogonal_gradient, 
             "compiled_optimizer": compiled_optimizer,
+            "sinkhorn": sinkhorn, "sinkhorn_iterations": sinkhorn_iterations,
             "spectral_normalization": spectral_normalization,
             "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
             "state_precision": state_precision,
@@ -248,6 +253,9 @@ class SGD_adv(torch.optim.Optimizer):
                 update = grad.clone()
 
             del random_int_state_tensor
+
+        if group['sinkhorn']:
+            update = apply_sr_sinkhorn(update, iters=group['sinkhorn_it'])
 
         update_scaling = step_size
         if group.get('spectral_normalization', False):
