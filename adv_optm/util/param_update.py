@@ -331,7 +331,6 @@ def _copy_int8_blockwise_stochastic_core_(
     target: torch.Tensor,
     source: torch.Tensor,
     scales: torch.Tensor,
-    mins: torch.Tensor,
     random_int_tensor: torch.Tensor | None,
     block_size: int = 2048,
     val_blocks: torch.Tensor | None = None,
@@ -353,7 +352,7 @@ def _copy_int8_blockwise_stochastic_core_(
 
     # Normalise to [0, 255] per block
     safe_scales = scales.float().clamp_min(1e-12).unsqueeze(1)  # (n_blocks, 1)
-    normalised = (val_blocks - mins.float().unsqueeze(1)) / safe_scales
+    normalised = (val_blocks) / safe_scales
 
     # Stochastic rounding: floor(x + u), u ~ U[0, 1) — unbiased for any sign
     if random_int_tensor is not None:
@@ -371,7 +370,6 @@ def copy_int8_blockwise_stochastic_(
     target: torch.Tensor,
     source: torch.Tensor,
     scales: torch.Tensor,
-    mins: torch.Tensor,
     block_size: int = 2048,
 ) -> None:
     """
@@ -379,7 +377,7 @@ def copy_int8_blockwise_stochastic_(
     """
     padded_numel = scales.shape[0] * block_size
     random_int_tensor = _get_random_int_for_8bit_sr(source, padded_numel)
-    _copy_int8_blockwise_stochastic_core_(target, source, scales, mins, random_int_tensor, block_size)
+    _copy_int8_blockwise_stochastic_core_(target, source, scales, random_int_tensor, block_size)
     del random_int_tensor
 
 

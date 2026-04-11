@@ -45,7 +45,7 @@ class SGD_adv(torch.optim.Optimizer):
         nnmf_factor (bool): whether to use factorization or disable it. (default: False)
         state_precision (str): Precision method for states. Options: 'auto'
             (parameter precision), 'fp32', 'factored' (SMMF low-rank FP32), 'bf16_sr',
-            'fp8_sr', 'uint8_sr'. (default: 'auto')
+            'fp8_sr', 'int8_sr'. (default: 'auto')
         compiled_optimizer (bool): Compiles the core step function using torch.compile
             for faster execution. (default: False)
     """
@@ -88,7 +88,7 @@ class SGD_adv(torch.optim.Optimizer):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
 
         state_precision = state_precision.lower()
-        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp8_sr", "uint8_sr"}
+        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp8_sr", "int8_sr"}
         if state_precision not in valid_precisions:
             raise ValueError(f"state_precision must be one of {valid_precisions}. Got {state_precision}")
 
@@ -192,8 +192,8 @@ class SGD_adv(torch.optim.Optimizer):
                 random_int_state_tensor = random_int_tensor
             if group['actual_state_precision'] == 'bf16_sr' and random_int_state_tensor is None:
                 random_int_state_tensor = param_update._get_random_int_for_sr(p)
-            elif group['actual_state_precision'] == 'uint8_sr':
-                random_int_state_tensor = param_update._get_random_int_for_uint8_sr(p)
+            elif group['actual_state_precision'] == 'int8_sr':
+                random_int_state_tensor = param_update._get_random_int_for_int8_sr(p)
             elif group['actual_state_precision'] == 'fp8_sr':
                 random_int_state_tensor = param_update._get_random_int_for_fp8_sr(p)
             step_param_fn = self._compiled_step_parameter

@@ -105,7 +105,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         use_muon (bool | None): whether to use Muon or AuxAdamW. MUST be provided
             either here or via `optim_type` in parameter groups. (default: None)
         state_precision (str): Precision for Muon optimizer states. Options: 'auto' (parameter dtype), 'fp32',
-            'bf16_sr' (BF16 with stochastic rounding), 'fp8_sr', 'uint8_sr'.
+            'bf16_sr' (BF16 with stochastic rounding), 'fp8_sr', 'int8_sr'.
             (default: 'auto')
         factored_2nd (bool): Factorize only the second moment (v_t) using SMMF
             low-rank compression while keeping the first moment (momentum_buffer)
@@ -160,7 +160,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         # Boolean to spilt param
         use_muon: bool | None = None,
         # States precision (Muon path)
-        state_precision: str = "auto",  # 'fp32', 'bf16_sr', 'fp8_sr', 'uint8_sr'
+        state_precision: str = "auto",  # 'fp32', 'bf16_sr', 'fp8_sr', 'int8_sr'
         # Factorized second moment only
         factored_2nd: bool = False,
         # Update geometry parameters
@@ -221,7 +221,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             ValueError("spectral_normalization violates accelerated Newton-Schulz assumptions. Pick one of them.")
 
         state_precision = state_precision.lower()
-        valid_precisions = {"auto", "fp32", "bf16_sr", "fp8_sr", "uint8_sr"}
+        valid_precisions = {"auto", "fp32", "bf16_sr", "fp8_sr", "int8_sr"}
         if state_precision not in valid_precisions:
             raise ValueError(f"state_precision must be one of {valid_precisions}. Got {state_precision}")
 
@@ -467,8 +467,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 random_int_state_tensor = random_int_tensor
                 if actual_precision == 'bf16_sr' and random_int_state_tensor is not None:
                     random_int_state_tensor = param_update._get_random_int_for_sr(p)
-                elif actual_precision == 'uint8_sr':
-                    random_int_state_tensor = param_update._get_random_int_for_uint8_sr(p)
+                elif actual_precision == 'int8_sr':
+                    random_int_state_tensor = param_update._get_random_int_for_int8_sr(p)
                 elif actual_precision == 'fp8_sr':
                     random_int_state_tensor = param_update._get_random_int_for_fp8_sr(p)
             else:
