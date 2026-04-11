@@ -255,7 +255,7 @@ class SGD_adv(torch.optim.Optimizer):
             del random_int_state_tensor
 
         if group['sinkhorn']:
-            update = apply_sr_sinkhorn(update, iters=group['sinkhorn_it'])
+            update = apply_sr_sinkhorn(update, iters=group['sinkhorn_iterations'])
 
         update_scaling = step_size
         if group.get('spectral_normalization', False):
