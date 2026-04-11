@@ -95,11 +95,6 @@ def apply_parameter_update(
     cwd = group.get("centered_wd", 0.0)
     wd, cwd = adjust_wds(wd, cwd, p)
 
-    if group.get('spectral_normalization', False):
-        decoupled = True
-        if wd_scaler is None:
-            wd, cwd = scale_wds(wd, cwd, p)
-
     # Calculate global decay factor for decoupled vs standard
     decay_factor = (lr / self._init_lr) if decoupled else lr
 
