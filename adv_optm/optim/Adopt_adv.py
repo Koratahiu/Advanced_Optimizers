@@ -334,7 +334,7 @@ class Adopt_adv(torch.optim.Optimizer):
                 del vt_init
 
             if group.get('spectral_normalization', False) and is_spectral(p):
-                init_spectral_norm(group, state, p)
+                init_spectral_norm(state, p)
 
             _init_anchor(p, state, group)
 

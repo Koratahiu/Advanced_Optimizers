@@ -229,7 +229,7 @@ class SignSGD_adv(torch.optim.Optimizer):
                 state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
 
             if group.get('spectral_normalization', False) and is_spectral(p):
-                init_spectral_norm(group, state, p)
+                init_spectral_norm(state, p)
 
             if group.get("l1_adaptive", False):
                 state["step"] = 0

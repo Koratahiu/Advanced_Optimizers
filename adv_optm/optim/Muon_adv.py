@@ -338,7 +338,7 @@ class Muon_adv(torch.optim.Optimizer):
 
             # Spectral Normalization
             if group.get('spectral_normalization', False):
-                init_spectral_norm(group, state, p)
+                init_spectral_norm(state, p)
 
             # MARS-M state initialization
             if group.get('approx_mars', False):

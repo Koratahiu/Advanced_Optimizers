@@ -297,7 +297,7 @@ class AdamW_adv(torch.optim.Optimizer):
                     init_state_tensor(state, 'exp_avg_sq', p.shape, actual_precision, p.device, dtype, non_neg=True)
 
             if group.get('spectral_normalization', False) and is_spectral(p):
-                init_spectral_norm(group, state, p)
+                init_spectral_norm(state, p)
 
             _init_anchor(p, state, group)
 

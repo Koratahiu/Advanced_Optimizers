@@ -244,7 +244,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
                 state['den_sum'] = 1.0
 
             if group.get('spectral_normalization', False) and is_spectral(p):
-                init_spectral_norm(group, state, p)
+                init_spectral_norm(state, p)
 
             _init_anchor(p, state, group)
 
