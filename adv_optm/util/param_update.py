@@ -296,7 +296,7 @@ def copy_fp8_stochastic_(target: torch.Tensor, source: torch.Tensor, scale: torc
     del random_int_tensor
 
 
-def _get_random_int_for_uint8_sr(source: torch.Tensor, numel: int | None = None) -> torch.Tensor:
+def _get_random_int_for_8bit_sr(source: torch.Tensor, numel: int | None = None) -> torch.Tensor:
     """
     Generates a flat random int32 tensor for unit stochastic rounding.
     Values are in [0, 2^16 - 1]; they are later scaled to U[0, 1) inside
@@ -322,6 +322,10 @@ def _get_random_int_for_uint8_sr(source: torch.Tensor, numel: int | None = None)
         generator=generator,
     )
 
+
+# 
+# ASYMMETRIC UINT8 PATH
+# 
 
 def _copy_int8_blockwise_stochastic_core_(
     target: torch.Tensor,
@@ -371,11 +375,67 @@ def copy_int8_blockwise_stochastic_(
     block_size: int = 2048,
 ) -> None:
     """
-    Blockwise asymmetric uint8 stochastic rounding for int8 optimizer states.
+    Blockwise asymmetric uint8 stochastic rounding for uint8 optimizer states.
     """
     padded_numel = scales.shape[0] * block_size
-    random_int_tensor = _get_random_int_for_uint8_sr(source, padded_numel)
+    random_int_tensor = _get_random_int_for_8bit_sr(source, padded_numel)
     _copy_int8_blockwise_stochastic_core_(target, source, scales, mins, random_int_tensor, block_size)
+    del random_int_tensor
+
+
+#
+# SYMMETRIC INT8 PATH
+#
+
+def _copy_int8_sym_blockwise_stochastic_core_(
+    target: torch.Tensor,
+    source: torch.Tensor,
+    scales: torch.Tensor,
+    random_int_tensor: torch.Tensor | None,
+    block_size: int = 2048,
+    val_blocks: torch.Tensor | None = None,
+) -> None:
+    """
+    Core logic for blockwise symmetric int8 stochastic rounding.
+    """
+    orig_shape = source.shape
+    orig_numel = source.numel()
+
+    n_blocks = scales.shape[0]
+    pad_len = n_blocks * block_size - orig_numel
+
+    if val_blocks is None:
+        val_flat = source.reshape(-1).float()
+        val_flat = F.pad(val_flat.reshape(1, -1), (0, pad_len), mode='replicate')
+        val_blocks = val_flat.view(n_blocks, block_size)
+
+    # Normalise to [-127, 127] per block
+    safe_scales = scales.float().clamp_min(1e-12).unsqueeze(1)  # (n_blocks, 1)
+    normalised = val_blocks / safe_scales
+
+    # Stochastic rounding: floor(x + u), u ~ U[0, 1) — unbiased for any sign
+    noise = random_int_tensor.reshape(n_blocks, block_size).float().mul_(1.0 / (1 << 16))
+    normalised = normalised + noise
+    del noise
+
+    quantised = normalised.floor_().clamp_(-127, 127).to(torch.int8)
+
+    # Strip padding and restore original shape.
+    target.copy_(quantised.view(-1)[:orig_numel].view(orig_shape))
+
+
+def copy_int8_sym_blockwise_stochastic_(
+    target: torch.Tensor,
+    source: torch.Tensor,
+    scales: torch.Tensor,
+    block_size: int = 2048,
+) -> None:
+    """
+    Blockwise symmetric int8 stochastic rounding for int8 optimizer states.
+    """
+    padded_numel = scales.shape[0] * block_size
+    random_int_tensor = _get_random_int_for_8bit_sr(source, padded_numel)
+    _copy_int8_sym_blockwise_stochastic_core_(target, source, scales, random_int_tensor, block_size)
     del random_int_tensor
 
 
@@ -428,4 +488,4 @@ def _get_random_noise_for_sso(source: torch.Tensor) -> torch.Tensor:
         device=source.device,
         dtype=source.dtype,
         generator=generator,
-    )
+    ).mul_(2).sub_(1)
