@@ -541,7 +541,7 @@ class Adopt_adv(torch.optim.Optimizer):
         update_scaling = lr * A if self.use_atan2 else lr
 
         if group.get('spectral_normalization', False):
-            update = scale_update(p, update, update_scaling, vector_state=state.get('spectral_v'))
+            update = scale_update(p, update, update_scaling, state=state)
         else:
             update.mul_(update_scaling)
 

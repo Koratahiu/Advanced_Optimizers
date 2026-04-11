@@ -360,7 +360,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             del denom
 
         if group.get('spectral_normalization', False):
-            update = scale_update(p, update, lr * sqrt_den_num, vector_state=state.get('spectral_v'))
+            update = scale_update(p, update, lr * sqrt_den_num, state=state)
         else:
             update.mul_(lr * sqrt_den_num)
 

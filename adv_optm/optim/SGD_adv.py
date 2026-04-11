@@ -259,7 +259,7 @@ class SGD_adv(torch.optim.Optimizer):
 
         update_scaling = step_size
         if group.get('spectral_normalization', False):
-            update = scale_update(p, update, update_scaling, vector_state=state.get('spectral_v'))
+            update = scale_update(p, update, update_scaling, state=state)
         else:
             update.mul_(update_scaling)
 

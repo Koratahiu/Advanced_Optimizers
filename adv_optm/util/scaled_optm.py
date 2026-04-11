@@ -90,7 +90,7 @@ def scale_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
 @torch.no_grad()
 def l2_normalization(update: torch.Tensor, dim: int | None, lr: float) -> torch.Tensor:
     """Performs L2 normalization on the update tensor."""
-    norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).clamp_min_(1e-8)
+    norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).add_(1e-12)
     return update.mul_(lr / norm)
 
 
@@ -98,7 +98,7 @@ def l2_normalization(update: torch.Tensor, dim: int | None, lr: float) -> torch.
 def rms_normalization(update: torch.Tensor, dim: int | None, lr: float) -> torch.Tensor:
     """Performs Root Mean Square normalization on the update tensor."""
     n = update.numel() if dim is None else update.shape[dim]
-    norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).clamp_min_(1e-8)
+    norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).add_(1e-12)
     scale_n = math.sqrt(n)
     return update.mul_(lr * scale_n / norm)
 
@@ -119,11 +119,11 @@ def init_spectral_norm(state: dict, p: torch.Tensor):
 
     # Initialize v (Right singular vector)
     v = torch.randn(d_in, device=p.device, dtype=p.dtype, generator=gen)
-    state['spectral_v'] = v.div_(v.norm().clamp_min_(1e-8))
+    state['spectral_v'] = v.div_(v.norm().add_(1e-12))
 
     # Initialize u (Left singular vector)
     u = torch.randn(d_out, device=p.device, dtype=p.dtype, generator=gen)
-    state['spectral_u'] = u.div_(u.norm().clamp_min_(1e-8))
+    state['spectral_u'] = u.div_(u.norm().add_(1e-12))
 
 @torch.no_grad()
 def spectral_normalization(
@@ -131,7 +131,7 @@ def spectral_normalization(
     u_state: torch.Tensor, 
     v_state: torch.Tensor, 
     lr: float,
-    depth: int
+    depth: int = 1,
 ) -> torch.Tensor:
     """
     Applies Spectral Normalization via a single step of Power Iteration.
@@ -164,8 +164,6 @@ def spectral_normalization(
     # Estimate sigma (The spectral norm)
     sigma = torch.linalg.vecdot(u_state, u_raw)
 
-    norm_eps = 1 / (math.sqrt(d_in) + math.sqrt(d_out))
-
     # Rescale update
-    scale = lr * (target_scale / sigma.add_(norm_eps))
+    scale = lr * (target_scale / sigma.add_(1e-12))
     return update.mul_(scale)

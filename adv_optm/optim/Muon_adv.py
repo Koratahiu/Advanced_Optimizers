@@ -448,7 +448,7 @@ class Muon_adv(torch.optim.Optimizer):
 
         if group.get('spectral_normalization', False):
 
-            ns_eps, _, _, _ = get_spectral_scaling(p, p.shape, group['n_layers'])
+            ns_eps, _, _, _ = get_spectral_scaling(p, p.shape, group.get('n_layers', 1))
             decoupled_wd = True
         else:
             decoupled_wd = False
@@ -507,13 +507,6 @@ class Muon_adv(torch.optim.Optimizer):
             if group['normuon_variant']:
                 normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['normuon_eps'])
 
-            if group.get('spectral_normalization', False):
-                # Spectral Normalization
-                spectral_normalization(update, state['spectral_v'], lr, group.get('n_layers', 1))
-            else:
-                # Factored RMS-aligned scaling
-                rms_adjustment(update, group['rms_rescaling'], lr)
-
             update = update.reshape(p.shape)
 
         else: # Standard Muon logic for non-factored tensors
@@ -562,14 +555,14 @@ class Muon_adv(torch.optim.Optimizer):
                 if group['normuon_variant']:
                     normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['normuon_eps'])
 
-                if group.get('spectral_normalization', False):
-                    # Spectral Normalization
-                    spectral_normalization(update, state['spectral_v'], lr, group.get('n_layers', 1))
-                else:
-                    # RMS-aligned rescaling
-                    rms_adjustment(update, group['rms_rescaling'], lr)
+            if group.get('spectral_normalization', False):
+                # Spectral Normalization
+                spectral_normalization(update, state['spectral_u'], state['spectral_v'], lr)
+            else:
+                # RMS-aligned rescaling
+                rms_adjustment(update, group['rms_rescaling'], lr)
 
-                update = update.reshape(original_shape)
+            update = update.reshape(original_shape)
 
         param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor, decoupled=decoupled_wd)
 

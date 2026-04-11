@@ -504,7 +504,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
         if group.get('spectral_normalization', False):
 
-            ns_eps, adaptive_eps, _, _ = get_spectral_scaling(p, p.shape, group['n_layers'])
+            ns_eps, adaptive_eps, _, _ = get_spectral_scaling(p, p.shape, group.get('n_layers', 1))
             decoupled_wd = True
         else:
             decoupled_wd = False
@@ -658,7 +658,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
         if group.get('spectral_normalization', False):
             # Spectral Normalization
-            spectral_normalization(update, state['spectral_v'], step_scale, group.get('n_layers', 1))
+            spectral_normalization(update, state['spectral_u'], state['spectral_v'], step_scale)
         else:
             # RMS-aligned rescaling
             rms_adjustment(update, group['rms_rescaling'], step_scale)

@@ -325,7 +325,7 @@ class Lion_adv(torch.optim.Optimizer):
             update.mul_(l1_mean)
 
         if group.get('spectral_normalization', False):
-            update = scale_update(p, update, lr, vector_state=state.get('spectral_v'))
+            update = scale_update(p, update, lr, state=state)
         else:
             update.mul_(lr)
 
