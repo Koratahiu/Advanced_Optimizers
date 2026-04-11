@@ -90,7 +90,7 @@ class Lion_adv(torch.optim.Optimizer):
         # Centered WD
         centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
-        # Scaled Optimizer
+        # Spectral Normed Optimizer
         spectral_normalization: bool = False,
         # SMMF factorization
         nnmf_factor: bool = False,

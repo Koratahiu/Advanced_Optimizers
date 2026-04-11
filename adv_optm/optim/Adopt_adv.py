@@ -154,7 +154,7 @@ class Adopt_adv(torch.optim.Optimizer):
         k_warmup_steps: int = 0,
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
-        # Scaled Optimizer
+        # Spectral Normed Optimizer
         spectral_normalization: bool = False,
         # Centered WD
         centered_wd: float = 0.0,
