@@ -235,7 +235,7 @@ class SGD_adv(torch.optim.Optimizer):
             update = update.view(p.shape)
 
         else:  # Standard logic for non-factored tensors
-            actual_precision = state.get('actual_state_precision', 'auto')
+            actual_precision = group['actual_state_precision']
 
             if momentum != 0:
                 buf = get_state(state, 'momentum_buffer', actual_precision)

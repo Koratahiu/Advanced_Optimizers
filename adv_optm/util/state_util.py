@@ -172,7 +172,7 @@ def fix_loaded_state_dtype(state: dict, p: torch.Tensor, group: dict) -> None:
     is_factored = state.get('factored', False)
 
     # Retrieve the active precision mode
-    actual_precision = state.get('actual_state_precision', group.get('state_precision', 'auto'))
+    actual_precision = group['actual_state_precision']
     numel = p.numel()
     is_full = (
         numel < 10000 or

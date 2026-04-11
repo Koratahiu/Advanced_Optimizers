@@ -417,7 +417,7 @@ class Muon_adv(torch.optim.Optimizer):
                 muon_step_param = self._compiled_muon_step_parameter
 
                 # Generate state SR random tensor when compiled
-                actual_precision = state.get('actual_state_precision', 'auto')
+                actual_precision = group['actual_state_precision']
                 random_int_state_tensor = random_int_tensor
                 if actual_precision == 'bf16_sr' and random_int_state_tensor is not None:
                     random_int_state_tensor = param_update._get_random_int_for_sr(p)
@@ -521,7 +521,7 @@ class Muon_adv(torch.optim.Optimizer):
             if len(p.shape) >= 2:
 
                 original_shape = p.shape
-                actual_precision = state.get('actual_state_precision', 'auto')
+                actual_precision = group['actual_state_precision']
 
                 # Momentum update
                 mt_buf = get_state(state, 'momentum_buffer', actual_precision)

@@ -426,7 +426,7 @@ class AdamW_adv(torch.optim.Optimizer):
             update = update.view(p.shape)
 
         else:  # Standard AdamW logic for non-factored tensors (or factored_2nd)
-            actual_precision = state.get('actual_state_precision', 'auto')
+            actual_precision = group['actual_state_precision']
             factored_2nd = state.get('factored_2nd', False)
 
             if beta1 > 0:

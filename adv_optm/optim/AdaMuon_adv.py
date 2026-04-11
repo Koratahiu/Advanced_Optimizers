@@ -463,7 +463,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 muon_step_param = self._compiled_muon_step_parameter
 
                 # Generate state SR random tensor when compiled
-                actual_precision = state.get('actual_state_precision', 'auto')
+                actual_precision = group['actual_state_precision']
                 random_int_state_tensor = random_int_tensor
                 if actual_precision == 'bf16_sr' and random_int_state_tensor is not None:
                     random_int_state_tensor = param_update._get_random_int_for_sr(p)
@@ -581,7 +581,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
         else: # Standard AdaMuon logic for non-factored tensors
             original_shape = p.shape
-            actual_precision = state.get('actual_state_precision', 'auto')
+            actual_precision = group['actual_state_precision']
             factored_2nd = state.get('factored_2nd', False)
 
             # Momentum update
