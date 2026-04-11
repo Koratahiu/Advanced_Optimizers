@@ -22,7 +22,6 @@ class SGD_adv(torch.optim.Optimizer):
             parameter groups
         lr (float): learning rate (default: 1e-3)
         momentum (float): momentum factor (default: 0)
-        dampening (float): dampening for momentum (default: 0)
         weight_decay (float): weight decay (L2 penalty or decoupled) (default: 0).
         nesterov (bool): enables Nesterov momentum. Only applicable when momentum
             is non-zero. (default: False)
@@ -35,9 +34,6 @@ class SGD_adv(torch.optim.Optimizer):
             matrices to apply low-rank compression (default: True).
         stochastic_rounding (bool): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
-        grams_moment (bool): whether to use Grams-style updates. (default: False)
-        cautious_mask (bool): whether to use cautious masking to align the gradient's
-            direction with the momentum. (default: False)
         orthogonal_gradient (bool): whether to use OrthoGrad. (default: False)
         centered_wd (float): Centered Weight Decay coefficient. Instead of decaying weights
             toward zero, they are decayed toward their initial values (anchors). This
@@ -58,7 +54,6 @@ class SGD_adv(torch.optim.Optimizer):
         params,
         lr: float = 1e-3,
         momentum: float = 0.0,
-        dampening: float = 0.0,
         weight_decay: float = 0.0,
         nesterov: bool = False,
         # Decoupled/cautious weight decay
@@ -66,12 +61,9 @@ class SGD_adv(torch.optim.Optimizer):
         cautious_wd: bool = False,
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
-        # Cautious and GRAMS
-        cautious_mask: bool = False,
-        grams_moment: bool = False,
         # OrthoGrad
         orthogonal_gradient: bool = False,
-        # Scaled Optimizer
+        # Spectral Normed Optimizer
         spectral_normalization: bool = False,
         # Centered WD
         centered_wd: float = 0.0,
@@ -90,12 +82,6 @@ class SGD_adv(torch.optim.Optimizer):
             raise ValueError(f"Momentum should be >= 0.0. Got {momentum}")
         if not (weight_decay >= 0.0):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
-        if nesterov and (momentum <= 0 or dampening != 0):
-            raise ValueError("Nesterov momentum requires a momentum and zero dampening")
-
-        if cautious_mask and grams_moment:
-            print("Warning: cautious is incompatible with grams, Disabling cautious.")
-            cautious_mask = False
 
         state_precision = state_precision.lower()
         valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp8_sr", "uint8_sr"}
@@ -106,7 +92,7 @@ class SGD_adv(torch.optim.Optimizer):
             state_precision = "factored"
 
         defaults = {
-            "lr": lr, "momentum": momentum, "dampening": dampening, 
+            "lr": lr, "momentum": momentum,
             "weight_decay": weight_decay, "nesterov": nesterov,
             "decoupled_wd": decoupled_wd, "cautious_wd": cautious_wd,
             "orthogonal_gradient": orthogonal_gradient, 
@@ -117,8 +103,6 @@ class SGD_adv(torch.optim.Optimizer):
             "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape
         }
         self.stochastic_rounding = stochastic_rounding
-        self.cautious_mask = cautious_mask
-        self.grams_moment = grams_moment
         self._init_lr = lr
         super().__init__(params, defaults)
 
@@ -222,7 +206,6 @@ class SGD_adv(torch.optim.Optimizer):
             grad = _orthogonalize_gradient(p, grad)
 
         momentum = group['momentum']
-        dampening = group['dampening']
         nesterov = group['nesterov']
 
         if state['factored']:
@@ -231,22 +214,16 @@ class SGD_adv(torch.optim.Optimizer):
 
             if momentum != 0:
                 buf = _reconstruct_state((state['mu_b_nmf'], state['mv_b_nmf'], state['sign'], d2), signed=True)
-                buf.mul_(momentum).add_(grad_reshaped, alpha=1 - dampening)
+                buf.mul_(momentum).add_(grad_reshaped, alpha=1 - momentum)
 
                 # Factorize updated buffer
                 state['mu_b_nmf'], state['mv_b_nmf'], state['sign'] = _factorize_state(buf.clone(), signed=True)
 
-                if self.grams_moment:
-                    update_mt = _grams_update(buf, grad_reshaped, inplace=True)
-                elif self.cautious_mask:
-                    update_mt = _cautious_update(buf, grad_reshaped, inplace=True)
-                else:
-                    update_mt = buf
 
                 if nesterov:
-                    update = grad_reshaped.add(update_mt, alpha=momentum)
+                    update = grad_reshaped.add(buf, alpha=momentum)
                 else:
-                    update = update_mt
+                    update = buf.clone()
             else:
                 update = grad_reshaped.clone()
 
@@ -258,24 +235,15 @@ class SGD_adv(torch.optim.Optimizer):
             if momentum != 0:
                 buf = get_state(state, 'momentum_buffer', actual_precision)
 
-                if state['step'] == 0:
-                    buf.copy_(grad)
-                else:
-                    buf.mul_(momentum).add_(grad, alpha=1 - dampening)
+                buf.mul_(momentum).add_(grad, alpha=1 - momentum)
 
-                if self.grams_moment:
-                    update_mt = _grams_update(buf, grad)
-                elif self.cautious_mask:
-                    update_mt = _cautious_update(buf, grad)
-                else:
-                    update_mt = buf.clone()
 
                 set_state(state, 'momentum_buffer', buf, actual_precision, random_int_state_tensor)
 
                 if nesterov:
-                    update = grad.add(update_mt, alpha=momentum)
+                    update = grad.add(buf, alpha=momentum)
                 else:
-                    update = update_mt
+                    update = buf.clone()
             else:
                 update = grad.clone()
 
