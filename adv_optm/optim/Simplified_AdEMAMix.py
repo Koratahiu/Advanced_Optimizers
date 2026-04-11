@@ -121,7 +121,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
         centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
         # Scaled Optimizer
-        scaled_optm: bool = False,
+        spectral_normalization: bool = False,
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
@@ -149,7 +149,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
             "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
-            "scaled_optm": scaled_optm,
+            "spectral_normalization": spectral_normalization,
             "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape,"factored_2nd": factored_2nd
         }
         self.stochastic_rounding = stochastic_rounding
@@ -243,7 +243,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
                 state['num_sum'] = 1.0
                 state['den_sum'] = 1.0
 
-            if group.get('scaled_optm', False) and is_spectral(p):
+            if group.get('spectral_normalization', False) and is_spectral(p):
                 init_spectral_norm(group, state, p)
 
             _init_anchor(p, state, group)
@@ -279,7 +279,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
 
         lr = group["lr"]
 
-        lr = _scale_sim_AdEMAMix_update(beta1, state['step'] + 1, group["alpha_grad"], lr, group.get('scaled_optm', False))
+        lr = _scale_sim_AdEMAMix_update(beta1, state['step'] + 1, group["alpha_grad"], lr, group.get('spectral_normalization', False))
 
         random_int_tensor = None
 
@@ -359,7 +359,7 @@ class Simplified_AdEMAMix(torch.optim.Optimizer):
             update.div_(denom)
             del denom
 
-        if group.get('scaled_optm', False):
+        if group.get('spectral_normalization', False):
             update = scale_update(p, update, lr * sqrt_den_num, vector_state=state.get('spectral_v'))
         else:
             update.mul_(lr * sqrt_den_num)

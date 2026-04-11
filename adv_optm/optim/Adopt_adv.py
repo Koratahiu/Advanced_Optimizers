@@ -155,7 +155,7 @@ class Adopt_adv(torch.optim.Optimizer):
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
         # Scaled Optimizer
-        scaled_optm: bool = False,
+        spectral_normalization: bool = False,
         # Centered WD
         centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
@@ -189,9 +189,7 @@ class Adopt_adv(torch.optim.Optimizer):
             print("Warning: grams is incompatible with Simplified_AdEMAMix, Disabling grams.")
         if cautious_mask and Simplified_AdEMAMix:
             print("Warning: cautious is incompatible with Simplified_AdEMAMix, Disabling cautious.")
-        if scaled_optm and use_atan2:
-            print("Warning: use_atan2 is incompatible with scaled_optm, Disabling atan2.")
-            use_atan2 = False
+
 
         state_precision = state_precision.lower()
         valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp8_sr", "uint8_sr"}
@@ -209,7 +207,7 @@ class Adopt_adv(torch.optim.Optimizer):
             "alpha_grad": alpha_grad,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
-            "scaled_optm": scaled_optm,
+            "spectral_normalization": spectral_normalization,
             "centered_wd": centered_wd,
             "centered_wd_mode": centered_wd_mode,
             "state_precision": state_precision,
@@ -339,7 +337,7 @@ class Adopt_adv(torch.optim.Optimizer):
                     set_state(state, 'exp_avg_sq', vt_init, actual_precision, None)
                 del vt_init
 
-            if group.get('scaled_optm', False) and is_spectral(p):
+            if group.get('spectral_normalization', False) and is_spectral(p):
                 init_spectral_norm(group, state, p)
 
             _init_anchor(p, state, group)
@@ -349,7 +347,7 @@ class Adopt_adv(torch.optim.Optimizer):
         current_step = state['step']
 
         # The first step is for initialization only (skip when use_atan2 as it's scale invariant).
-        if state['step'] == 0 and not (self.use_atan2 or group.get('scaled_optm', False)):
+        if state['step'] == 0 and not (self.use_atan2 or group.get('spectral_normalization', False)):
             state['step'] += 1
             return
 
@@ -374,7 +372,7 @@ class Adopt_adv(torch.optim.Optimizer):
             step_param_fn = self._step_parameter
 
         if self.Simplified_AdEMAMix:
-            lr = _scale_sim_AdEMAMix_update(beta1, state['step'] + 1, group["alpha_grad"], lr, group.get('scaled_optm', False))
+            lr = _scale_sim_AdEMAMix_update(beta1, state['step'] + 1, group["alpha_grad"], lr, group.get('spectral_normalization', False))
 
         step_param_fn(p, grad, state, group, lr, beta1, beta2, random_int_tensor, random_int_state_tensor)
 
@@ -546,7 +544,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
         update_scaling = lr * A if self.use_atan2 else lr
 
-        if group.get('scaled_optm', False):
+        if group.get('spectral_normalization', False):
             update = scale_update(p, update, update_scaling, vector_state=state.get('spectral_v'))
         else:
             update.mul_(update_scaling)

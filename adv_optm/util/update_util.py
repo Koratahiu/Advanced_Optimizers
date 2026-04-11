@@ -25,8 +25,8 @@ def _cautious_update(mt: torch.Tensor, grad: torch.Tensor, inplace: bool=False):
     del mask
     return update_mt
 
-def _scale_sim_AdEMAMix_update(beta: float, current_step: int, alpha_grad: float, lr: float, scaled_optm: bool=False):
-    if scaled_optm:
+def _scale_sim_AdEMAMix_update(beta: float, current_step: int, alpha_grad: float, lr: float, is_scaled: bool=False):
+    if is_scaled:
         return lr
     momentum_scale = (1 - beta ** current_step) / (1 - beta)
     total_scale = 1 / (momentum_scale + alpha_grad)

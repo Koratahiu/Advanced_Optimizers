@@ -261,7 +261,7 @@ def scale_tiny_spike(group: dict, layer_params: list, tiny_spike: float) -> floa
     """
     Derives scale-invariant tiny_spike from the EMA tensor's effective numel.
     """
-    if not group.get('scaled_optm', False):
+    if not group.get('spectral_normalization', False):
         return tiny_spike
 
     p0 = layer_params[0]

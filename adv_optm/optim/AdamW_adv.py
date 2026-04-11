@@ -136,7 +136,7 @@ class AdamW_adv(torch.optim.Optimizer):
         k_logging: int = 0,
         layer_key_fn: Optional[Callable] = None,
         # Scaled Optimizer
-        scaled_optm: bool = False,
+        spectral_normalization: bool = False,
         # Centered WD
         centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
@@ -159,9 +159,6 @@ class AdamW_adv(torch.optim.Optimizer):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
         if kourkoutas_beta and not (betas[1] > beta2_min):
             raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
-        if scaled_optm and use_atan2:
-            print("Warning: use_atan2 is incompatible with scaled_optm, Disabling atan2.")
-            use_atan2 = False
 
         if cautious_mask and grams_moment:
             print("Warning: cautious is incompatible with grams, Disabling cautious.")
@@ -184,7 +181,7 @@ class AdamW_adv(torch.optim.Optimizer):
             "beta3_ema": beta3_ema, "alpha": alpha, "compiled_optimizer": compiled_optimizer,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
-            "scaled_optm": scaled_optm,
+            "spectral_normalization": spectral_normalization,
             "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
             "state_precision": state_precision,
             "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape, "factored_2nd": factored_2nd
@@ -299,7 +296,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 else:
                     init_state_tensor(state, 'exp_avg_sq', p.shape, actual_precision, p.device, dtype)
 
-            if group.get('scaled_optm', False) and is_spectral(p):
+            if group.get('spectral_normalization', False) and is_spectral(p):
                 init_spectral_norm(group, state, p)
 
             _init_anchor(p, state, group)
@@ -490,7 +487,7 @@ class AdamW_adv(torch.optim.Optimizer):
             del denom
 
         update_scaling = step_size * A if group['use_atan2'] else step_size
-        if group.get('scaled_optm', False):
+        if group.get('spectral_normalization', False):
             update = scale_update(p, update, update_scaling, vector_state=state.get('spectral_v'))
         else:
             update.mul_(update_scaling)

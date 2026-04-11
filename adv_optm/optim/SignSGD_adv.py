@@ -93,7 +93,7 @@ class SignSGD_adv(torch.optim.Optimizer):
         centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
         # Scaled Optimizer
-        scaled_optm: bool = False,
+        spectral_normalization: bool = False,
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
@@ -119,7 +119,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             stochastic_sign=stochastic_sign,
             alpha_grad=alpha_grad,
             Simplified_AdEMAMix=Simplified_AdEMAMix,
-            scaled_optm= scaled_optm,
+            spectral_normalization=spectral_normalization,
             freeze_on_flip=freeze_on_flip,
             l1_adaptive=l1_adaptive,
             centered_wd= centered_wd,
@@ -197,7 +197,7 @@ class SignSGD_adv(torch.optim.Optimizer):
                 if group.get("freeze_on_flip", True):
                     state['prev_sign'] = (grad > 0).to(torch.uint8)
 
-            if group.get('scaled_optm', False) and is_spectral(p):
+            if group.get('spectral_normalization', False) and is_spectral(p):
                 init_spectral_norm(group, state, p)
 
             if group.get("l1_adaptive", False):
@@ -322,7 +322,7 @@ class SignSGD_adv(torch.optim.Optimizer):
         if l1_mean is not None:
             update.mul_(l1_mean)
 
-        if group.get('scaled_optm', False):
+        if group.get('spectral_normalization', False):
             update = scale_update(p, update, lr, vector_state=state.get('spectral_v'))
         else:
             update.mul_(lr)

@@ -52,7 +52,7 @@ def scale_eps(group: dict, p) -> float:
     """
     Scales Adam eps to be scale-invariant.
     """
-    if group.get('scaled_optm', False):
+    if group.get('spectral_normalization', False):
         if getattr(p, '_is_dora_scale', False) or getattr(p, '_is_oft', False) or p.ndim < 2:
             # No depth scaling for:
             # - 1D params (biases, norms, DoRA scales): don't compound through depth.

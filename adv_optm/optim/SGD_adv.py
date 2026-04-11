@@ -39,7 +39,6 @@ class SGD_adv(torch.optim.Optimizer):
         cautious_mask (bool): whether to use cautious masking to align the gradient's
             direction with the momentum. (default: False)
         orthogonal_gradient (bool): whether to use OrthoGrad. (default: False)
-        scaled_optm (bool): Enable Scaled Optimizer parameter scaling. (default: False)
         centered_wd (float): Centered Weight Decay coefficient. Instead of decaying weights
             toward zero, they are decayed toward their initial values (anchors). This
             can be used together with standard weight decay. (default: 0.0)
@@ -73,7 +72,7 @@ class SGD_adv(torch.optim.Optimizer):
         # OrthoGrad
         orthogonal_gradient: bool = False,
         # Scaled Optimizer
-        scaled_optm: bool = False,
+        spectral_normalization: bool = False,
         # Centered WD
         centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
@@ -112,7 +111,7 @@ class SGD_adv(torch.optim.Optimizer):
             "decoupled_wd": decoupled_wd, "cautious_wd": cautious_wd,
             "orthogonal_gradient": orthogonal_gradient, 
             "compiled_optimizer": compiled_optimizer,
-            "scaled_optm": scaled_optm,
+            "spectral_normalization": spectral_normalization,
             "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
             "state_precision": state_precision,
             "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape
@@ -187,7 +186,7 @@ class SGD_adv(torch.optim.Optimizer):
                     if group['momentum'] != 0:
                         init_state_tensor(state, 'momentum_buffer', p.shape, actual_precision, p.device, dtype)
 
-            if group.get('scaled_optm', False) and is_spectral(p):
+            if group.get('spectral_normalization', False) and is_spectral(p):
                 init_spectral_norm(group, state, p)
 
             _init_anchor(p, state, group)
@@ -283,7 +282,7 @@ class SGD_adv(torch.optim.Optimizer):
             del random_int_state_tensor
 
         update_scaling = step_size
-        if group.get('scaled_optm', False):
+        if group.get('spectral_normalization', False):
             update = scale_update(p, update, update_scaling, vector_state=state.get('spectral_v'))
         else:
             update.mul_(update_scaling)
