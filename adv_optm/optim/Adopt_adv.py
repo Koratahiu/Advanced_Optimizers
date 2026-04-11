@@ -123,7 +123,7 @@ class Adopt_adv(torch.optim.Optimizer):
         params,
         lr: float = 1e-4,
         betas: tuple[float, float] = (0.9, 0.9999),
-        eps: float = 1e-6,
+        eps: float | None = 1e-6,
         # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
         fisher_wd: bool = False,
@@ -394,7 +394,7 @@ class Adopt_adv(torch.optim.Optimizer):
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
 
-        adaptive_eps = scale_eps(group, p)
+        adaptive_eps = scale_eps(group['eps'], p)
 
         if state['factored']:
             d1, d2 = state['effective_shape']

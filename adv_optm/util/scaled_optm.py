@@ -8,7 +8,7 @@ def scale_update(
     p: torch.Tensor,
     update: torch.Tensor,
     lr: float,
-    vector_state: torch.Tensor | None = None,
+    state: dict | None = None,
     depth: int = 1,
 ) -> torch.Tensor:
     """
@@ -19,49 +19,32 @@ def scale_update(
         p: The original parameter tensor.
         update: The computed gradient/update tensor to be scaled.
         lr: The learning rate.
-        vector_state: The singular vector state used for spectral normalization.
+        state: The state dict used for spectral normalization.
 
     Returns:
         The scaled update tensor.
     """
     is_dora_scale = getattr(p, '_is_dora_scale', False)
-    is_oft = getattr(p, '_is_oft', False)
 
     # DoRA Magnitude Scales (1D) or 1D Bias/Norm layers
     if p.ndim < 2 or is_dora_scale:
         return l2_normalization(update, dim=None, lr=lr)
 
-    # Orthogonal Fine-Tuning (OFT)
-    # This guarantees O(1) update complexity scaling, independent of block sizes.
-    if is_oft:
-        n = update.shape[1]
-        # Calculate block size (b)
-        b = (1 + math.sqrt(1 + 8 * n)) / 2
-        target_norm = math.sqrt(b / 8)
-        return l2_normalization(update, dim=1, lr=lr * target_norm)
 
     # LoRA Factors or Full Finetuning weights
     # Scales update to maintain consistent spectral norm across different layer sizes and ranks.
     if p.ndim >= 2:
-        return spectral_normalization(update, vector_state, lr, depth)
-
-    return update.mul_(lr)
+        return spectral_normalization(update, state['spectral_u'], state['spectral_v'], lr, depth)
 
 
-def scale_eps(group: dict, p) -> float:
+def scale_eps(eps: float | None, p: torch.Tensor) -> float:
     """
     Scales Adam eps to be scale-invariant.
     """
-    if group.get('spectral_normalization', False):
-        if getattr(p, '_is_dora_scale', False) or getattr(p, '_is_oft', False) or p.ndim < 2:
-            # No depth scaling for:
-            # - 1D params (biases, norms, DoRA scales): don't compound through depth.
-            adaptive_eps = (1.0 / math.sqrt(p.numel()))
-        else:
-            adaptive_eps = (1.0 / group['n_layers']) * (1.0 / math.sqrt(p.numel()))
+    if eps is None:
+        return (1.0 / math.sqrt(p.numel()))
     else:
-        adaptive_eps = group['eps']
-    return adaptive_eps
+        return eps
 
 def adjust_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
     """
@@ -107,69 +90,82 @@ def scale_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
 @torch.no_grad()
 def l2_normalization(update: torch.Tensor, dim: int | None, lr: float) -> torch.Tensor:
     """Performs L2 normalization on the update tensor."""
-    n = update.numel() if dim is None else update.shape[dim]
-    adaptive_eps = 1 / math.sqrt(n)
-    norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True)
-    return update.mul_(lr / norm.add_(adaptive_eps))
+    norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).clamp_min_(1e-8)
+    return update.mul_(lr / norm)
 
 
 @torch.no_grad()
 def rms_normalization(update: torch.Tensor, dim: int | None, lr: float) -> torch.Tensor:
     """Performs Root Mean Square normalization on the update tensor."""
     n = update.numel() if dim is None else update.shape[dim]
-    norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).clamp_min_(1e-12)
+    norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).clamp_min_(1e-8)
     scale_n = math.sqrt(n)
     return update.mul_(lr * scale_n / norm)
 
 
 def is_spectral(p: torch.Tensor) -> bool:
     """Determines if a parameter should undergo spectral normalization updates."""
-    if getattr(p, '_is_lora_A', False) or getattr(p, '_is_lora_B', False):
-        return True
-    if getattr(p, '_is_oft', False) or getattr(p, '_is_dora_scale', False) or p.ndim == 1:
+    if p.ndim < 2:
         return False
     return getattr(p, 'is_hidden', True)
 
 @torch.no_grad()
-def init_spectral_norm(group: dict, state: dict, p: torch.Tensor):
-    """Initializes the singular vector 'v' for the Power Iteration method."""
+def init_spectral_norm(state: dict, p: torch.Tensor):
+    """Initializes the singular vectors 'u' and 'v' for the Power Iteration method."""
     gen = param_update.get_generator(p.device)
-    v = torch.randn(p.numel() // p.shape[0], device=p.device, dtype=p.dtype, generator=gen)
-    state['spectral_v'] = v.div_(v.norm().clamp_min_(1e-12))
+
+    d_out = p.shape[0]
+    d_in = p.numel() // d_out
+
+    # Initialize v (Right singular vector)
+    v = torch.randn(d_in, device=p.device, dtype=p.dtype, generator=gen)
+    state['spectral_v'] = v.div_(v.norm().clamp_min_(1e-8))
+
+    # Initialize u (Left singular vector)
+    u = torch.randn(d_out, device=p.device, dtype=p.dtype, generator=gen)
+    state['spectral_u'] = u.div_(u.norm().clamp_min_(1e-8))
 
 @torch.no_grad()
-def spectral_normalization(update: torch.Tensor, vector_state: torch.Tensor, lr: float, depth: int) -> torch.Tensor:
+def spectral_normalization(
+    update: torch.Tensor, 
+    u_state: torch.Tensor, 
+    v_state: torch.Tensor, 
+    lr: float,
+    depth: int
+) -> torch.Tensor:
     """
     Applies Spectral Normalization via a single step of Power Iteration.
     Implementation follows: "Scalable Optimization in the Modular Norm" (arXiv:2405.14813).
     """
     d_out = update.shape[0]
     d_in = update.numel() // d_out
-    update = update.to(vector_state.dtype)
+    update = update.to(u_state.dtype)
     update_flat = update.view(d_out, d_in)
+
     # Target scale derived from the "Modular Norm" paper
     target_scale = math.sqrt(d_out / d_in) / depth
+
     # Power Iteration step to estimate the largest singular value (sigma)
-    # u = Wv
-    u = torch.mv(update_flat, vector_state)
-    # v_new = W.T u
-    v_new = torch.mv(update_flat.mT, u)
-
-    v_norm = torch.linalg.vector_norm(v_new)
-
+    # Update v (Right Singular Vector)
+    v_raw = torch.mv(update_flat.mT, u_state)
+    v_norm = torch.linalg.vector_norm(v_raw)
+    candidate_v = v_raw / v_norm.clamp_min(1e-8)
     # Stability: Only update the state if the norm is significant
-    candidate_v = v_new / v_norm
-    next_state = torch.where(v_norm >= 0.5, candidate_v, vector_state)
-    vector_state.copy_(next_state.to(vector_state.dtype))
+    next_v = torch.where(v_norm >= 0.5, candidate_v, v_state)
+    v_state.copy_(next_v)
 
-    Av = torch.mv(update_flat, vector_state)
+    # Update u (Left Singular Vector)
+    u_raw = torch.mv(update_flat, v_state)
+    u_norm = torch.linalg.vector_norm(u_raw)
+    candidate_u = u_raw / u_norm.clamp_min(1e-8)
+    next_u = torch.where(u_norm >= 0.5, candidate_u, u_state)
+    u_state.copy_(next_u)
 
-    # Calculate sigma (the spectral norm)
-    sigma = torch.linalg.vector_norm(Av)
+    # Estimate sigma (The spectral norm)
+    sigma = torch.linalg.vecdot(u_state, u_raw)
 
-    # Calculate scale-invariant eps: (1/L) * (1/sqrt(d_in) + 1/sqrt(d_out))
-    adaptive_eps = (1.0 / depth) * ((1.0 / math.sqrt(d_out)) + (1.0 / math.sqrt(d_in)))
+    norm_eps = 1 / (math.sqrt(d_in) + math.sqrt(d_out))
 
     # Rescale update
-    scale = lr * (target_scale / sigma.add_(adaptive_eps))
+    scale = lr * (target_scale / sigma.add_(norm_eps))
     return update.mul_(scale)

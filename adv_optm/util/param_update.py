@@ -93,10 +93,10 @@ def apply_parameter_update(
     """
     wd = group["weight_decay"] if wd is None else wd
     cwd = group.get("centered_wd", 0.0)
+    wd, cwd = adjust_wds(wd, cwd, p)
 
     if group.get('spectral_normalization', False):
         decoupled = True
-        wd, cwd = adjust_wds(wd, cwd, p)
         if wd_scaler is None:
             wd, cwd = scale_wds(wd, cwd, p)
 

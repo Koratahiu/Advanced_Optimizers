@@ -409,46 +409,6 @@ def _auto_projection_for_adamuon(raw_update: torch.Tensor, kappa_p: float) -> to
     den = x.norm(p=p).pow_(p - 1).clamp_min_(EPS)
     return num.div_(den)
 
-@torch.no_grad()
-def spectral_norm_update(update: torch.Tensor, vector_state: torch.Tensor, target_scale: float, lr):
-    """
-    From the paper:
-    "Hyperparameter Transfer Enables Consistent Gains of Matrix-Preconditioned Optimizers Across Scales"
-    Applies explicit Spectral Normalization (Section F of the paper).
-    Rescales the update A_t to (target_scale * A_t / sigma_t).
-
-    Args:
-        update: The optimizer update matrix (A_t).
-        vector_state: The persistent vector for power iteration (v_t).
-        target_scale: sqrt(d_out / d_in).
-    """
-    # Power Iteration to estimate spectral norm
-    # u = A @ v
-    u = torch.mv(update, vector_state)
-
-    # v_new = A.T @ u
-    v_new = torch.mv(update.mT, u)
-
-    # Normalize v_new to get next state
-    v_norm = torch.linalg.vector_norm(v_new)
-
-    # if v_norm >= 0.5:
-    #    vector_state.copy_(v_new.div_(v_norm.clamp_min_(1e-12))).to(vector_state.dtype))
-    candidate_v = v_new / v_norm
-    next_state = torch.where(v_norm >= 0.5, candidate_v, vector_state)
-    vector_state.copy_(next_state.to(vector_state.dtype))
-    # Else: We keep the old vector_state (which is a random unit vector at init)
-
-    # Estimate sigma = ||A @ v|| (since v is unit norm)
-    # Re-compute A @ v_new with the updated vector for better estimate
-    Av = torch.mv(update, vector_state)
-    sigma = torch.linalg.vector_norm(Av)
-
-    # Rescale update
-    # A_new = target_scale * A / sigma
-    update.mul_(lr * (target_scale / sigma.clamp_min_(1e-12)))
-
-    return update
 
 def get_spectral_scaling(p, shape: torch.Size, n_layers: int):
     """
@@ -480,13 +440,8 @@ def get_spectral_scaling(p, shape: torch.Size, n_layers: int):
 
     # B) Adaptive Denominator Epsilon
     # This ensures the Adam-style division doesn't explode or vanish.
-    # Formula: (1/L) * (1 / sqrt(d_in * d_out))
-    if getattr(p, '_is_lora_A', False):
-        # Apply 1/depth only to B factor (zero init)
-        # To achieve O(1)
-        adaptive_eps = (1.0 / math.sqrt(d_in * d_out))
-    else:
-        adaptive_eps = (1.0 / L) * (1.0 / math.sqrt(d_in * d_out))
+    # Formula: (1 / sqrt(d_in * d_out))
+    adaptive_eps = (1.0 / math.sqrt(d_in * d_out))
 
     # Spectral Target (Section F) -> sqrt(d_out/d_in)
     spectral_target = math.sqrt(d_out / d_in)

@@ -158,7 +158,7 @@ class Muon_adv(torch.optim.Optimizer):
         compiled_optimizer: bool = False,
         # --- AdamW_adv specific parameters ---
         adam_betas: tuple[float, float] = (0.9, 0.99),
-        adam_eps: float = 1e-8,
+        adam_eps: float | None = 1e-8,
         adam_weight_decay: float = 0.0,
         adam_use_bias_correction: bool = True,
         adam_use_atan2: bool = False,
@@ -447,20 +447,10 @@ class Muon_adv(torch.optim.Optimizer):
         alpha_grad = group['alpha_grad']
 
         if group.get('spectral_normalization', False):
-            # Compute Scaling Factors
-            if state['factored']:
-                shape_for_scaling = torch.Size(state['effective_shape'])
-            else:
-                shape_for_scaling = p.shape
 
-            scaled_eps, _, spectral_target, wd_scale = get_spectral_scaling(p, shape_for_scaling, group['n_layers'])
-
-            weight_decay = group['weight_decay'] * wd_scale
+            ns_eps, _, _, _ = get_spectral_scaling(p, p.shape, group['n_layers'])
             decoupled_wd = True
-
-            ns_eps = scaled_eps
         else:
-            weight_decay = group['weight_decay']
             decoupled_wd = False
             ns_eps = group['ns_eps']
 
@@ -581,7 +571,7 @@ class Muon_adv(torch.optim.Optimizer):
 
                 update = update.reshape(original_shape)
 
-        param_update.apply_parameter_update(self, p, group, update, lr, wd=weight_decay, random_int_tensor=random_int_tensor, decoupled=decoupled_wd)
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor, decoupled=decoupled_wd)
 
     @torch.no_grad()
     def step(self, closure=None):

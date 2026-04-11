@@ -188,7 +188,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         compiled_optimizer: bool = False,
         # --- AdamW_adv specific parameters ---
         adam_betas: tuple[float, float] = (0.9, 0.99),
-        adam_eps: float = 1e-8,
+        adam_eps: float | None = 1e-8,
         adam_weight_decay: float = 0.0,
         adam_use_bias_correction: bool = True,
         adam_use_atan2: bool = False,
@@ -214,9 +214,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
         if Simplified_AdEMAMix and nesterov:
             print("Warning: nesterov is incompatible with Simplified_AdEMAMix, Disabling nesterov.")
             nesterov = False
-        if normuon_variant and use_atan2:
-            print("Warning: AdaMuon atan2 is incompatible with NorMuon, Disabling AdaMuon atan2.")
-            use_atan2 = False
         if spectral_normalization and rms_rescaling:
             print("Warning: spectral_normalization is incompatible with rms_rescaling, Disabling rms_rescaling.")
             rms_rescaling = False
@@ -506,21 +503,10 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 kappa_p = 1.0
 
         if group.get('spectral_normalization', False):
-            # Compute Scaling Factors
-            if state['factored']:
-                shape_for_scaling = torch.Size(state['effective_shape'])
-            else:
-                shape_for_scaling = p.shape
 
-            scaled_eps, adaptive_eps, spectral_target, wd_scale = get_spectral_scaling(p, shape_for_scaling, group['n_layers'])
-
-            weight_decay = group['weight_decay'] * wd_scale
+            ns_eps, adaptive_eps, _, _ = get_spectral_scaling(p, p.shape, group['n_layers'])
             decoupled_wd = True
-
-            ns_eps = scaled_eps
-
         else:
-            weight_decay = group['weight_decay']
             decoupled_wd = False
             ns_eps = group['ns_eps']
             adaptive_eps = group['eps']
@@ -590,15 +576,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     denom = vt_buf.sqrt_().add_(adaptive_eps)
                     update.div_(denom)
                 del denom, vt_buf
-
-            # RMS-aligned scaling
-            step_scale = lr * A if group['use_atan2'] and not group['normuon_variant'] else lr
-            # Spectral Normalization
-            if group.get('spectral_normalization', False):
-                spectral_normalization(update, state['spectral_v'], step_scale, group.get('n_layers', 1))
-            else:
-                # Factored RMS-aligned scaling
-                rms_adjustment(update, group['rms_rescaling'], step_scale)
 
             update = update.reshape(p.shape)
 
@@ -677,18 +654,18 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 set_state(state, 'second_momentum_buffer', vt_buf, actual_precision, random_int_state_tensor)
                 del denom
 
-            step_scale = lr * A if group['use_atan2'] and not group['normuon_variant'] else lr
+        step_scale = lr * A if group['use_atan2'] and not group['normuon_variant'] else lr
 
-            if group.get('spectral_normalization', False):
-                # Spectral Normalization
-                spectral_normalization(update, state['spectral_v'], step_scale, group.get('n_layers', 1))
-            else:
-                # RMS-aligned rescaling
-                rms_adjustment(update, group['rms_rescaling'], step_scale)
+        if group.get('spectral_normalization', False):
+            # Spectral Normalization
+            spectral_normalization(update, state['spectral_v'], step_scale, group.get('n_layers', 1))
+        else:
+            # RMS-aligned rescaling
+            rms_adjustment(update, group['rms_rescaling'], step_scale)
 
-            update = update.reshape(original_shape)
+        update = update.reshape(original_shape)
 
-        param_update.apply_parameter_update(self, p, group, update, lr, wd=weight_decay, random_int_tensor=random_int_tensor, decoupled=decoupled_wd)
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor, decoupled=decoupled_wd)
 
     @torch.no_grad()
     def step(self, closure=None):
