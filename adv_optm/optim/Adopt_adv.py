@@ -296,11 +296,7 @@ class Adopt_adv(torch.optim.Optimizer):
             dtype = torch.float32 if (state['factored'] or req_precision == 'factored') else p.dtype
 
             vt_dtype = torch.float32 if (state['factored'] or state['factored_2nd'] or req_precision in ['factored', 'bf16_sr', 'fp8_sr', 'int8_sr']) else dtype
-            vt_init = grad.pow(2).to(vt_dtype)
-            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
-                vt_init.mul_(beta2).addcmul_(grad.to(vt_dtype), grad.to(vt_dtype) * (1.0 - beta2))
-            else:
-                vt_init.mul_(beta2).addcmul_(grad.to(vt_dtype), grad.to(vt_dtype), value=1.0 - beta2)
+            vt_init = grad.pow(2).to(vt_dtype) * (1-beta2)
 
             if state['factored']:
                 state['effective_shape'] = _get_effective_shape(p.numel())
@@ -334,7 +330,7 @@ class Adopt_adv(torch.optim.Optimizer):
                     state['mu_v_nmf'], state['mv_v_nmf'] = _nnmf(vt_init.view(d1, d2))
                 else:
                     init_state_tensor(state, 'exp_avg_sq', p.shape, actual_precision, p.device, dtype)
-                    set_state(state, 'exp_avg_sq', vt_init, actual_precision, None)
+                    set_state(state, 'exp_avg_sq', vt_init, actual_precision, None, non_neg=True)
                 del vt_init
 
             if group.get('spectral_normalization', False) and is_spectral(p):
@@ -539,7 +535,7 @@ class Adopt_adv(torch.optim.Optimizer):
             if factored_2nd:
                 state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt.view(d1, d2), signed=False)
             else:
-                set_state(state, 'exp_avg_sq', vt, actual_precision, random_int_state_tensor)
+                set_state(state, 'exp_avg_sq', vt, actual_precision, random_int_state_tensor, non_neg=True)
             del random_int_state_tensor
 
         update_scaling = lr * A if self.use_atan2 else lr

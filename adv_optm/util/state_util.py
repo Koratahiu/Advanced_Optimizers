@@ -159,7 +159,7 @@ def set_state(state: dict, key: str, value: torch.Tensor, state_precision: str, 
                 _copy_int8_blockwise_stochastic_core_(state[key], value, scales,random_int_state_tensor, block_size=_int8_sr_BLOCK_SIZE, val_blocks=val_blocks)
             else:
                 copy_int8_blockwise_stochastic_(state[key], value, scales,block_size=_int8_sr_BLOCK_SIZE)
-        
+
         else: # int8_sr symmetric
             scales = _compute_int8_sym_block_stats(
                 value,

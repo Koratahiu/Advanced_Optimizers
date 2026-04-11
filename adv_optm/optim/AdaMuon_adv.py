@@ -380,7 +380,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     state['mu_vbuf_nmf'] = torch.zeros(d1, device=p.device, dtype=torch.float32)
                     state['mv_vbuf_nmf'] = torch.zeros(d2, device=p.device, dtype=torch.float32)
                 elif not group['normuon_variant']:
-                    init_state_tensor(state, 'second_momentum_buffer', p.shape, actual_precision, p.device, default_dtype)
+                    init_state_tensor(state, 'second_momentum_buffer', p.shape, actual_precision, p.device, default_dtype, non_neg=True)
 
             # NorMuon state initialization
             if group['normuon_variant']:
@@ -651,7 +651,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 else:
                     denom = vt_buf.sqrt().add_(adaptive_eps)
                     update.div_(denom)
-                set_state(state, 'second_momentum_buffer', vt_buf, actual_precision, random_int_state_tensor)
+                set_state(state, 'second_momentum_buffer', vt_buf, actual_precision, random_int_state_tensor, non_neg=True)
                 del denom
 
         step_scale = lr * A if group['use_atan2'] and not group['normuon_variant'] else lr

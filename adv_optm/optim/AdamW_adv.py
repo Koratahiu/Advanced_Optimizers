@@ -294,7 +294,7 @@ class AdamW_adv(torch.optim.Optimizer):
                     state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
                     state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
                 else:
-                    init_state_tensor(state, 'exp_avg_sq', p.shape, actual_precision, p.device, dtype)
+                    init_state_tensor(state, 'exp_avg_sq', p.shape, actual_precision, p.device, dtype, non_neg=True)
 
             if group.get('spectral_normalization', False) and is_spectral(p):
                 init_spectral_norm(group, state, p)
@@ -470,7 +470,7 @@ class AdamW_adv(torch.optim.Optimizer):
             if factored_2nd:
                 state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(exp_avg_sq.view(d1, d2), signed=False)
             else:
-                set_state(state, 'exp_avg_sq', exp_avg_sq, actual_precision, random_int_state_tensor)
+                set_state(state, 'exp_avg_sq', exp_avg_sq, actual_precision, random_int_state_tensor, non_neg=True)
             del random_int_state_tensor
 
             if group['use_atan2']:

@@ -188,14 +188,14 @@ class Lion_adv(torch.optim.Optimizer):
                 state['mu_m_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
                 state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                 packed_d2 = (d2 + 7) // 8
-                if group.get("freeze_on_flip", True):
+                if group.get("freeze_on_flip", False):
                     state['sign'] = _pack_bools(grad.view(d1, d2) > 0)
                 else:
                     packed_d2 = (d2 + 7) // 8
                     state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
             else: # Fallback to standard Lion
                 state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
-                if group.get("freeze_on_flip", True):
+                if group.get("freeze_on_flip", False):
                     state['prev_sign'] = (grad > 0).to(torch.uint8)
 
             if group.get('spectral_normalization', False) and is_spectral(p):
@@ -283,7 +283,8 @@ class Lion_adv(torch.optim.Optimizer):
 
             update = update.view(p.shape)
 
-            l1_mean = _get_l1_adaptive_lr(p, update, state, group, kappa_p, rescale=False)
+            if not group.get("l1_adaptive", False) or kappa_p != 1:
+                l1_mean = update.abs().mean()
 
             if group.get('stochastic_sign', False):
                 update = apply_stochastic_sign(update, noise=random_noise_tensor)
@@ -311,7 +312,9 @@ class Lion_adv(torch.optim.Optimizer):
                 update.mul_(mask)
                 del mask
 
-            l1_mean = _get_l1_adaptive_lr(p, update, state, group, kappa_p, rescale=False)
+
+            if not group.get("l1_adaptive", False) or kappa_p != 1:
+                l1_mean = update.abs().mean()
 
             if group.get('stochastic_sign', False):
                 update = apply_stochastic_sign(update, noise=random_noise_tensor)
