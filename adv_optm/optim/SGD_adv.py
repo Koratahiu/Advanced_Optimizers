@@ -64,7 +64,7 @@ class SGD_adv(torch.optim.Optimizer):
         stochastic_rounding: bool = True,
         # OrthoGrad
         orthogonal_gradient: bool = False,
-        # sinkhorn iterative
+        # Sinkhorn Iterative Normalization
         sinkhorn: bool = False,
         sinkhorn_iterations: int = 5,
         # Spectral Normed Optimizer

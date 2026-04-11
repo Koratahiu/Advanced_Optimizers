@@ -24,4 +24,4 @@ __all__ = [
     "SGD_adv",
 ]
 
-__version__ = "2.4.dev6"
+__version__ = "2.4.dev7"
