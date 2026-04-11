@@ -254,7 +254,7 @@ class AdamW_adv(torch.optim.Optimizer):
             actual_precision = 'auto' if req_precision == 'factored' else req_precision
             if actual_precision != 'auto' and (p.numel() < 10000 or p.ndim == 1):
                 actual_precision = 'fp32'
-            state['actual_state_precision'] = actual_precision
+            group['actual_state_precision'] = actual_precision
 
             dtype = torch.float32 if (state['factored'] or req_precision == 'factored') else p.dtype
             device = p.device
@@ -330,11 +330,11 @@ class AdamW_adv(torch.optim.Optimizer):
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
                 random_int_state_tensor = random_int_tensor
-            if state['actual_state_precision'] == 'bf16_sr' and random_int_state_tensor is None:
+            if group['actual_state_precision'] == 'bf16_sr' and random_int_state_tensor is None:
                 random_int_state_tensor = param_update._get_random_int_for_sr(p)
-            elif state['actual_state_precision'] == 'uint8_sr':
+            elif group['actual_state_precision'] == 'uint8_sr':
                 random_int_state_tensor = param_update._get_random_int_for_uint8_sr(p)
-            elif state['actual_state_precision'] == 'fp8_sr':
+            elif group['actual_state_precision'] == 'fp8_sr':
                 random_int_state_tensor = param_update._get_random_int_for_fp8_sr(p)
             step_param_fn = self._compiled_step_parameter
         else:

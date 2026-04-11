@@ -360,7 +360,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 actual_precision = req_precision
                 if actual_precision != 'auto' and (p.numel() < 10000 or p.ndim == 1):
                     actual_precision = 'fp32'
-                state['actual_state_precision'] = actual_precision
+                group['actual_state_precision'] = actual_precision
 
                 # factored_2nd: factorize v_t only; ignored for NorMuon (no v_t) and tiny params
                 use_factored_2nd = (

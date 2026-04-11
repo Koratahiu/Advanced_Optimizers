@@ -331,7 +331,7 @@ class Muon_adv(torch.optim.Optimizer):
                 actual_precision = req_precision
                 if actual_precision != 'auto' and (p.numel() < 10000 or p.ndim == 1):
                     actual_precision = 'fp32'
-                state['actual_state_precision'] = actual_precision
+                group['actual_state_precision'] = actual_precision
 
                 default_dtype = p.dtype
                 init_state_tensor(state, 'momentum_buffer', p.shape, actual_precision, p.device, default_dtype)
