@@ -8,7 +8,6 @@ from ..util.factorization_util import _get_effective_shape, _reconstruct_state, 
 from ..util.lion_k import _get_lion_k_update
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 from ..util.centered_decay import _init_anchor
-from ..util.update_util import _get_l1_adaptive_lr
 from ..util.signed_util import apply_stochastic_sign
 
 
