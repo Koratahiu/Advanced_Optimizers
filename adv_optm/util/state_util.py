@@ -118,9 +118,6 @@ def set_state(state: dict, key: str, value: torch.Tensor, state_precision: str, 
 
     elif state_precision == 'bf16_sr':
         # Apply stochastic rounding for BF16 states
-        if value.dtype != torch.float32:
-            value = value.float()
-            
         if random_int_state_tensor is None:
             copy_stochastic_(state[key], value, False)
         else:
