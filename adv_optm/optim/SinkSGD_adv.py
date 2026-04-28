@@ -13,10 +13,9 @@ from ..util.sinkhorn import apply_sr_sinkhorn
 
 class SinkSGD_adv(torch.optim.Optimizer):
     """
-    Implements an advanced Stochastic Gradient Descent (SGD) algorithm.
-    This is an advanced version of SGD with optional features like
-    low-rank factorization of optimizer states (SMMF), OrthoGrad, 
-    Cautious updating, and AdEMAMix extensions.
+    Implements an advanced Stochastic Gradient Descent (SGD) with Sinkhorn Iterative Normalization (SinkSGD) algorithm.
+    This is an advanced version of SinkSGD with optional features like
+    low-rank factorization of optimizer states (SMMF), OrthoGrad, etc.
 
     Args:
         params (iterable): iterable of parameters to optimize or dicts defining
@@ -62,11 +61,10 @@ class SinkSGD_adv(torch.optim.Optimizer):
         cautious_wd: bool = False,
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
+        # Sinkhorn Iterative Normalization
+        sinkhorn_iterations: int = 5,
         # OrthoGrad
         orthogonal_gradient: bool = False,
-        # Sinkhorn Iterative Normalization
-        sinkhorn: bool = False,
-        sinkhorn_iterations: int = 5,
         # Spectral Normed Optimizer
         spectral_normalization: bool = False,
         # Centered WD
@@ -101,7 +99,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
             "decoupled_wd": decoupled_wd, "cautious_wd": cautious_wd,
             "orthogonal_gradient": orthogonal_gradient, 
             "compiled_optimizer": compiled_optimizer,
-            "sinkhorn": sinkhorn, "sinkhorn_iterations": sinkhorn_iterations,
+            "sinkhorn_iterations": sinkhorn_iterations,
             "spectral_normalization": spectral_normalization,
             "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
             "state_precision": state_precision,
@@ -254,8 +252,8 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
             del random_int_state_tensor
 
-        if group['sinkhorn']:
-            update = apply_sr_sinkhorn(update, iters=group['sinkhorn_iterations'])
+        # Sinkhorn iterative normalization
+        update = apply_sr_sinkhorn(update, iters=group['sinkhorn_iterations'])
 
         update_scaling = step_size
         if group.get('spectral_normalization', False):
