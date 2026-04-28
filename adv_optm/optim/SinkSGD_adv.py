@@ -11,7 +11,7 @@ from ..util.centered_decay import _init_anchor
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 from ..util.sinkhorn import apply_sr_sinkhorn
 
-class SGD_adv(torch.optim.Optimizer):
+class SinkSGD_adv(torch.optim.Optimizer):
     """
     Implements an advanced Stochastic Gradient Descent (SGD) algorithm.
     This is an advanced version of SGD with optional features like
