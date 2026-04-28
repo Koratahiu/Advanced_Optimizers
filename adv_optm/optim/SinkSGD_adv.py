@@ -63,6 +63,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         stochastic_rounding: bool = True,
         # Sinkhorn Iterative Normalization
         sinkhorn_iterations: int = 5,
+        orthogonal_sinkhorn: bool = False,
         # OrthoGrad
         orthogonal_gradient: bool = False,
         # Spectral Normed Optimizer
@@ -100,6 +101,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
             "orthogonal_gradient": orthogonal_gradient, 
             "compiled_optimizer": compiled_optimizer,
             "sinkhorn_iterations": sinkhorn_iterations,
+            "orthogonal_sinkhorn": orthogonal_sinkhorn,
             "spectral_normalization": spectral_normalization,
             "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
             "state_precision": state_precision,
@@ -253,7 +255,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
             del random_int_state_tensor
 
         # Sinkhorn iterative normalization
-        update = apply_sr_sinkhorn(update, iters=group['sinkhorn_iterations'])
+        update = apply_sr_sinkhorn(update, p, ortho_project=group['orthogonal_sinkhorn'], iters=group['sinkhorn_iterations'])
 
         update_scaling = step_size
         if group.get('spectral_normalization', False):
