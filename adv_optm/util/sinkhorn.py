@@ -40,9 +40,6 @@ def apply_sr_sinkhorn(update: torch.Tensor, p: torch.Tensor, ortho_project: bool
     scale_second = math.sqrt(n if scale_cond else m)
 
     if ortho_project:
-        # Pre-compute squares for the mathematical trick in ortho_normed
-        target_norm_sq_first = scale_first ** 2
-        target_norm_sq_second = scale_second ** 2
         param_2d = p.float().view(p.shape[0], -1)
         p_norm_sq_dim = torch.sum(param_2d * param_2d, dim=dim, keepdim=True).add_(1e-30)
         p_norm_sq_adim = torch.sum(param_2d * param_2d, dim=1-dim, keepdim=True).add_(1e-30)
@@ -53,23 +50,17 @@ def apply_sr_sinkhorn(update: torch.Tensor, p: torch.Tensor, ortho_project: bool
         norm1 = update_2d.norm(p=2, dim=dim, keepdim=True).clamp_min_(1e-12)
         update_2d.mul_(scale_first / norm1)
         if ortho_project:
-            update_2d = ortho_normed(param_2d, update_2d, p_norm_sq_dim, dim, scale_first, target_norm_sq_first)
+            update_2d = ortho_normed(param_2d, update_2d, p_norm_sq_dim, dim, scale_first)
 
         # Second normalization step
         norm2 = update_2d.norm(p=2, dim=1-dim, keepdim=True).clamp_min_(1e-12)
         update_2d.mul_(scale_second / norm2)
         if ortho_project:
-            update_2d = ortho_normed(param_2d, update_2d, p_norm_sq_adim, 1-dim, scale_second, target_norm_sq_second)
-
-    # Final step
-    norm1 = update_2d.norm(p=2, dim=dim, keepdim=True).clamp_min_(1e-12)
-    update_2d.mul_(scale_first / norm1)
-    if ortho_project:
-        update_2d = ortho_normed(param_2d, update_2d, p_norm_sq_dim, dim, scale_first, target_norm_sq_first)
+            update_2d = ortho_normed(param_2d, update_2d, p_norm_sq_adim, 1-dim, scale_second)
 
     return update_2d.view(original_shape).to(original_dtype)
 
-def ortho_normed(p_2d, update_2d, p_norm_sq, dim, target_norm, target_norm_sq):
+def ortho_normed(p_2d, update_2d, p_norm_sq, dim, target_norm):
     """
     Projects the update to be orthogonal to p along 'dim' and restores the original norm.
     """
@@ -80,10 +71,7 @@ def ortho_normed(p_2d, update_2d, p_norm_sq, dim, target_norm, target_norm_sq):
     # In-place subtraction: update_2d = update_2d - (proj * p_2d)
     update_2d.addcmul_(proj, p_2d, value=-1.0)
 
-    # Magnitude Preservation via Pythagorean theorem 
-    # ||g_orth||^2 = ||g||^2 - ||proj * p||^2
-    proj_norm_sq = (dot_prod ** 2) / p_norm_sq
-    g_orth_norm_sq = (target_norm_sq - proj_norm_sq).clamp_min_(1e-30)
-
-    scale_factor = target_norm / torch.sqrt(g_orth_norm_sq)
+    # Magnitude Preservation
+    g_orth_norm = update_2d.norm(p=2, dim=dim, keepdim=True).clamp_min_(1e-12)
+    scale_factor = target_norm / g_orth_norm
     return update_2d.mul_(scale_factor)
