@@ -232,12 +232,13 @@ class AdamW_adv(torch.optim.Optimizer):
     def supports_flat_params(self):
         return False
 
-    @torch.no_grad()
-    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-        if p.grad is None:
-            return
+    def init_step(self):
+        for group in self.param_groups:
+            for i, p in enumerate(group['params']):
+                self.__init_state(p, group)
 
-        grad = p.grad
+    @torch.no_grad()
+    def __init_state(self, p, group):
         state = self.state[p]
 
         # State Initialization
@@ -302,6 +303,15 @@ class AdamW_adv(torch.optim.Optimizer):
             _init_anchor(p, state, group)
 
             _init_fisher_wd_scaler(group, state, p)
+
+    @torch.no_grad()
+    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        if p.grad is None:
+            return
+
+        grad = p.grad
+        state = self.state[p]
+        self.__init_state(p, group)
 
         beta1, beta2 = group['betas']
 

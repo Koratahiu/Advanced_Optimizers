@@ -36,8 +36,8 @@ def apply_sr_sinkhorn(update: torch.Tensor, p: torch.Tensor, ortho_project: bool
 
 
     # Precompute scaling factors. 
-    scale_first = m if scale_cond else n
-    scale_second = n if scale_cond else m
+    scale_first = math.sqrt(m if scale_cond else n)
+    scale_second = math.sqrt(n if scale_cond else m)
 
     if ortho_project:
         # Pre-compute squares for the mathematical trick in ortho_normed
