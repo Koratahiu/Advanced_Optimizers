@@ -28,7 +28,7 @@ def scale_update(
 
     # DoRA Magnitude Scales (1D) or 1D Bias/Norm layers
     if p.ndim < 2 or is_dora_scale:
-        return l2_normalization(update, dim=None, lr=lr)
+        return rms_normalization(update, dim=None, lr=lr)
 
 
     # LoRA Factors or Full Finetuning weights
