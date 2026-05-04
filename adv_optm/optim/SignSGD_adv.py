@@ -8,7 +8,7 @@ from ..util.factorization_util import _get_effective_shape, _reconstruct_state, 
 from ..util.lion_k import _get_lion_k_update
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 from ..util.centered_decay import _init_anchor
-from ..util.signed_util import apply_stochastic_sign
+from ..util.signed_util import apply_stochastic_sign_
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 
 
@@ -283,7 +283,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             raw_update = raw_update.view(p.shape)
 
             if group.get('stochastic_sign', False):
-                update = apply_stochastic_sign(raw_update, noise=random_noise_tensor)
+                update = apply_stochastic_sign_(raw_update, noise=random_noise_tensor)
             else:
                 update = _get_lion_k_update(raw_update, kappa_p)
 
@@ -299,13 +299,13 @@ class SignSGD_adv(torch.optim.Optimizer):
                     raw_update = grad.lerp(exp_avg, nv_coef)
                 else:
                     raw_update = exp_avg.clone()
-                    
+
                 set_state(state, 'exp_avg', exp_avg, actual_precision, random_int_state_tensor)
             else:
                 raw_update = grad.clone()
 
             if group.get('stochastic_sign', False):
-                update = apply_stochastic_sign(raw_update, noise=random_noise_tensor)
+                update = apply_stochastic_sign_(raw_update, noise=random_noise_tensor)
             else:
                 update = _get_lion_k_update(raw_update, kappa_p)
 
