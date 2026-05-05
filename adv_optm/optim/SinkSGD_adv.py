@@ -116,6 +116,8 @@ class SinkSGD_adv(torch.optim.Optimizer):
             for device in devices:
                 param_update.set_seed(device)
 
+        self.init_step()
+
         self._compiled_step_parameter = None
         if compiled_optimizer:
             self.compile(fullgraph=True)
@@ -136,14 +138,14 @@ class SinkSGD_adv(torch.optim.Optimizer):
     def supports_flat_params(self):
         return False
 
+    def init_step(self):
+        for group in self.param_groups:
+            for i, p in enumerate(group['params']):
+                self.__init_state(p, group)
+
     @torch.no_grad()
-    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-        if p.grad is None:
-            return
-
-        grad = p.grad
+    def __init_state(self, p, group):
         state = self.state[p]
-
         # State Initialization
         if 'step' not in state:
             state['step'] = 0
@@ -179,6 +181,15 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 init_spectral_norm(state, p)
 
             _init_anchor(p, state, group)
+
+    @torch.no_grad()
+    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        if p.grad is None:
+            return
+
+        grad = p.grad
+        state = self.state[p]
+        self.__init_state(p, group)
 
         step_size = group['lr']
 
@@ -219,7 +230,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
             if momentum != 0:
                 buf = _reconstruct_state((state['mu_b_nmf'], state['mv_b_nmf'], state['sign'], d2), signed=True)
-                buf.mul_(momentum).add_(grad_reshaped, alpha=1 - momentum)
+                buf.lerp_(grad_reshaped, 1 - momentum)
 
                 # Factorize updated buffer
                 state['mu_b_nmf'], state['mv_b_nmf'], state['sign'] = _factorize_state(buf.clone(), signed=True)
@@ -239,9 +250,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
             if momentum != 0:
                 buf = get_state(state, 'momentum_buffer', actual_precision)
-
-                buf.mul_(momentum).add_(grad, alpha=1 - momentum)
-
+                buf.lerp_(grad, 1 - momentum)
 
                 set_state(state, 'momentum_buffer', buf, actual_precision, random_int_state_tensor)
 
