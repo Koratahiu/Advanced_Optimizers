@@ -31,15 +31,6 @@ class SignSGD_adv(torch.optim.Optimizer):
         stochastic_rounding (bool, optional): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
         orthogonal_gradient (bool): whether to orthogonalize the gradient (default: False).
-        kappa_p (float, optional): The p-value for the Lp-norm in projection-K (domain [1.0, 2.0]).
-            - 1.0: Standard (sign update).
-            - 2.0: Spherical (normalized L2 update).
-            - values between 1.0 and 2.0 interpolate behavior.
-            (default: 1.0).
-        auto_kappa_p (bool, optional): If True, automatically determines kappa_p based on
-            parameter dimensionality. Sets p=2.0 for 4D tensors (Conv2D) (Biases/Norms) to
-            use Spherical updates, and p=1.0 for others (Linear/Embeddings) to use Sign
-            updates. Overrides explicit kappa_p value. (default: False).
         stochastic_sign (bool): whether to use the Stochastic Sign operator. (default: False)
         centered_wd (float): Centered Weight Decay coefficient. Instead of decaying weights
             toward zero, they are decayed toward their initial values (anchors). This
@@ -69,9 +60,6 @@ class SignSGD_adv(torch.optim.Optimizer):
         stochastic_rounding: bool = True,
         # OrthoGrad
         orthogonal_gradient: bool = False,
-        # Projection-k
-        kappa_p: float = 1.0,
-        auto_kappa_p: bool = True,
         # Stochastic Sign Operator
         stochastic_sign: bool = False,
         # Nesterov momentum
@@ -113,8 +101,6 @@ class SignSGD_adv(torch.optim.Optimizer):
             cautious_wd=cautious_wd,
             vector_reshape=vector_reshape,
             orthogonal_gradient=orthogonal_gradient,
-            kappa_p=kappa_p,
-            auto_kappa_p=auto_kappa_p,
             stochastic_sign=stochastic_sign,
             nesterov=nesterov,
             nesterov_coef=nesterov_coef,
@@ -245,16 +231,6 @@ class SignSGD_adv(torch.optim.Optimizer):
         if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)
 
-        # Projection logic (inspired from Lion-K)
-        kappa_p = group.get("kappa_p", 1.0)
-        if group.get("auto_kappa_p", False):
-            # Apply p=2.0 (Spherical) for >=4D (Conv2D)
-            # Apply p=1.0 (Sign) for everything else (Linear/Embeddings)
-            if p.ndim >= 4:
-                kappa_p = 2.0
-            else:
-                kappa_p = 1.0
-
         momentum = group["momentum"]
         nesterov = group.get('nesterov', False)
         nesterov_coef = group.get('nesterov_coef', None)
@@ -282,11 +258,6 @@ class SignSGD_adv(torch.optim.Optimizer):
 
             raw_update = raw_update.view(p.shape)
 
-            if group.get('stochastic_sign', False):
-                update = apply_stochastic_sign_(raw_update, noise=random_noise_tensor)
-            else:
-                update = _get_lion_k_update(raw_update, kappa_p)
-
         else:
             # Fallback to standard SignSGD logic
             if momentum > 0:
@@ -304,10 +275,10 @@ class SignSGD_adv(torch.optim.Optimizer):
             else:
                 raw_update = grad.clone()
 
-            if group.get('stochastic_sign', False):
-                update = apply_stochastic_sign_(raw_update, noise=random_noise_tensor)
-            else:
-                update = _get_lion_k_update(raw_update, kappa_p)
+        if group.get('stochastic_sign', False):
+            update = apply_stochastic_sign_(raw_update, noise=random_noise_tensor)
+        else:
+            update = raw_update.sign_()
 
         if group.get('spectral_normalization', False):
             update = scale_update(p, update, lr, state=state)
