@@ -41,14 +41,6 @@ class SignSGD_adv(torch.optim.Optimizer):
             use Spherical updates, and p=1.0 for others (Linear/Embeddings) to use Sign
             updates. Overrides explicit kappa_p value. (default: False).
         stochastic_sign (bool): whether to use the Stochastic Sign operator. (default: False)
-        Simplified_AdEMAMix (bool): whether to use the Simplified AdEMAMix update rule.
-            This changes the EMA to accumulator and the update numerator to `alpha_grad * grad + mt`, which can be
-            more responsive, especially for small batch sizes. (default: False)
-        alpha_grad (float): Mixing coefficient for the Simplified AdEMAMix update rule
-            (only used when `Simplified_AdEMAMix` is `True`). Controls the weight of the
-            current gradient. For small batch sizes, use high values (e.g., 10-100) to be
-            more responsive. For large batch sizes, use low values (e.g., 0-1) for
-            stability. (default: 100.0)
         freeze_on_flip (bool): Projected SignGD One-hit freeze. Masks updates for
             coordinates where the gradient sign flips compared to the previous step. (default: False)
         l1_adaptive (bool): Scales the update step magnitude dynamically
@@ -86,9 +78,9 @@ class SignSGD_adv(torch.optim.Optimizer):
         auto_kappa_p: bool = True,
         # Stochastic Sign Operator
         stochastic_sign: bool = False,
-        # Simplified_AdEMAMix
-        alpha_grad: float = 1.0,
-        Simplified_AdEMAMix: bool = False,
+        # Nesterov momentum
+        nesterov: bool = False,
+        nesterov_coef: float | None = None,
         # Projected and adaptive sign
         freeze_on_flip: bool = False,
         l1_adaptive: bool = False,
@@ -134,8 +126,8 @@ class SignSGD_adv(torch.optim.Optimizer):
             kappa_p=kappa_p,
             auto_kappa_p=auto_kappa_p,
             stochastic_sign=stochastic_sign,
-            alpha_grad=alpha_grad,
-            Simplified_AdEMAMix=Simplified_AdEMAMix,
+            nesterov=nesterov,
+            nesterov_coef=nesterov_coef,
             spectral_normalization=spectral_normalization,
             freeze_on_flip=freeze_on_flip,
             l1_adaptive=l1_adaptive,
@@ -289,13 +281,9 @@ class SignSGD_adv(torch.optim.Optimizer):
                 kappa_p = 1.0
 
         momentum = group["momentum"]
-        Simplified_AdEMAMix = group["Simplified_AdEMAMix"]
-        alpha_grad = group["alpha_grad"]
+        nesterov = group.get('nesterov', False)
+        nesterov_coef = group.get('nesterov_coef', None)
         freeze_on_flip = group.get("freeze_on_flip", False) and kappa_p == 1
-        if not Simplified_AdEMAMix:
-            alpha_grad = 0
-        elif momentum == 0:
-            alpha_grad = 1
 
         if state.get('factored'):
             # Factored Path
@@ -310,8 +298,9 @@ class SignSGD_adv(torch.optim.Optimizer):
                 exp_avg = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
                 exp_avg.mul_(momentum).add_(grad_reshaped)
 
-                if Simplified_AdEMAMix:
-                    raw_update = exp_avg + (grad_reshaped * alpha_grad)
+                if nesterov:
+                    nv_coef = momentum if nesterov_coef is None else nesterov_coef
+                    raw_update = grad_reshaped.lerp(exp_avg, nv_coef)
                 else:
                     raw_update = exp_avg.clone()
 
@@ -347,8 +336,9 @@ class SignSGD_adv(torch.optim.Optimizer):
                 exp_avg = get_state(state, 'exp_avg', actual_precision)
                 exp_avg.mul_(momentum).add_(grad)
 
-                if Simplified_AdEMAMix:
-                    raw_update = exp_avg + (grad * alpha_grad)
+                if nesterov:
+                    nv_coef = momentum if nesterov_coef is None else nesterov_coef
+                    raw_update = grad.lerp(exp_avg, nv_coef)
                 else:
                     raw_update = exp_avg.clone()
                     

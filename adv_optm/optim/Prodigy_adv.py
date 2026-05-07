@@ -9,8 +9,10 @@ from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
-from ..util.update_util import _grams_update, _cautious_update, _scale_sim_AdEMAMix_update, _init_fisher_wd_scaler, _get_fisher_wd_scaler
+from ..util.update_util import _grams_update, _cautious_update, _init_fisher_wd_scaler, _get_fisher_wd_scaler
 from ..util.centered_decay import _init_anchor
+from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm, scale_eps
+from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 
 A = 4 / math.pi
 
@@ -58,16 +60,6 @@ class Prodigy_adv(torch.optim.Optimizer):
             before it is added to the fast momentum term (`update = mt + alpha * mt_slow`).
             A higher value increases the stabilizing influence of the slow
             momentum. (default: 5.0)
-        Simplified_AdEMAMix (bool): whether to use the Simplified AdEMAMix update rule.
-            This changes the EMA to accumulator and the update numerator to `alpha_grad * grad + mt`, which can be
-            more responsive, especially for small batch sizes. Enabling this will
-            automatically disable `use_AdEMAMix`, `cautious_mask`, `grams_moment`,
-            and `use_atan2`. (default: False)
-        alpha_grad (float): Mixing coefficient for the Simplified AdEMAMix update rule
-            (only used when `Simplified_AdEMAMix` is `True`). Controls the weight of the
-            current gradient. For small batch sizes, use high values (e.g., 10-100) to be
-            more responsive. For large batch sizes, use low values (e.g., 0-1) for
-            stability. (default: 100.0)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
         factored_2nd (bool): whether to keep the first moment uncompressed (dense)
@@ -151,10 +143,12 @@ class Prodigy_adv(torch.optim.Optimizer):
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
-        # One-EMA AdEMAMix
-        Simplified_AdEMAMix: bool = False,
-        alpha_grad: float = 100.0,
-        # SMMF factorization
+        # Nesterov momentum
+        nesterov: bool = False,
+        nesterov_coef: float | None = None,
+        # States precision
+        state_precision: str = "auto", # 'fp32', 'factored', 'bf16_sr', 'fp8_sr', 'int8_sr'.
+        # SMMF factorization (legacy)
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
         factored_2nd: bool = False,
@@ -195,17 +189,6 @@ class Prodigy_adv(torch.optim.Optimizer):
         if cautious_mask and grams_moment:
             print("Warning: cautious is incompatible with grams, Disabling cautious.")
             cautious_mask = False
-        if betas[0] == 0.0 and Simplified_AdEMAMix:
-            raise ValueError(f"Beta1 cannot be 0.0 when using Simplified_AdEMAMix. Got {betas[0]}")
-        if use_AdEMAMix and Simplified_AdEMAMix:
-            print("Warning: use_AdEMAMix is incompatible with Simplified_AdEMAMix, Disabling use_AdEMAMix.")
-        if grams_moment and Simplified_AdEMAMix:
-            print("Warning: grams is incompatible with Simplified_AdEMAMix, Disabling grams.")
-        if cautious_mask and Simplified_AdEMAMix:
-            print("Warning: cautious is incompatible with Simplified_AdEMAMix, Disabling cautious.")
-        if use_atan2 and Simplified_AdEMAMix:
-            print("Warning: use_atan2 is incompatible with Simplified_AdEMAMix. Disabling use_atan2.")
-            use_atan2 = False
         if kourkoutas_beta and not (betas[1] > beta2_min):
             raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
 
@@ -218,17 +201,16 @@ class Prodigy_adv(torch.optim.Optimizer):
             "beta3": beta3, "d": d0, "d0": d0, "d_max": d0, "d_numerator": 0.0, "d_coef": d_coef,
             "growth_rate": growth_rate, "safeguard_warmup": safeguard_warmup, "k": 0, "slice_p": slice_p,
             "fsdp_in_use": fsdp_in_use, "prodigy_steps": prodigy_steps, "d_limiter": d_limiter,
-            "alpha_grad": alpha_grad,
+            "nesterov": nesterov, "nesterov_coef": nesterov_coef, "state_precision": state_precision,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
             "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
             "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape, "factored_2nd": factored_2nd
         }
         self.stochastic_rounding = stochastic_rounding
-        self.cautious_mask = cautious_mask and not Simplified_AdEMAMix
-        self.grams_moment = grams_moment and not Simplified_AdEMAMix
-        self.use_AdEMAMix = use_AdEMAMix and not Simplified_AdEMAMix
-        self.Simplified_AdEMAMix = Simplified_AdEMAMix
+        self.cautious_mask = cautious_mask
+        self.grams_moment = grams_moment
+        self.use_AdEMAMix = use_AdEMAMix
         self.fsdp_in_use = fsdp_in_use
 
         self.kourkoutas_beta = kourkoutas_beta
@@ -307,48 +289,66 @@ class Prodigy_adv(torch.optim.Optimizer):
         if 'step' not in state:
             state['step'] = 0
 
-            state['factored'] = (
-                group['nnmf_factor'] and
-                not (len(p.shape) == 1 and not group['vector_reshape'])
-                or group["factored_2nd"]
-            )
-
             slice_p = group['slice_p']
 
-            dtype = torch.float32 if state['factored'] else p.dtype
+            req_precision = group['state_precision']
+            is_vector = len(p.shape) == 1 and not group['vector_reshape']
+
+            state['factored'] = req_precision == 'factored' and not is_vector
+
+            state['factored_2nd'] = group.get('factored_2nd', False) and not is_vector
+
+            actual_precision = 'auto' if req_precision == 'factored' else req_precision
+            if actual_precision != 'auto' and (p.numel() < 10000 or p.ndim == 1):
+                actual_precision = 'fp32'
+            group['actual_state_precision'] = actual_precision
+
+            dtype = torch.float32 if (state['factored'] or req_precision == 'factored') else p.dtype
             device = p.device
 
             if state['factored']:
                 state['effective_shape'] = _get_effective_shape(p.numel())
                 d1, d2 = state['effective_shape']
 
-                if not group.get('factored_2nd', False):
-                    # First moment (m)
-                    if self.beta1 > 0:
-                        state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
-                        state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
-                        packed_d2 = (d2 + 7) // 8
-                        state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
-                    if self.use_AdEMAMix:
-                        state['mu_m_slow_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
-                        state['mv_m_slow_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
-                        packed_d2 = (d2 + 7) // 8
-                        state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
-                else:
-                    if self.beta1 > 0:
-                        state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
-                    if self.use_AdEMAMix:
-                        state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
+                # First moment (m)
+                if group['betas'][0] > 0:
+                    state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
+                    state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
+                    packed_d2 = (d2 + 7) // 8
+                    state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                # AdEMAMix slow moment (m_slow)
+                if self.use_AdEMAMix:
+                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
+                    state['mv_m_slow_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
+                    packed_d2 = (d2 + 7) // 8
+                    state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
 
                 # Second moment (v)
-                state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
-                state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+                state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
+                state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
             else:  # Fallback to standard AdamW for non-factored tensors
-                if self.beta1 > 0:
-                    state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
+                # First moment
+                if group['betas'][0] > 0:
+                    init_state_tensor(state, 'exp_avg', p.shape, actual_precision, p.device, dtype)
+                # AdEMAMix slow moment
                 if self.use_AdEMAMix:
-                    state['exp_avg_slow'] = torch.zeros_like(p, dtype=dtype)
-                state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
+                    init_state_tensor(state, 'exp_avg_slow', p.shape, actual_precision, p.device, dtype)
+
+                # Second moment (v)
+                if state['factored_2nd']:
+                    state['effective_shape'] = _get_effective_shape(p.numel())
+                    d1, d2 = state['effective_shape']
+                    state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
+                    state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
+                else:
+                    init_state_tensor(state, 'exp_avg_sq', p.shape, actual_precision, p.device, dtype, non_neg=True)
+
+            if group.get('spectral_normalization', False) and is_spectral(p):
+                init_spectral_norm(state, p)
+
+            _init_anchor(p, state, group)
+
+            _init_fisher_wd_scaler(group, state, p)
 
             # Prodigy states
             state['s'] = torch.zeros_like(p.flatten()[::slice_p]).detach()
@@ -356,10 +356,6 @@ class Prodigy_adv(torch.optim.Optimizer):
                 state['p0'] = p.flatten()[::slice_p].detach().clone()
             else:
                 state['p0'] = torch.tensor(0, device=device, dtype=p.dtype)
-
-            _init_anchor(p, state, group)
-
-            _init_fisher_wd_scaler(group, state, p)
 
         if not hasattr(self, 'd_denom'):
             self.d_denom = torch.tensor(0.0, device=p.device)
@@ -377,101 +373,97 @@ class Prodigy_adv(torch.optim.Optimizer):
         dlr = group['d'] * group['lr']
 
         random_int_tensor = None
+        random_int_state_tensor = None
 
         if group.get('compiled_optimizer', False):
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
+                random_int_state_tensor = random_int_tensor
             # TODO, workaround until pytorch#169634 is fixed
             d = torch.as_tensor(group['d'])
             dlr = torch.as_tensor(dlr)
+            if group['actual_state_precision'] == 'bf16_sr' and random_int_state_tensor is None:
+                random_int_state_tensor = param_update._get_random_int_for_sr(p)
+            elif group['actual_state_precision'] == 'int8_sr':
+                random_int_state_tensor = param_update._get_random_int_for_8bit_sr(p)
+            elif group['actual_state_precision'] == 'fp8_sr':
+                random_int_state_tensor = param_update._get_random_int_for_fp8_sr(p)
             step_param_fn = self._compiled_step_parameter
         else:
             d = group['d']
             step_param_fn = self._step_parameter
 
-        if self.Simplified_AdEMAMix:
-            dlr = _scale_sim_AdEMAMix_update(self.beta1, state['step'] + 1, group["alpha_grad"], dlr, False)
-
-        step_param_fn(p, grad, state, group, beta2, d, dlr, random_int_tensor)
+        step_param_fn(p, grad, state, group, beta2, d, dlr, random_int_tensor, random_int_state_tensor)
 
         state['step'] += 1
 
-    def _step_parameter(self, p, grad, state, group, beta2, d, dlr, random_int_tensor):
-        if grad.dtype != torch.float32 and state['factored']:
-            grad = grad.float()
+    def _step_parameter(self, p, grad, state, group, beta2, d, dlr, random_int_tensor, random_int_state_tensor):
+        grad = upcast_grad_for_precision(grad, state, group['state_precision'])
+
         if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)
 
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
             alpha = group['alpha']
-        if self.Simplified_AdEMAMix:
-            alpha_grad = group["alpha_grad"]
+        nesterov = group.get('nesterov', False)
+        nesterov_coef = group.get('nesterov_coef', None)
+        use_mt = group['betas'][0] > 0
 
         if group.get('kourkoutas_beta', False):
             # Accumulate current grad's norm for the *next* step
             self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
 
-        # Determine if we are using dense first-moments alongside a factored second-order second-moment
-        factored_2nd = group.get('factored_2nd', False)
+        adaptive_eps = scale_eps(group['eps'], p)
 
         if state['factored']:
             d1, d2 = state['effective_shape']
             grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct momentum from previous step's factors
-            if self.beta1 > 0:
-                if factored_2nd:
-                    mt = state['exp_avg'].view(d1, d2)
-                else:
-                    mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
+            if use_mt:
+                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
                 # Update momentum in full-size
-                if self.Simplified_AdEMAMix:
-                    alpha_mt = d
-                else:
-                    alpha_mt = d * (1.0 - self.beta1)
+                mt.mul_(self.beta1).add_(grad_reshaped, alpha=d * (1.0 - self.beta1))
 
-                mt.mul_(self.beta1).add_(grad_reshaped, alpha=alpha_mt)
-
-                if not factored_2nd:
-                    # Factorize
-                    state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
+                # Factorize
+                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
 
                 if self.grams_moment:
-                    update_mt = _grams_update(mt, grad_reshaped, inplace=not factored_2nd)
+                    update_mt = _grams_update(mt, grad_reshaped, inplace=True)
                 elif self.cautious_mask:
-                    update_mt = _cautious_update(mt, grad_reshaped, inplace=not factored_2nd)
+                    update_mt = _cautious_update(mt, grad_reshaped, inplace=True)
                 else:
-                    update_mt = mt if not factored_2nd else mt.clone()
+                    update_mt = mt
+
+                if nesterov:
+                    nv_coef = self.beta1 if nesterov_coef is None else nesterov_coef
+                    update_mt = update_mt.lerp_(grad_reshaped, 1-nv_coef)
 
             vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
+
             if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
                 vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped * (d * d * (1.0 - beta2)))
             else:
                 vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=d * d * (1.0 - beta2))
 
             if self.use_AdEMAMix:
-                if factored_2nd:
-                    mt_slow = state['exp_avg_slow'].view(d1, d2)
-                else:
-                    mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
+                mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
 
                 mt_slow.mul_(beta3_ema).add_(grad_reshaped, alpha=d * (1.0 - beta3_ema))
-                if self.beta1 > 0:
+
+                if use_mt:
                     update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
                     update = grad_reshaped.mul(d).add_(mt_slow, alpha=alpha)
 
-                if not factored_2nd:
-                    # Factorize
-                    state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
-                    del mt_slow
-            elif self.Simplified_AdEMAMix:
-                update = update_mt.add_(grad_reshaped, alpha=alpha_grad * d)
+                # Factorize
+                state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
+                del mt_slow
             else:
-                if self.beta1 > 0:
+                if use_mt:
                     update = update_mt
                 else:
                     update = grad_reshaped.mul(d)
@@ -484,23 +476,22 @@ class Prodigy_adv(torch.optim.Optimizer):
                 update.atan2_(denom)
             else:
                 denom = vt.sqrt_()
-                update.div_(denom.add_(d * group['eps']))
+                denom.add_(d * adaptive_eps)
+                update.div_(denom)
+
             wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, group['use_atan2'])
+
             del vt
 
-            update_scaling = dlr * A if group['use_atan2'] else dlr
-            update = update.view(p.shape).mul_(update_scaling)
+            update = update.view(p.shape)
 
-        else:  # Standard AdamW logic for non-factored tensors
-            if self.beta1 > 0:
-                exp_avg = state['exp_avg']
+        else:  # Standard AdamW logic for non-factored tensors (or factored_2nd)
+            actual_precision = group['actual_state_precision']
+            factored_2nd = state.get('factored_2nd', False)
 
-                if self.Simplified_AdEMAMix:
-                    alpha_mt = d
-                else:
-                    alpha_mt = d * (1.0 - self.beta1)
-
-                exp_avg.mul_(self.beta1).add_(grad, alpha=alpha_mt)
+            if use_mt:
+                exp_avg = get_state(state, 'exp_avg', actual_precision)
+                exp_avg.mul_(self.beta1).add_(grad, alpha=d * (1.0 - self.beta1))
 
                 if self.grams_moment:
                     update_mt = _grams_update(exp_avg, grad)
@@ -509,37 +500,63 @@ class Prodigy_adv(torch.optim.Optimizer):
                 else:
                     update_mt = exp_avg.clone()
 
+                if nesterov:
+                    nv_coef = self.beta1 if nesterov_coef is None else nesterov_coef
+                    update_mt = update_mt.lerp_(grad, 1-nv_coef)
+
+                set_state(state, 'exp_avg', exp_avg, actual_precision, random_int_state_tensor)
+
             if self.use_AdEMAMix:
-                exp_avg_slow = state['exp_avg_slow']
+                exp_avg_slow = get_state(state, 'exp_avg_slow', actual_precision)
                 exp_avg_slow.mul_(beta3_ema).add_(grad, alpha=d * (1.0 - beta3_ema))
-                if self.beta1 > 0:
+
+                if use_mt:
                     update = update_mt.add_(exp_avg_slow, alpha=alpha)
                 else:
                     update = grad.mul(d).add_(exp_avg_slow, alpha=alpha)
-            elif self.Simplified_AdEMAMix:
-                update = update_mt.add_(grad, alpha=alpha_grad * d)
+                set_state(state, 'exp_avg_slow', exp_avg_slow, actual_precision, random_int_state_tensor)
             else:
-                if self.beta1 > 0:
+                if use_mt:
                     update = update_mt
                 else:
                     update = grad.mul(d)
 
-            exp_avg_sq = state['exp_avg_sq']
-            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad * (d * d * (1.0 - beta2)))
+            if factored_2nd:
+                d1, d2 = state['effective_shape']
+                exp_avg_sq = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
+                exp_avg_sq = exp_avg_sq.view(p.shape)
             else:
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=d * d * (1.0 - beta2))
+                exp_avg_sq = get_state(state, 'exp_avg_sq', actual_precision)
+
+            grad_vt = grad.float() if factored_2nd else grad
+
+            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
+                exp_avg_sq.mul_(beta2).addcmul_(grad_vt, grad_vt * (d * d * (1.0 - beta2)))
+            else:
+                exp_avg_sq.mul_(beta2).addcmul_(grad_vt, grad_vt, value=d * d * (1.0 - beta2))
+
+            if factored_2nd:
+                state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(exp_avg_sq.view(d1, d2), signed=False)
+            else:
+                set_state(state, 'exp_avg_sq', exp_avg_sq, actual_precision, random_int_state_tensor, non_neg=True)
+            del random_int_state_tensor
 
             if group['use_atan2']:
                 denom = exp_avg_sq.sqrt()
-                update.atan2_(denom)
+                update.atan2_(denom.to(update.dtype))
             else:
                 denom = exp_avg_sq.sqrt()
-                update.div_(denom.add_(d * group['eps']))
+                denom.add_(d * adaptive_eps)
+                update.div_(denom.to(update.dtype))
+
             wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, group['use_atan2'])
+
             del denom
 
-            update_scaling = dlr * A if group['use_atan2'] else dlr
+        update_scaling = dlr * A if group['use_atan2'] else dlr
+        if group.get('spectral_normalization', False):
+            update = scale_update(p, update, update_scaling, state=state)
+        else:
             update.mul_(update_scaling)
 
         # --- Accumulate Prodigy stats ---

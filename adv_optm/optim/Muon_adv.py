@@ -37,14 +37,6 @@ class Muon_adv(torch.optim.Optimizer):
         ns_coeffs (tuple[float, float, float]): The (a, b, c) coefficients for the
             quintic polynomial in the Newton-Schulz iteration.
             (default: (3.4445, -4.7750, 2.0315)).
-        Simplified_AdEMAMix (bool): whether to use the Simplified AdEMAMix update rule.
-            This changes the update  to `alpha_grad * grad + mt`, which can be
-            more responsive, especially for small batch sizes. (default: False)
-        alpha_grad (float): Mixing coefficient for the Simplified AdEMAMix update rule
-            (only used when `Simplified_AdEMAMix` is `True`). Controls the weight of the
-            current gradient. For small batch sizes, use high values (e.g., 10-100) to be
-            more responsive. For large batch sizes, use low values (e.g., 0-1) for
-            stability. (default: 100.0)
         stochastic_rounding (bool): whether to use stochastic rounding for
             BF16 parameter updates (default: True).
         orthogonal_gradient (bool): whether to use OrthoGrad.  (default: False)
@@ -115,6 +107,7 @@ class Muon_adv(torch.optim.Optimizer):
         cautious_wd: bool = False,
         # Nesterov momentum
         nesterov: bool = True,
+        nesterov_coef: float | None = None,
         # Newton Schulz
         ns_steps: int = 5,
         ns_eps: float = 1e-7,
@@ -125,9 +118,6 @@ class Muon_adv(torch.optim.Optimizer):
         orthogonal_gradient: bool = False,
         # RMS Rescaling
         rms_rescaling: bool = True,
-        # One-EMA AdEMAMix
-        Simplified_AdEMAMix: bool = False,
-        alpha_grad: float = 100.0,
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
@@ -185,9 +175,6 @@ class Muon_adv(torch.optim.Optimizer):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
         if not (ns_steps > 0):
             raise ValueError(f"Newton-Schulz steps should be > 0. Got {ns_steps}")
-        if Simplified_AdEMAMix and nesterov:
-            print("Warning: nesterov is incompatible with Simplified_AdEMAMix, Disabling nesterov.")
-            nesterov = False
         if spectral_normalization and rms_rescaling:
             print("Warning: spectral_normalization is incompatible with rms_rescaling, Disabling rms_rescaling.")
             rms_rescaling = False
@@ -201,10 +188,9 @@ class Muon_adv(torch.optim.Optimizer):
 
         defaults = {
             "lr": lr, "beta1": beta1, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
-            "nesterov": nesterov, "ns_steps": ns_steps, "ns_eps": ns_eps,
+            "nesterov": nesterov, "nesterov_coef": nesterov_coef, "ns_steps": ns_steps, "ns_eps": ns_eps,
             "ns_coeffs": ns_coeffs, "nnmf_factor": nnmf_factor,
             "vector_reshape": vector_reshape,  "rms_rescaling": rms_rescaling,
-            "Simplified_AdEMAMix": Simplified_AdEMAMix, "alpha_grad": alpha_grad,
             "orthogonal_gradient": orthogonal_gradient,
             'compiled_optimizer': compiled_optimizer,
             "use_muon": use_muon,
@@ -443,8 +429,7 @@ class Muon_adv(torch.optim.Optimizer):
 
         beta1 = group['beta1']
         nesterov = group['nesterov']
-        Simplified_AdEMAMix = group['Simplified_AdEMAMix']
-        alpha_grad = group['alpha_grad']
+        nesterov_coef = group.get('nesterov_coef', None)
 
         if group.get('spectral_normalization', False):
 
@@ -456,7 +441,7 @@ class Muon_adv(torch.optim.Optimizer):
 
         # MARS-M Approximated (Variance Reduction)
         if group.get('approx_mars', False):
-            grad = approx_mars(grad, state['last_grad'], group['mars_gamma'], beta1, Simplified_AdEMAMix=Simplified_AdEMAMix)
+            grad = approx_mars(grad, state['last_grad'], group['mars_gamma'], beta1)
 
         if grad.dtype != torch.float32 and state.get('factored', False):
             grad = grad.float()
@@ -472,16 +457,12 @@ class Muon_adv(torch.optim.Optimizer):
             mt_buf = _reconstruct_state((state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'], d2), signed=True)
 
             # Update momentum in full-size
-            if not Simplified_AdEMAMix:
-                mt_buf.lerp_(grad_reshaped, 1 - beta1)
-            else:
-                mt_buf.mul_(beta1).add_(grad_reshaped)
+            mt_buf.lerp_(grad_reshaped, 1 - beta1)
 
             if nesterov:
                 # Nesterov momentum
-                update = grad_reshaped.lerp(mt_buf, beta1)
-            elif Simplified_AdEMAMix:
-                update = torch.add(mt_buf, grad_reshaped, alpha=alpha_grad)
+                nv_coef = beta1 if nesterov_coef is None else nesterov_coef
+                update = grad_reshaped.lerp(mt_buf, nv_coef)
             else:
                 # Standard momentum
                 update = mt_buf.clone()
@@ -518,16 +499,12 @@ class Muon_adv(torch.optim.Optimizer):
 
                 # Momentum update
                 mt_buf = get_state(state, 'momentum_buffer', actual_precision)
-                if not Simplified_AdEMAMix:
-                    mt_buf.lerp_(grad, 1 - beta1)
-                else:
-                    mt_buf.mul_(beta1).add_(grad)
+                mt_buf.lerp_(grad, 1 - beta1)
 
                 if nesterov:
                     # Nesterov momentum
-                    update = grad.lerp(mt_buf, beta1)
-                elif Simplified_AdEMAMix:
-                    update = mt_buf.add(grad, alpha=alpha_grad)
+                    nv_coef = beta1 if nesterov_coef is None else nesterov_coef
+                    update = grad.lerp(mt_buf, nv_coef)
                 else:
                     # Standard momentum
                     update = mt_buf.clone()

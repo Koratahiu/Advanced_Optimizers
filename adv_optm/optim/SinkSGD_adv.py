@@ -56,6 +56,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         momentum: float = 0.0,
         weight_decay: float = 0.0,
         nesterov: bool = False,
+        nesterov_coef: float | None = None,
         # Decoupled/cautious weight decay
         decoupled_wd: bool = False,
         cautious_wd: bool = False,
@@ -96,7 +97,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
         defaults = {
             "lr": lr, "momentum": momentum,
-            "weight_decay": weight_decay, "nesterov": nesterov,
+            "weight_decay": weight_decay, "nesterov": nesterov, "nesterov_coef": nesterov_coef, 
             "decoupled_wd": decoupled_wd, "cautious_wd": cautious_wd,
             "orthogonal_gradient": orthogonal_gradient, 
             "compiled_optimizer": compiled_optimizer,
@@ -223,6 +224,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
         momentum = group['momentum']
         nesterov = group['nesterov']
+        nesterov_coef = group.get('nesterov_coef', None)
 
         if state['factored']:
             d1, d2 = state['effective_shape']
@@ -235,9 +237,9 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 # Factorize updated buffer
                 state['mu_b_nmf'], state['mv_b_nmf'], state['sign'] = _factorize_state(buf.clone(), signed=True)
 
-
                 if nesterov:
-                    update = grad_reshaped.add(buf, alpha=momentum)
+                    nv_coef = momentum if nesterov_coef is None else nesterov_coef
+                    update = grad_reshaped.lerp(buf, nv_coef)
                 else:
                     update = buf.clone()
             else:
@@ -255,7 +257,8 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 set_state(state, 'momentum_buffer', buf, actual_precision, random_int_state_tensor)
 
                 if nesterov:
-                    update = grad.add(buf, alpha=momentum)
+                    nv_coef = momentum if nesterov_coef is None else nesterov_coef
+                    update = grad.lerp(buf, nv_coef)
                 else:
                     update = buf.clone()
             else:

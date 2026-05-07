@@ -127,6 +127,9 @@ class AdamW_adv(torch.optim.Optimizer):
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
+        # Nesterov momentum
+        nesterov: bool = False,
+        nesterov_coef: float | None = None,
         # K-b (adaptive beta2)
         kourkoutas_beta: bool = False,
         beta2_min: float = 0.9,
@@ -176,7 +179,7 @@ class AdamW_adv(torch.optim.Optimizer):
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
-            "use_atan2": use_atan2,
+            "use_atan2": use_atan2, "nesterov": nesterov, "nesterov_coef": nesterov_coef,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
             "beta3_ema": beta3_ema, "alpha": alpha, "compiled_optimizer": compiled_optimizer,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
@@ -363,6 +366,9 @@ class AdamW_adv(torch.optim.Optimizer):
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
             alpha = group['alpha']
+        nesterov = group.get('nesterov', False)
+        nesterov_coef = group.get('nesterov_coef', None)
+        use_mt = group['betas'][0] > 0
 
         if group.get('kourkoutas_beta', False):
             # Accumulate current grad's norm for the *next* step
@@ -375,7 +381,7 @@ class AdamW_adv(torch.optim.Optimizer):
             grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct momentum from previous step's factors
-            if beta1 > 0:
+            if use_mt:
                 mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
                 # Update momentum in full-size
@@ -391,6 +397,10 @@ class AdamW_adv(torch.optim.Optimizer):
                 else:
                     update_mt = mt
 
+                if nesterov:
+                    nv_coef = beta1 if nesterov_coef is None else nesterov_coef
+                    update_mt = update_mt.lerp_(grad_reshaped, 1-nv_coef)
+
             vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
 
             if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
@@ -403,7 +413,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
                 mt_slow.lerp_(grad_reshaped, 1.0 - beta3_ema)
 
-                if beta1 > 0:
+                if use_mt:
                     update = update_mt.add_(mt_slow, alpha=alpha)
                 else:
                     update = grad_reshaped.add(mt_slow, alpha=alpha)
@@ -412,7 +422,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
                 del mt_slow
             else:
-                if beta1 > 0:
+                if use_mt:
                     update = update_mt
                 else:
                     update = grad_reshaped.clone()
@@ -439,7 +449,7 @@ class AdamW_adv(torch.optim.Optimizer):
             actual_precision = group['actual_state_precision']
             factored_2nd = state.get('factored_2nd', False)
 
-            if beta1 > 0:
+            if use_mt:
                 exp_avg = get_state(state, 'exp_avg', actual_precision)
                 exp_avg.lerp_(grad, 1.0 - beta1)
 
@@ -449,19 +459,24 @@ class AdamW_adv(torch.optim.Optimizer):
                     update_mt = _cautious_update(exp_avg, grad)
                 else:
                     update_mt = exp_avg.clone()
+
+                if nesterov:
+                    nv_coef = beta1 if nesterov_coef is None else nesterov_coef
+                    update_mt = update_mt.lerp_(grad, 1-nv_coef)
+
                 set_state(state, 'exp_avg', exp_avg, actual_precision, random_int_state_tensor)
 
             if self.use_AdEMAMix:
                 exp_avg_slow = get_state(state, 'exp_avg_slow', actual_precision)
                 exp_avg_slow.lerp_(grad, 1.0 - beta3_ema)
 
-                if beta1 > 0:
+                if use_mt:
                     update = update_mt.add_(exp_avg_slow, alpha=alpha)
                 else:
                     update = torch.add(grad, exp_avg_slow, alpha=alpha)
                 set_state(state, 'exp_avg_slow', exp_avg_slow, actual_precision, random_int_state_tensor)
             else:
-                update = update_mt if beta1 > 0 else grad.clone()
+                update = update_mt if use_mt else grad.clone()
 
             if factored_2nd:
                 d1, d2 = state['effective_shape']

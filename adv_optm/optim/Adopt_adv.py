@@ -7,7 +7,7 @@ from ..util import param_update
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state, _nnmf
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
-from ..util.update_util import _grams_update, _cautious_update, _scale_sim_AdEMAMix_update, _init_fisher_wd_scaler, _get_fisher_wd_scaler
+from ..util.update_util import _grams_update, _cautious_update, _init_fisher_wd_scaler, _get_fisher_wd_scaler
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm, scale_eps
 from ..util.centered_decay import _init_anchor
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
@@ -68,16 +68,6 @@ class Adopt_adv(torch.optim.Optimizer):
             before it is added to the fast momentum term (`update = mt + alpha * mt_slow`).
             A higher value increases the stabilizing influence of the slow
             momentum. (default: 5.0)
-        Simplified_AdEMAMix (bool): whether to use the Simplified AdEMAMix update rule.
-            This changes the EMA to accumulator and the update numerator to `alpha_grad * grad + mt`, which can be
-            more responsive, especially for small batch sizes. Enabling this will
-            automatically disable `use_AdEMAMix`, `cautious_mask`, `grams_moment`,
-            and `use_atan2`. (default: False)
-        alpha_grad (float): Mixing coefficient for the Simplified AdEMAMix update rule
-            (only used when `Simplified_AdEMAMix` is `True`). Controls the weight of the
-            current gradient. For small batch sizes, use high values (e.g., 10-100) to be
-            more responsive. For large batch sizes, use low values (e.g., 0-1) for
-            stability. (default: 100.0)
         kourkoutas_beta (bool): whether to enable the layer-wise dynamic β₂ logic.
             If `False`, the optimizer behaves as standard Adopt. (default: False)
         beta2_min (float): The minimum value for dynamic β₂, used during periods of
@@ -143,9 +133,9 @@ class Adopt_adv(torch.optim.Optimizer):
         use_AdEMAMix: bool = False,
         beta3_ema: float = 0.9999,
         alpha: float = 5.0,
-        # One-EMA AdEMAMix
-        Simplified_AdEMAMix: bool = False,
-        alpha_grad: float = 100.0,
+        # Nesterov momentum
+        nesterov: bool = False,
+        nesterov_coef: float | None = None,
         # K-b (adaptive beta2)
         kourkoutas_beta: bool = False,
         beta2_min: float = 0.9,
@@ -179,16 +169,8 @@ class Adopt_adv(torch.optim.Optimizer):
         if cautious_mask and grams_moment:
             print("Warning: cautious is incompatible with grams, Disabling cautious.")
             cautious_mask = False
-        if betas[0] == 0.0 and Simplified_AdEMAMix:
-            raise ValueError(f"Beta1 cannot be 0.0 when using Simplified_AdEMAMix. Got {betas[0]}")
         if kourkoutas_beta and not (betas[1] > beta2_min):
             raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
-        if use_AdEMAMix and Simplified_AdEMAMix:
-            print("Warning: use_AdEMAMix is incompatible with Simplified_AdEMAMix, Disabling use_AdEMAMix.")
-        if grams_moment and Simplified_AdEMAMix:
-            print("Warning: grams is incompatible with Simplified_AdEMAMix, Disabling grams.")
-        if cautious_mask and Simplified_AdEMAMix:
-            print("Warning: cautious is incompatible with Simplified_AdEMAMix, Disabling cautious.")
 
 
         state_precision = state_precision.lower()
@@ -204,7 +186,7 @@ class Adopt_adv(torch.optim.Optimizer):
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
             "beta3_ema": beta3_ema, "alpha": alpha,
-            "alpha_grad": alpha_grad,
+            "nesterov": nesterov, "nesterov_coef": nesterov_coef,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
             "spectral_normalization": spectral_normalization,
@@ -216,12 +198,11 @@ class Adopt_adv(torch.optim.Optimizer):
         }
         self.clip_lambda = clip_lambda
         self.stochastic_rounding = stochastic_rounding
-        self.use_atan2 = use_atan2 and not Simplified_AdEMAMix
-        self.cautious_mask = cautious_mask and not Simplified_AdEMAMix
-        self.grams_moment = grams_moment and not Simplified_AdEMAMix
+        self.use_atan2 = use_atan2
+        self.cautious_mask = cautious_mask
+        self.grams_moment = grams_moment
         self.orthogonal_gradient = orthogonal_gradient
-        self.use_AdEMAMix = use_AdEMAMix and not Simplified_AdEMAMix
-        self.Simplified_AdEMAMix = Simplified_AdEMAMix
+        self.use_AdEMAMix = use_AdEMAMix
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
         self._init_lr = lr
@@ -367,9 +348,6 @@ class Adopt_adv(torch.optim.Optimizer):
             lr = group['lr']
             step_param_fn = self._step_parameter
 
-        if self.Simplified_AdEMAMix:
-            lr = _scale_sim_AdEMAMix_update(beta1, state['step'] + 1, group["alpha_grad"], lr, group.get('spectral_normalization', False))
-
         step_param_fn(p, grad, state, group, lr, beta1, beta2, random_int_tensor, random_int_state_tensor)
 
         state['step'] += 1
@@ -383,8 +361,9 @@ class Adopt_adv(torch.optim.Optimizer):
         if self.use_AdEMAMix:
             beta3_ema = group['beta3_ema']
             alpha = group['alpha']
-        if self.Simplified_AdEMAMix:
-            alpha_grad = group["alpha_grad"]
+        nesterov = group.get('nesterov', False)
+        nesterov_coef = group.get('nesterov_coef', None)
+        use_mt = group['betas'][0] > 0
 
         if group.get('kourkoutas_beta', False):
             # Accumulate current grad's norm for the *next* step
@@ -421,13 +400,10 @@ class Adopt_adv(torch.optim.Optimizer):
                     normalized_grad.clamp_(-clip_val, clip_val)
 
             # ADOPT Step B: Update momentum m_t using normalized gradient
-            if beta1 > 0:
+            if use_mt:
                 mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
-                if self.Simplified_AdEMAMix:
-                    mt.mul_(beta1).add_(normalized_grad, alpha=1.0)
-                else:
-                    mt.lerp_(normalized_grad, 1.0 - beta1)
+                mt.lerp_(normalized_grad, 1.0 - beta1)
 
                 # Factorize
                 state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
@@ -439,13 +415,17 @@ class Adopt_adv(torch.optim.Optimizer):
                 else:
                     update_mt = mt
 
+                if nesterov:
+                    nv_coef = beta1 if nesterov_coef is None else nesterov_coef
+                    update_mt = update_mt.lerp_(grad_reshaped, 1-nv_coef)
+
             if self.use_AdEMAMix:
                 # Reconstruct AdEMAMix EMA
                 mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
 
                 mt_slow.lerp_(normalized_grad, 1.0 - beta3_ema)
 
-                if beta1 > 0:
+                if use_mt:
                     update = update_mt.add_(mt_slow, alpha=alpha)
                     del normalized_grad
                 else:
@@ -453,12 +433,8 @@ class Adopt_adv(torch.optim.Optimizer):
                 # Factorize
                 state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
                 del mt_slow
-
-            elif self.Simplified_AdEMAMix:
-                update = update_mt.add_(normalized_grad, alpha=alpha_grad)
-                del normalized_grad
             else:
-                if beta1 > 0:
+                if use_mt:
                     update = update_mt
                     del normalized_grad
                 else:
@@ -490,12 +466,9 @@ class Adopt_adv(torch.optim.Optimizer):
                     normalized_grad.clamp_(-clip_val, clip_val)
 
             # ADOPT Step B: Update momentum m_t
-            if beta1 > 0:
+            if use_mt:
                 mt = get_state(state, 'exp_avg', actual_precision) # m_{t-1}
-                if self.Simplified_AdEMAMix:
-                    mt.mul_(beta1).add_(normalized_grad, alpha=1.0)
-                else:
-                    mt.lerp_(normalized_grad, 1.0 - beta1)
+                mt.lerp_(normalized_grad, 1.0 - beta1)
 
                 if self.grams_moment:
                     update_mt = _grams_update(mt, grad)
@@ -504,21 +477,23 @@ class Adopt_adv(torch.optim.Optimizer):
                 else:
                     update_mt = mt.clone()
 
+                if nesterov:
+                    nv_coef = beta1 if nesterov_coef is None else nesterov_coef
+                    update_mt = update_mt.lerp_(grad, 1-nv_coef)
+
                 set_state(state, 'exp_avg', mt, actual_precision, random_int_state_tensor)
 
             if self.use_AdEMAMix:
                 m_slow = get_state(state, 'exp_avg_slow', actual_precision)
                 m_slow.lerp_(normalized_grad, 1.0 - beta3_ema)
-                if beta1 > 0:
+                if use_mt:
                     update = update_mt.add_(m_slow, alpha=alpha)
                     del normalized_grad
                 else:
                     update = normalized_grad.add_(m_slow, alpha=alpha)
                 set_state(state, 'exp_avg_slow', m_slow, actual_precision, random_int_state_tensor)
-            elif self.Simplified_AdEMAMix:
-                update = update_mt.add_(normalized_grad, alpha=alpha_grad)
             else:
-                if beta1 > 0:
+                if use_mt:
                     update = update_mt
                     del normalized_grad
                 else:
