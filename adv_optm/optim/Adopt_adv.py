@@ -32,7 +32,8 @@ class Adopt_adv(torch.optim.Optimizer):
         betas (tuple[float, float]): coefficients used for computing running
             averages of momentum and variance (default: (0.9, 0.9999))
         eps (float): term added to the denominator to improve
-            numerical stability (default: 1e-6)
+            numerical stability. Set to None for scale invariant eps (vector
+            lower bound) (default: 1e-6)
         weight_decay (float): weight decay (L2 penalty) (default: 0)
         fisher_wd (bool): whether to use Fisher Adam (FAdam) weight decay, mapping
             the decay direction through the empirical Fisher information matrix and

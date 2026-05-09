@@ -5,8 +5,10 @@ import math
 from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
-from ..util.update_util import _grams_update, _cautious_update
+from ..util.update_util import _grams_update, _cautious_update, _init_fisher_wd_scaler, _get_fisher_wd_scaler
+from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm, scale_eps
 from ..util.centered_decay import _init_anchor
+from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 
 A = 4 / math.pi
 
@@ -16,11 +18,22 @@ def _init_auxadam_state(self, p, group):
 
     state['step'] = 0
 
+    req_precision = group.get('adam_state_precision', 'auto')
+    is_vector = len(p.shape) == 1 and not group.get('vector_reshape', False)
+
     state['factored'] = (
-        group['adam_nnmf_factor'] and
-        not (len(p.shape) == 1 and not group['vector_reshape'])
+        (group.get('adam_nnmf_factor', False) or req_precision == 'factored') and
+        not is_vector
     )
-    dtype = torch.float32 if state['factored'] else p.dtype
+
+    state['factored_2nd'] = group.get('adam_factored_2nd', False) and not is_vector
+
+    actual_precision = 'auto' if req_precision == 'factored' else req_precision
+    if actual_precision != 'auto' and (p.numel() < 10000 or p.ndim == 1):
+        actual_precision = 'fp32'
+    group['adam_actual_state_precision'] = actual_precision
+
+    dtype = torch.float32 if (state['factored'] or req_precision == 'factored') else p.dtype
     device = p.device
 
     if state['factored']:
@@ -28,36 +41,47 @@ def _init_auxadam_state(self, p, group):
         d1, d2 = state['effective_shape']
         # First moment (m)
         if group['adam_betas'][0] > 0:
-            state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
-            state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+            state['mu_m_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
+            state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
             packed_d2 = (d2 + 7) // 8
             state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
         if group.get('adam_use_AdEMAMix'):
-            state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=dtype)
-            state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
+            state['mu_m_slow_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
+            state['mv_m_slow_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
             packed_d2 = (d2 + 7) // 8
-            state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+            state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
         # Second moment (v)
-        state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
-        state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
+        state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
+        state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
     else:  # Fallback to standard AdamW for non-factored tensors
         if group['adam_betas'][0] > 0:
-            state['exp_avg'] = torch.zeros_like(p, device=device, dtype=dtype)
+            init_state_tensor(state, 'exp_avg', p.shape, actual_precision, p.device, dtype)
         if group.get('adam_use_AdEMAMix'):
-            state['exp_avg_slow'] = torch.zeros_like(p, device=device, dtype=dtype)
-        state['exp_avg_sq'] = torch.zeros_like(p, device=device, dtype=dtype)
+            init_state_tensor(state, 'exp_avg_slow', p.shape, actual_precision, p.device, dtype)
+
+        if state.get('factored_2nd', False):
+            state['effective_shape'] = _get_effective_shape(p.numel())
+            d1, d2 = state['effective_shape']
+            state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
+            state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
+        else:
+            init_state_tensor(state, 'exp_avg_sq', p.shape, actual_precision, p.device, dtype, non_neg=True)
+
+    if group.get('adam_spectral_normalization', False) and is_spectral(p):
+        init_spectral_norm(state, p)
 
     _init_anchor(p, state, group)
+    _init_fisher_wd_scaler(group, state, p)
 
 
 @torch.no_grad()
-def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sqrt_bias_correction2, step_size, random_int_tensor):
-    if grad.dtype != torch.float32 and state.get('factored', False):
-        grad = grad.float()
+def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sqrt_bias_correction2, step_size, random_int_tensor, random_int_state_tensor=None):
+    grad = upcast_grad_for_precision(grad, state, group.get('adam_state_precision', 'auto'))
+
     if group.get("adam_orthogonal_gradient"):
         grad = _orthogonalize_gradient(p, grad)
 
-    if self.kourkoutas_helper:
+    if hasattr(self, 'kourkoutas_helper') and self.kourkoutas_helper:
         # Accumulate current grad's norm for the *next* step
         self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
 
@@ -65,12 +89,18 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
         beta3_ema = group['adam_beta3_ema']
         alpha = group['adam_alpha']
 
+    nesterov = group.get('adam_nesterov', False)
+    nesterov_coef = group.get('adam_nesterov_coef', None)
+    use_mt = group['adam_betas'][0] > 0
+
+    adaptive_eps = scale_eps(group['adam_eps'], p)
+
     if state['factored']:
         d1, d2 = state['effective_shape']
         grad_reshaped = grad.view(d1, d2)
 
         # Reconstruct momentum from previous step's factors
-        if beta1_adam > 0:
+        if use_mt:
             mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
             # Update momentum in full-size
@@ -86,6 +116,10 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
             else:
                 update_mt = mt
 
+            if nesterov:
+                nv_coef = beta1_adam if nesterov_coef is None else nesterov_coef
+                update_mt = update_mt.lerp_(grad_reshaped, 1 - nv_coef)
+
         vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
         if isinstance(beta2_adam, torch.Tensor) and beta2_adam.dim() > 0:
             vt.mul_(beta2_adam).addcmul_(grad_reshaped, grad_reshaped * (1.0 - beta2_adam))
@@ -97,7 +131,7 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
 
             mt_slow.lerp_(grad_reshaped, 1.0 - beta3_ema)
 
-            if beta1_adam > 0:
+            if use_mt:
                 update = update_mt.add_(mt_slow, alpha=alpha)
             else:
                 update = grad_reshaped.add(mt_slow, alpha=alpha)
@@ -105,31 +139,35 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
             state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
             del mt_slow
         else:
-            if beta1_adam > 0:
+            if use_mt:
                 update = update_mt
             else:
                 update = grad_reshaped.clone()
 
-        if group['adam_use_atan2']:
-            denom = vt.sqrt()
+        # Factorize
+        state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
+
+        if group.get('adam_use_atan2'):
+            denom = vt.sqrt_()
             denom.div_(sqrt_bias_correction2)
             update.atan2_(denom)
         else:
-            denom = vt.sqrt()
-            denom.div_(sqrt_bias_correction2).add_(group['adam_eps'])
+            denom = vt.sqrt_()
+            denom.div_(sqrt_bias_correction2).add_(adaptive_eps)
             update.div_(denom)
-        del denom
 
-        # Factorize
-        state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
+        wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, group.get('adam_use_atan2'))
+
         del vt
 
-        update_scaling = step_size * A if group['adam_use_atan2'] else step_size
-        update = update.view(p.shape).mul_(update_scaling)
+        update = update.view(p.shape)
 
     else:  # Standard AdamW logic for non-factored tensors
-        if beta1_adam > 0:
-            exp_avg = state['exp_avg']
+        actual_precision = group.get('adam_actual_state_precision', 'auto')
+        factored_2nd = state.get('factored_2nd', False)
+
+        if use_mt:
+            exp_avg = get_state(state, 'exp_avg', actual_precision)
             exp_avg.lerp_(grad, 1.0 - beta1_adam)
 
             if group.get('adam_grams_moment'):
@@ -139,34 +177,61 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
             else:
                 update_mt = exp_avg.clone()
 
+            if nesterov:
+                nv_coef = beta1_adam if nesterov_coef is None else nesterov_coef
+                update_mt = update_mt.lerp_(grad, 1 - nv_coef)
+
+            set_state(state, 'exp_avg', exp_avg, actual_precision, random_int_state_tensor)
+
         if group.get('adam_use_AdEMAMix'):
-            exp_avg_slow = state['exp_avg_slow']
+            exp_avg_slow = get_state(state, 'exp_avg_slow', actual_precision)
             exp_avg_slow.lerp_(grad, 1.0 - beta3_ema)
 
-            if beta1_adam > 0:
+            if use_mt:
                 update = update_mt.add_(exp_avg_slow, alpha=alpha)
             else:
                 update = torch.add(grad, exp_avg_slow, alpha=alpha)
+            set_state(state, 'exp_avg_slow', exp_avg_slow, actual_precision, random_int_state_tensor)
         else:
-            update = update_mt if beta1_adam > 0 else grad.clone()
+            update = update_mt if use_mt else grad.clone()
 
-        exp_avg_sq = state['exp_avg_sq']
-        if isinstance(beta2_adam, torch.Tensor) and beta2_adam.dim() > 0:
-            exp_avg_sq.mul_(beta2_adam).addcmul_(grad, grad * (1.0 - beta2_adam))
+        if factored_2nd:
+            d1, d2 = state['effective_shape']
+            exp_avg_sq = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
+            exp_avg_sq = exp_avg_sq.view(p.shape)
         else:
-            exp_avg_sq.mul_(beta2_adam).addcmul_(grad, grad, value=1.0 - beta2_adam)
+            exp_avg_sq = get_state(state, 'exp_avg_sq', actual_precision)
+
+        grad_vt = grad.float() if factored_2nd else grad
+
+        if isinstance(beta2_adam, torch.Tensor) and beta2_adam.dim() > 0:
+            exp_avg_sq.mul_(beta2_adam).addcmul_(grad_vt, grad_vt * (1.0 - beta2_adam))
+        else:
+            exp_avg_sq.mul_(beta2_adam).addcmul_(grad_vt, grad_vt, value=1.0 - beta2_adam)
+
+        if factored_2nd:
+            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(exp_avg_sq.view(d1, d2), signed=False)
+        else:
+            set_state(state, 'exp_avg_sq', exp_avg_sq, actual_precision, random_int_state_tensor, non_neg=True)
+        del random_int_state_tensor
 
         if group.get('adam_use_atan2'):
             denom = exp_avg_sq.sqrt()
             denom.div_(sqrt_bias_correction2)
-            update.atan2_(denom)
+            update.atan2_(denom.to(update.dtype))
         else:
             denom = exp_avg_sq.sqrt()
-            denom.div_(sqrt_bias_correction2).add_(group['adam_eps'])
-            update.div_(denom)
+            denom.div_(sqrt_bias_correction2).add_(adaptive_eps)
+            update.div_(denom.to(update.dtype))
+
+        wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, group.get('adam_use_atan2'))
         del denom
 
-        update_scaling = step_size * A if group['adam_use_atan2'] else step_size
+    update_scaling = step_size * A if group.get('adam_use_atan2') else step_size
+
+    if group.get('adam_spectral_normalization', False):
+        update = scale_update(p, update, update_scaling, state=state)
+    else:
         update.mul_(update_scaling)
 
-    param_update.apply_parameter_update(self, p, group, update, step_size, group["adam_weight_decay"], random_int_tensor=random_int_tensor)
+    param_update.apply_parameter_update(self, p, group, update, step_size, group["adam_weight_decay"], random_int_tensor=random_int_tensor, wd_scaler=wd_scaler)

@@ -109,6 +109,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         adam_betas (tuple[float, float]): Betas for the AdamW optimizer part.
         adam_eps (float): Epsilon for the AdamW optimizer part.
         adam_weight_decay (float): Weight decay for the AdamW optimizer part.
+        adam_fisher_wd (bool): Fisher Adam (FAdam) weight decay for the AdamW part. (default: False)
         adam_use_bias_correction (bool): Bias correction for AdamW.
         adam_use_atan2 (bool): Atan2 update rule for AdamW.
         adam_cautious_mask (bool): Cautious masking for AdamW.
@@ -117,8 +118,17 @@ class AdaMuon_adv(torch.optim.Optimizer):
         adam_use_AdEMAMix (bool): AdEMAMix for AdamW.
         adam_beta3_ema (float): Beta3 for AdEMAMix.
         adam_alpha (float): Alpha for AdEMAMix.
+        adam_nesterov (bool): Nesterov momentum for AdamW. (default: False)
+        adam_nesterov_coef (float, optional): Nesterov coefficient for AdamW. (default: None)
         adam_kourkoutas_beta (bool): Kourkoutas-β for AdamW.
+        adam_beta2_min (float): Minimum beta2 for Kourkoutas-β. (default: 0.9)
+        adam_ema_alpha (float): EMA alpha for Kourkoutas-β. (default: 0.95)
+        adam_tiny_spike (float): Tiny spike for Kourkoutas-β. (default: 1e-9)
+        adam_k_warmup_steps (int): Warmup steps for Kourkoutas-β. (default: 0)
+        adam_spectral_normalization (bool): Enable explicit spectral normalization for AdamW. (default: False)
+        adam_state_precision (str): Precision for AuxAdam states. Options: 'auto', 'fp32', 'bf16_sr', 'fp8_sr', 'int8_sr', 'factored'. (default: 'auto')
         adam_nnmf_factor (bool): 1-bit factored for AdamW.
+        adam_factored_2nd (bool): Factorize only the second moment (v_t) for AuxAdam. (default: False)
     """
 
     def __init__(
@@ -180,6 +190,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         adam_betas: tuple[float, float] = (0.9, 0.99),
         adam_eps: float | None = 1e-8,
         adam_weight_decay: float = 0.0,
+        adam_fisher_wd: bool = False,
         adam_use_bias_correction: bool = True,
         adam_use_atan2: bool = False,
         adam_cautious_mask: bool = False,
@@ -188,12 +199,17 @@ class AdaMuon_adv(torch.optim.Optimizer):
         adam_use_AdEMAMix: bool = False,
         adam_beta3_ema: float = 0.9999,
         adam_alpha: float = 5.0,
+        adam_nesterov: bool = False,
+        adam_nesterov_coef: float | None = None,
         adam_kourkoutas_beta: bool = False,
         adam_beta2_min: float = 0.9,
         adam_ema_alpha: float = 0.95,
         adam_tiny_spike: float = 1e-9,
         adam_k_warmup_steps: int = 0,
+        adam_spectral_normalization: bool = False,
+        adam_state_precision: str = "auto",
         adam_nnmf_factor: bool = False,
+        adam_factored_2nd: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -208,9 +224,13 @@ class AdaMuon_adv(torch.optim.Optimizer):
             ValueError("spectral_normalization violates accelerated Newton-Schulz assumptions. Pick one of them.")
 
         state_precision = state_precision.lower()
-        valid_precisions = {"auto", "fp32", "bf16_sr", "fp8_sr", "int8_sr"}
+        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp8_sr", "int8_sr"}
         if state_precision not in valid_precisions:
             raise ValueError(f"state_precision must be one of {valid_precisions}. Got {state_precision}")
+
+        adam_state_precision = adam_state_precision.lower()
+        if adam_state_precision not in valid_precisions:
+            raise ValueError(f"adam_state_precision must be one of {valid_precisions}. Got {adam_state_precision}")
 
         defaults = {
             "lr": lr, "betas": betas, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
@@ -240,13 +260,18 @@ class AdaMuon_adv(torch.optim.Optimizer):
             "centered_wd_mode": centered_wd_mode,
             # AdamW_adv defaults
             "adam_betas": adam_betas, "adam_eps": adam_eps, "adam_weight_decay": adam_weight_decay,
+            "adam_fisher_wd": adam_fisher_wd,
             "adam_use_bias_correction": adam_use_bias_correction, "adam_use_atan2": adam_use_atan2,
             "adam_cautious_mask": adam_cautious_mask, "adam_grams_moment": adam_grams_moment,
             "adam_orthogonal_gradient": adam_orthogonal_gradient,
             "adam_use_AdEMAMix": adam_use_AdEMAMix, "adam_beta3_ema": adam_beta3_ema, "adam_alpha": adam_alpha,
+            "adam_nesterov": adam_nesterov, "adam_nesterov_coef": adam_nesterov_coef,
             "adam_kourkoutas_beta": adam_kourkoutas_beta, "adam_beta2_min": adam_beta2_min,
             "adam_ema_alpha": adam_ema_alpha, "adam_tiny_spike": adam_tiny_spike,
-            "adam_k_warmup_steps": adam_k_warmup_steps, "adam_nnmf_factor": adam_nnmf_factor,
+            "adam_k_warmup_steps": adam_k_warmup_steps,
+            "adam_spectral_normalization": adam_spectral_normalization,
+            "adam_state_precision": adam_state_precision,
+            "adam_nnmf_factor": adam_nnmf_factor, "adam_factored_2nd": adam_factored_2nd,
         }
         self.stochastic_rounding = stochastic_rounding
         self._init_lr = lr
@@ -433,13 +458,24 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             step_size = group['lr'] / bias_correction1
 
+            random_int_state_tensor = None
             if is_compiled:
                 step_size = torch.as_tensor(step_size)
                 adam_step_param = self._compiled_adam_step_parameter
+                
+                # Generate state SR random tensor when compiled
+                actual_precision = group.get('adam_actual_state_precision', 'auto')
+                random_int_state_tensor = random_int_tensor
+                if actual_precision == 'bf16_sr' and random_int_state_tensor is None:
+                    random_int_state_tensor = param_update._get_random_int_for_sr(p)
+                elif actual_precision == 'int8_sr':
+                    random_int_state_tensor = param_update._get_random_int_for_8bit_sr(p)
+                elif actual_precision == 'fp8_sr':
+                    random_int_state_tensor = param_update._get_random_int_for_fp8_sr(p)
             else:
                 adam_step_param = Muon_AuxAdam._adam_step_parameter
 
-            adam_step_param(self, p, grad, state, group, beta1_adam, beta2_adam, sqrt_bias_correction2, step_size, random_int_tensor)
+            adam_step_param(self, p, grad, state, group, beta1_adam, beta2_adam, sqrt_bias_correction2, step_size, random_int_tensor, random_int_state_tensor)
 
             state['step'] += 1
 
@@ -451,7 +487,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 # Generate state SR random tensor when compiled
                 actual_precision = group['actual_state_precision']
                 random_int_state_tensor = random_int_tensor
-                if actual_precision == 'bf16_sr' and random_int_state_tensor is not None:
+                if actual_precision == 'bf16_sr' and random_int_state_tensor is None:
                     random_int_state_tensor = param_update._get_random_int_for_sr(p)
                 elif actual_precision == 'int8_sr':
                     random_int_state_tensor = param_update._get_random_int_for_8bit_sr(p)
