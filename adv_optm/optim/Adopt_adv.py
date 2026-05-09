@@ -209,6 +209,8 @@ class Adopt_adv(torch.optim.Optimizer):
         self._init_lr = lr
         super().__init__(params, defaults)
 
+        self.init_step()
+
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
 
@@ -240,25 +242,14 @@ class Adopt_adv(torch.optim.Optimizer):
     @property
     def supports_flat_params(self): return False
 
+    def init_step(self):
+        for group in self.param_groups:
+            for i, p in enumerate(group['params']):
+                self.__init_state(p, group)
+
     @torch.no_grad()
-    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
-        if p.grad is None:
-            return
-
-        grad = p.grad
+    def __init_state(self, p, group):
         state = self.state[p]
-
-        beta1, beta2 = group['betas']
-
-        if group.get('kourkoutas_beta', False):
-            if 'step' not in state:
-                current_step = 0
-            else:
-                current_step = state['step']
-            # Call prepare_step() once at the beginning of the step for all params
-            self.kourkoutas_helper.maybe_prepare_step(current_step, p.device)
-            # Get the dynamic beta2 calculated in prepare_step()
-            beta2 = self.kourkoutas_helper.get_beta2(p, group)
 
         # State Initialization
         if 'step' not in state:
@@ -321,6 +312,27 @@ class Adopt_adv(torch.optim.Optimizer):
             _init_anchor(p, state, group)
 
             _init_fisher_wd_scaler(group, state, p)
+
+    @torch.no_grad()
+    def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        if p.grad is None:
+            return
+
+        grad = p.grad
+        state = self.state[p]
+        self.__init_state(p, group)
+
+        beta1, beta2 = group['betas']
+
+        if group.get('kourkoutas_beta', False):
+            if 'step' not in state:
+                current_step = 0
+            else:
+                current_step = state['step']
+            # Call prepare_step() once at the beginning of the step for all params
+            self.kourkoutas_helper.maybe_prepare_step(current_step, p.device)
+            # Get the dynamic beta2 calculated in prepare_step()
+            beta2 = self.kourkoutas_helper.get_beta2(p, group)
 
         current_step = state['step']
 

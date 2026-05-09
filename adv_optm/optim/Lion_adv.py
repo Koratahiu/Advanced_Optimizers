@@ -118,6 +118,8 @@ class Lion_adv(torch.optim.Optimizer):
         self._init_lr = lr
         super().__init__(params, defaults)
 
+        self.init_step()
+
         if self.stochastic_rounding:
             # For deterministic stochastic rounding, we need to seed the generator
             # for each device used by the parameters.
@@ -152,15 +154,14 @@ class Lion_adv(torch.optim.Optimizer):
     def supports_flat_params(self) -> bool:
         return False
 
+    def init_step(self):
+        for group in self.param_groups:
+            for i, p in enumerate(group['params']):
+                self.__init_state(p, group)
+
     @torch.no_grad()
-    def step_parameter(self, p: torch.Tensor, group: dict, i: Optional[int] = None):
-        """Performs a single optimization step on a single parameter."""
-        if p.grad is None:
-            return
-
-        grad = p.grad
+    def __init_state(self, p, group):
         state = self.state[p]
-
         # State Initialization
         if 'step' not in state:
             state['step'] = 0
@@ -186,6 +187,16 @@ class Lion_adv(torch.optim.Optimizer):
                 init_spectral_norm(state, p)
 
             _init_anchor(p, state, group)
+
+    @torch.no_grad()
+    def step_parameter(self, p: torch.Tensor, group: dict, i: Optional[int] = None):
+        """Performs a single optimization step on a single parameter."""
+        if p.grad is None:
+            return
+
+        grad = p.grad
+        state = self.state[p]
+        self.__init_state(p, group)
 
         state['step'] += 1
         lr = group["lr"]

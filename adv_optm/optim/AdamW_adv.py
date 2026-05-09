@@ -199,6 +199,8 @@ class AdamW_adv(torch.optim.Optimizer):
         self._init_lr = lr
         super().__init__(params, defaults)
 
+        self.init_step()
+
         if self.kourkoutas_beta:
             self.kourkoutas_helper = KourkoutasHelper(self)
 

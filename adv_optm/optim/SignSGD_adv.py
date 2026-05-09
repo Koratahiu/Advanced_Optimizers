@@ -117,6 +117,8 @@ class SignSGD_adv(torch.optim.Optimizer):
         self._init_lr = lr
         super().__init__(params, defaults)
 
+        self.init_step()
+
         if self.stochastic_rounding:
             # For deterministic stochastic rounding, we need to seed the generator
             # for each device used by the parameters.
@@ -151,15 +153,14 @@ class SignSGD_adv(torch.optim.Optimizer):
     def supports_flat_params(self) -> bool:
         return False
 
+    def init_step(self):
+        for group in self.param_groups:
+            for i, p in enumerate(group['params']):
+                self.__init_state(p, group)
+
     @torch.no_grad()
-    def step_parameter(self, p: torch.Tensor, group: dict, i: Optional[int] = None):
-        """Performs a single optimization step on a single parameter."""
-        if p.grad is None:
-            return
-
-        grad = p.grad
+    def __init_state(self, p, group):
         state = self.state[p]
-
         # State Initialization
         if group["momentum"] > 0 and len(state) == 0:
             req_precision = group['state_precision']
@@ -192,6 +193,16 @@ class SignSGD_adv(torch.optim.Optimizer):
             state["step"] = 0
 
             _init_anchor(p, state, group)
+
+    @torch.no_grad()
+    def step_parameter(self, p: torch.Tensor, group: dict, i: Optional[int] = None):
+        """Performs a single optimization step on a single parameter."""
+        if p.grad is None:
+            return
+
+        grad = p.grad
+        state = self.state[p]
+        self.__init_state(p, group)
 
         lr = group["lr"]
 
