@@ -10,6 +10,7 @@ from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 from ..util.centered_decay import _init_anchor
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 from ..util.sinkhorn import apply_sr_sinkhorn
+from ..util.signed_util import apply_stochastic_sign_
 
 class SinkSGD_adv(torch.optim.Optimizer):
     """
@@ -55,6 +56,12 @@ class SinkSGD_adv(torch.optim.Optimizer):
         lr: float = 1e-3,
         momentum: float = 0.0,
         weight_decay: float = 0.0,
+        # Sinkhorn Iterative Normalization
+        sinkhorn_iterations: int = 5,
+        orthogonal_sinkhorn: bool = False,
+        # Normalization then Momentum
+        normed_momentum: bool = False,
+        # Nesterov Momentum
         nesterov: bool = False,
         nesterov_coef: float | None = None,
         # Decoupled/cautious weight decay
@@ -62,9 +69,6 @@ class SinkSGD_adv(torch.optim.Optimizer):
         cautious_wd: bool = False,
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
-        # Sinkhorn Iterative Normalization
-        sinkhorn_iterations: int = 5,
-        orthogonal_sinkhorn: bool = False,
         # OrthoGrad
         orthogonal_gradient: bool = False,
         # Spectral Normed Optimizer
@@ -97,7 +101,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
         defaults = {
             "lr": lr, "momentum": momentum,
-            "weight_decay": weight_decay, "nesterov": nesterov, "nesterov_coef": nesterov_coef, 
+            "weight_decay": weight_decay, "nesterov": nesterov, "nesterov_coef": nesterov_coef, "normed_momentum": normed_momentum,
             "decoupled_wd": decoupled_wd, "cautious_wd": cautious_wd,
             "orthogonal_gradient": orthogonal_gradient, 
             "compiled_optimizer": compiled_optimizer,
@@ -196,9 +200,13 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
         random_int_tensor = None
         random_int_state_tensor = None
+        sign_noise = None
 
         if group.get('compiled_optimizer', False):
             step_size = torch.as_tensor(step_size)
+            is_vector = grad.ndim < 2 or getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False)
+            if is_vector:
+                sign_noise = param_update._get_random_noise_for_sso(p)
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 random_int_tensor = param_update._get_random_int_for_sr(p)
                 random_int_state_tensor = random_int_tensor
@@ -212,19 +220,30 @@ class SinkSGD_adv(torch.optim.Optimizer):
         else:
             step_param_fn = self._step_parameter
 
-        step_param_fn(p, grad, state, group, step_size, random_int_tensor, random_int_state_tensor)
+        step_param_fn(p, grad, state, group, step_size, random_int_tensor, random_int_state_tensor, sign_noise)
 
         state['step'] += 1
 
-    def _step_parameter(self, p, grad, state, group, step_size, random_int_tensor, random_int_state_tensor):
+    def _step_parameter(self, p, grad, state, group, step_size, random_int_tensor, random_int_state_tensor, sign_noise):
         grad = upcast_grad_for_precision(grad, state, group['state_precision'])
-
-        if group["orthogonal_gradient"]:
-            grad = _orthogonalize_gradient(p, grad)
+        is_vector = grad.ndim < 2 or getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False)
+        sinkhorn_iterations = group['sinkhorn_iterations']
+        orthogonal_sinkhorn = group['orthogonal_sinkhorn']
 
         momentum = group['momentum']
         nesterov = group['nesterov']
         nesterov_coef = group.get('nesterov_coef', None)
+
+        if group.get('normed_momentum', False):
+            if not is_vector:
+                # Sinkhorn iterative normalization
+                grad = apply_sr_sinkhorn(grad, p, ortho_project=orthogonal_sinkhorn, iters=sinkhorn_iterations)
+            else:
+                # For vectors, apply adaptive stochastic sign
+                grad = apply_stochastic_sign_(grad, sign_noise, is_vector=is_vector)
+
+        if group["orthogonal_gradient"]:
+            grad = _orthogonalize_gradient(p, grad)
 
         if state['factored']:
             d1, d2 = state['effective_shape']
@@ -266,8 +285,13 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
             del random_int_state_tensor
 
-        # Sinkhorn iterative normalization
-        update = apply_sr_sinkhorn(update, p, ortho_project=group['orthogonal_sinkhorn'], iters=group['sinkhorn_iterations'])
+        if not group.get('normed_momentum', False):
+            if not is_vector:
+                # Sinkhorn iterative normalization
+                update = apply_sr_sinkhorn(update, p, ortho_project=orthogonal_sinkhorn, iters=sinkhorn_iterations)
+            else:
+                # For vectors, apply adaptive stochastic sign
+                update = apply_stochastic_sign_(update, sign_noise, is_vector=is_vector)
 
         update_scaling = step_size
         if group.get('spectral_normalization', False):

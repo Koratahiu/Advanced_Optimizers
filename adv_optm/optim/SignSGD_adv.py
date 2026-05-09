@@ -65,6 +65,8 @@ class SignSGD_adv(torch.optim.Optimizer):
         # Nesterov momentum
         nesterov: bool = False,
         nesterov_coef: float | None = None,
+        # Normalization then Momentum
+        normed_momentum: bool = False,
         # Centered WD
         centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
@@ -104,6 +106,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             stochastic_sign=stochastic_sign,
             nesterov=nesterov,
             nesterov_coef=nesterov_coef,
+            normed_momentum=normed_momentum,
             spectral_normalization=spectral_normalization,
             centered_wd= centered_wd,
             centered_wd_mode= centered_wd_mode,
@@ -224,16 +227,22 @@ class SignSGD_adv(torch.optim.Optimizer):
 
     def _step_parameter(self, p, grad, state, group, lr, random_int_tensor, random_noise_tensor, random_int_state_tensor=None):
         grad = upcast_grad_for_precision(grad, state, group['state_precision'])
-        
-        if grad.dtype != torch.float32 and state.get('factored', False):
-            grad = grad.float()
 
-        if group["orthogonal_gradient"]:
-            grad = _orthogonalize_gradient(p, grad)
+        is_vector = grad.ndim < 2 or getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False)
 
         momentum = group["momentum"]
         nesterov = group.get('nesterov', False)
         nesterov_coef = group.get('nesterov_coef', None)
+
+        if group.get('normed_momentum', False):
+            if group.get('stochastic_sign', False):
+                grad = apply_stochastic_sign_(grad, noise=random_noise_tensor, is_vector=is_vector)
+            else:
+                grad = grad.sign_()
+
+        if group["orthogonal_gradient"]:
+            grad = _orthogonalize_gradient(p, grad)
+
 
         if state.get('factored'):
             # Factored Path
@@ -275,10 +284,11 @@ class SignSGD_adv(torch.optim.Optimizer):
             else:
                 raw_update = grad.clone()
 
-        if group.get('stochastic_sign', False):
-            update = apply_stochastic_sign_(raw_update, noise=random_noise_tensor)
-        else:
-            update = raw_update.sign_()
+        if not group.get('normed_momentum', False):
+            if group.get('stochastic_sign', False):
+                update = apply_stochastic_sign_(raw_update, noise=random_noise_tensor, is_vector=is_vector)
+            else:
+                update = raw_update.sign_()
 
         if group.get('spectral_normalization', False):
             update = scale_update(p, update, lr, state=state)
