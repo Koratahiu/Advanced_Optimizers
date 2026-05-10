@@ -263,7 +263,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             if momentum > 0:
                 # Reconstruct momentum m_{t-1}
                 exp_avg = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
-                exp_avg.mul_(momentum).add_(grad_reshaped)
+                exp_avg.lerp_(grad_reshaped, 1 - momentum)
 
                 if nesterov:
                     nv_coef = momentum if nesterov_coef is None else nesterov_coef
@@ -283,7 +283,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             if momentum > 0:
                 actual_precision = group['actual_state_precision']
                 exp_avg = get_state(state, 'exp_avg', actual_precision)
-                exp_avg.mul_(momentum).add_(grad)
+                exp_avg.lerp_(grad, 1 - momentum)
 
                 if nesterov:
                     nv_coef = momentum if nesterov_coef is None else nesterov_coef
