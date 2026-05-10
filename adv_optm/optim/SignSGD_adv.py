@@ -300,6 +300,8 @@ class SignSGD_adv(torch.optim.Optimizer):
                 update = apply_stochastic_sign_(raw_update, noise=random_noise_tensor, is_vector=is_vector)
             else:
                 update = raw_update.sign_()
+        else:
+            update = raw_update
 
         if group.get('spectral_normalization', False):
             update = scale_update(p, update, lr, state=state)
