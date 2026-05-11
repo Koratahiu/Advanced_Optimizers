@@ -63,6 +63,7 @@ class AdamW_adv(torch.optim.Optimizer):
             before it is added to the fast momentum term (`update = mt + alpha * mt_slow`).
             A higher value increases the stabilizing influence of the slow
             momentum. (default: 5.0)
+        normed_momentum (bool): whether to compute the first moment on the normalized gradient. (default: False)
         kourkoutas_beta (bool): whether to enable the layer-wise dynamic β₂ logic.
             If `False`, the optimizer behaves as standard AdamW. (default: False)
         beta2_min (float): The minimum value for dynamic β₂, used during periods of
@@ -131,6 +132,8 @@ class AdamW_adv(torch.optim.Optimizer):
         # Nesterov momentum
         nesterov: bool = False,
         nesterov_coef: float | None = None,
+        # Normalization then Momentum
+        normed_momentum: bool = False,
         # K-b (adaptive beta2)
         kourkoutas_beta: bool = False,
         beta2_min: float = 0.9,
@@ -181,6 +184,7 @@ class AdamW_adv(torch.optim.Optimizer):
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
             "use_atan2": use_atan2, "nesterov": nesterov, "nesterov_coef": nesterov_coef,
+            "normed_momentum": normed_momentum,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
             "beta3_ema": beta3_ema, "alpha": alpha, "compiled_optimizer": compiled_optimizer,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
@@ -383,6 +387,27 @@ class AdamW_adv(torch.optim.Optimizer):
             d1, d2 = state['effective_shape']
             grad_reshaped = grad.view(d1, d2)
 
+            vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
+
+            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
+                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped * (1.0 - beta2))
+            else:
+                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
+
+            # Factorize
+            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
+
+            if group['use_atan2']:
+                denom = vt.sqrt_()
+                denom.div_(sqrt_bias_correction2)
+                if group.get('normed_momentum', False):
+                    grad_reshaped.atan2_(denom)
+            else:
+                denom = vt.sqrt_()
+                denom.div_(sqrt_bias_correction2).add_(adaptive_eps)
+                if group.get('normed_momentum', False):
+                    grad_reshaped.div_(denom)
+
             # Reconstruct momentum from previous step's factors
             if use_mt:
                 mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
@@ -404,13 +429,6 @@ class AdamW_adv(torch.optim.Optimizer):
                     nv_coef = beta1 if nesterov_coef is None else nesterov_coef
                     update_mt = update_mt.lerp_(grad_reshaped, 1-nv_coef)
 
-            vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
-
-            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
-                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped * (1.0 - beta2))
-            else:
-                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
-
             if self.use_AdEMAMix:
                 mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
 
@@ -430,17 +448,11 @@ class AdamW_adv(torch.optim.Optimizer):
                 else:
                     update = grad_reshaped.clone()
 
-            # Factorize
-            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
-
-            if group['use_atan2']:
-                denom = vt.sqrt_()
-                denom.div_(sqrt_bias_correction2)
-                update.atan2_(denom)
-            else:
-                denom = vt.sqrt_()
-                denom.div_(sqrt_bias_correction2).add_(adaptive_eps)
-                update.div_(denom)
+            if not group.get('normed_momentum', False):
+                if group['use_atan2']:
+                    update.atan2_(denom)
+                else:
+                    update.div_(denom)
 
             wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, group['use_atan2'])
 
@@ -451,6 +463,36 @@ class AdamW_adv(torch.optim.Optimizer):
         else:  # Standard AdamW logic for non-factored tensors (or factored_2nd)
             actual_precision = group['actual_state_precision']
             factored_2nd = state.get('factored_2nd', False)
+
+            if factored_2nd:
+                d1, d2 = state['effective_shape']
+                exp_avg_sq = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
+                exp_avg_sq = exp_avg_sq.view(p.shape)
+            else:
+                exp_avg_sq = get_state(state, 'exp_avg_sq', actual_precision)
+
+            grad_vt = grad.float() if factored_2nd else grad
+
+            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
+                exp_avg_sq.mul_(beta2).addcmul_(grad_vt, grad_vt * (1.0 - beta2))
+            else:
+                exp_avg_sq.mul_(beta2).addcmul_(grad_vt, grad_vt, value=1.0 - beta2)
+
+            if factored_2nd:
+                state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(exp_avg_sq.view(d1, d2), signed=False)
+            else:
+                set_state(state, 'exp_avg_sq', exp_avg_sq, actual_precision, random_int_state_tensor, non_neg=True)
+
+            if group['use_atan2']:
+                denom = exp_avg_sq.sqrt()
+                denom.div_(sqrt_bias_correction2)
+                if group.get('normed_momentum', False):
+                    grad.atan2_(denom.to(grad.dtype))
+            else:
+                denom = exp_avg_sq.sqrt()
+                denom.div_(sqrt_bias_correction2).add_(adaptive_eps)
+                if group.get('normed_momentum', False):
+                    grad.div_(denom.to(grad.dtype))
 
             if use_mt:
                 exp_avg = get_state(state, 'exp_avg', actual_precision)
@@ -481,38 +523,15 @@ class AdamW_adv(torch.optim.Optimizer):
             else:
                 update = update_mt if use_mt else grad.clone()
 
-            if factored_2nd:
-                d1, d2 = state['effective_shape']
-                exp_avg_sq = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
-                exp_avg_sq = exp_avg_sq.view(p.shape)
-            else:
-                exp_avg_sq = get_state(state, 'exp_avg_sq', actual_precision)
-
-            grad_vt = grad.float() if factored_2nd else grad
-
-            if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
-                exp_avg_sq.mul_(beta2).addcmul_(grad_vt, grad_vt * (1.0 - beta2))
-            else:
-                exp_avg_sq.mul_(beta2).addcmul_(grad_vt, grad_vt, value=1.0 - beta2)
-
-            if factored_2nd:
-                state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(exp_avg_sq.view(d1, d2), signed=False)
-            else:
-                set_state(state, 'exp_avg_sq', exp_avg_sq, actual_precision, random_int_state_tensor, non_neg=True)
-            del random_int_state_tensor
-
-            if group['use_atan2']:
-                denom = exp_avg_sq.sqrt()
-                denom.div_(sqrt_bias_correction2)
-                update.atan2_(denom.to(update.dtype))
-            else:
-                denom = exp_avg_sq.sqrt()
-                denom.div_(sqrt_bias_correction2).add_(adaptive_eps)
-                update.div_(denom.to(update.dtype))
+            if not group.get('normed_momentum', False):
+                if group['use_atan2']:
+                    update.atan2_(denom.to(update.dtype))
+                else:
+                    update.div_(denom.to(update.dtype))
 
             wd_scaler = _get_fisher_wd_scaler(group, state.get("wd_scaler"), p, denom, group['use_atan2'])
 
-            del denom
+            del denom, random_int_state_tensor
 
         update_scaling = step_size * A if group['use_atan2'] else step_size
         if group.get('spectral_normalization', False):
