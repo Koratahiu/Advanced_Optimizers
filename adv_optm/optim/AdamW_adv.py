@@ -134,8 +134,6 @@ class AdamW_adv(torch.optim.Optimizer):
         nesterov_coef: float | None = None,
         # Normalization then Momentum
         normed_momentum: bool = False,
-        # Centered Second Moment
-        centered_vt: bool = False,
         # K-b (adaptive beta2)
         kourkoutas_beta: bool = False,
         beta2_min: float = 0.9,
@@ -168,8 +166,6 @@ class AdamW_adv(torch.optim.Optimizer):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
         if kourkoutas_beta and not (betas[1] > beta2_min):
             raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
-        if centered_vt and not (betas[0] > 0):
-            raise ValueError(f"For centered_vt (Centered Second Moment), betas[0] (as beta1) must be > 0. Got {betas[0]}")
 
         if cautious_mask and grams_moment:
             print("Warning: cautious is incompatible with grams, Disabling cautious.")
@@ -189,7 +185,6 @@ class AdamW_adv(torch.optim.Optimizer):
             "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
             "use_atan2": use_atan2, "nesterov": nesterov, "nesterov_coef": nesterov_coef,
             "normed_momentum": normed_momentum,
-            "centered_vt": centered_vt,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
             "beta3_ema": beta3_ema, "alpha": alpha, "compiled_optimizer": compiled_optimizer,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
@@ -381,7 +376,6 @@ class AdamW_adv(torch.optim.Optimizer):
         nesterov = group.get('nesterov', False)
         nesterov_coef = group.get('nesterov_coef', None)
         use_mt = group['betas'][0] > 0
-        centered_vt = group.get('centered_vt', False) and use_mt
 
         if group.get('kourkoutas_beta', False):
             # Accumulate current grad's norm for the *next* step
@@ -393,16 +387,12 @@ class AdamW_adv(torch.optim.Optimizer):
             d1, d2 = state['effective_shape']
             grad_reshaped = grad.view(d1, d2)
 
-            if use_mt:
-                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
             vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
 
-            grad_vt = grad_reshaped - mt if centered_vt else grad_reshaped
-
             if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
-                vt.mul_(beta2).addcmul_(grad_vt, grad_vt * (1.0 - beta2))
+                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped * (1.0 - beta2))
             else:
-                vt.mul_(beta2).addcmul_(grad_vt, grad_vt, value=1.0 - beta2)
+                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
 
             # Factorize
             state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
@@ -420,6 +410,8 @@ class AdamW_adv(torch.optim.Optimizer):
 
             # Reconstruct momentum from previous step's factors
             if use_mt:
+                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
+
                 # Update momentum in full-size
                 mt.lerp_(grad_reshaped, 1.0 - beta1)
 
@@ -471,8 +463,6 @@ class AdamW_adv(torch.optim.Optimizer):
         else:  # Standard AdamW logic for non-factored tensors (or factored_2nd)
             actual_precision = group['actual_state_precision']
             factored_2nd = state.get('factored_2nd', False)
-            if use_mt:
-                exp_avg = get_state(state, 'exp_avg', actual_precision)
 
             if factored_2nd:
                 d1, d2 = state['effective_shape']
@@ -482,7 +472,6 @@ class AdamW_adv(torch.optim.Optimizer):
                 exp_avg_sq = get_state(state, 'exp_avg_sq', actual_precision)
 
             grad_vt = grad.float() if factored_2nd else grad
-            grad_vt = grad_vt - exp_avg if centered_vt else grad_vt
 
             if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
                 exp_avg_sq.mul_(beta2).addcmul_(grad_vt, grad_vt * (1.0 - beta2))
@@ -506,6 +495,7 @@ class AdamW_adv(torch.optim.Optimizer):
                     grad.div_(denom.to(grad.dtype))
 
             if use_mt:
+                exp_avg = get_state(state, 'exp_avg', actual_precision)
                 exp_avg.lerp_(grad, 1.0 - beta1)
 
                 if self.grams_moment:
