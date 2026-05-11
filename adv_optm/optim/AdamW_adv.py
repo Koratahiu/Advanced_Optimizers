@@ -40,6 +40,8 @@ class AdamW_adv(torch.optim.Optimizer):
         use_bias_correction (bool): whether to use bias correction for the first
             and second moment estimates, as in the original Adam paper.
             (default: True)
+        centered (bool): whether to compute the centered second moment (variance)
+            by tracking the gradient mean. (default: False)
         vector_reshape (bool): whether to reshape 1D vectors into 2D
             matrices to apply low-rank compression (default: True).
         stochastic_rounding (bool): whether to use stochastic
@@ -116,6 +118,7 @@ class AdamW_adv(torch.optim.Optimizer):
         cautious_wd: bool = False,
         # Adam's Bias Correction
         use_bias_correction: bool = True,
+        centered: bool = False,
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
         # Adam_atan2 (scale invariant)
@@ -182,7 +185,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
-            "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
+            "fisher_wd": fisher_wd, "cautious_wd": cautious_wd, "centered": centered,
             "use_atan2": use_atan2, "nesterov": nesterov, "nesterov_coef": nesterov_coef,
             "normed_momentum": normed_momentum,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
@@ -290,6 +293,14 @@ class AdamW_adv(torch.optim.Optimizer):
                 # Second moment (v)
                 state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
                 state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
+
+                # Centered Second Moment
+                if group['centered']:
+                    state['mu_mean_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
+                    state['mv_mean_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
+                    packed_d2 = (d2 + 7) // 8
+                    state['sign_mean'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+
             else:  # Fallback to standard AdamW for non-factored tensors
                 # First moment
                 if group['betas'][0] > 0:
@@ -304,8 +315,19 @@ class AdamW_adv(torch.optim.Optimizer):
                     d1, d2 = state['effective_shape']
                     state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
                     state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
+
+                    # Centered Second Moment (Factored_2nd)
+                    if group['centered']:
+                        state['mu_mean_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
+                        state['mv_mean_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
+                        packed_d2 = (d2 + 7) // 8
+                        state['sign_mean'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
                 else:
                     init_state_tensor(state, 'exp_avg_sq', p.shape, actual_precision, p.device, dtype, non_neg=True)
+
+                    # Centered Second Moment (Standard)
+                    if group['centered']:
+                        init_state_tensor(state, 'exp_avg_mean', p.shape, actual_precision, p.device, dtype)
 
             if group.get('spectral_normalization', False) and is_spectral(p):
                 init_spectral_norm(state, p)
@@ -397,6 +419,18 @@ class AdamW_adv(torch.optim.Optimizer):
             # Factorize
             state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
 
+            # Centered Logic
+            if group['centered']:
+                mean_grad = _reconstruct_state((state['mu_mean_nmf'], state['mv_mean_nmf'], state['sign_mean'], d2), signed=True)
+
+                mean_grad.lerp_(grad_reshaped, 1.0 - beta2)
+
+                state['mu_mean_nmf'], state['mv_mean_nmf'], state['sign_mean'] = _factorize_state(mean_grad.clone(), signed=True)
+
+                # Unbiased centered variance formula
+                bias2 = sqrt_bias_correction2 ** 2
+                vt.sub_(mean_grad.pow_(2).div_(bias2)).clamp_min_(0.0)
+
             if group['use_atan2']:
                 denom = vt.sqrt_()
                 denom.div_(sqrt_bias_correction2)
@@ -483,13 +517,32 @@ class AdamW_adv(torch.optim.Optimizer):
             else:
                 set_state(state, 'exp_avg_sq', exp_avg_sq, actual_precision, random_int_state_tensor, non_neg=True)
 
+            # Centered Logic
+            if group['centered']:
+                if factored_2nd:
+                    mean_grad = _reconstruct_state((state['mu_mean_nmf'], state['mv_mean_nmf'], state['sign_mean'], d2), signed=True).view(p.shape)
+                else:
+                    mean_grad = get_state(state, 'exp_avg_mean', actual_precision)
+
+                mean_grad.lerp_(grad_vt, 1.0 - beta2)
+
+                if factored_2nd:
+                    state['mu_mean_nmf'], state['mv_mean_nmf'], state['sign_mean'] = _factorize_state(mean_grad.view(d1, d2).clone(), signed=True)
+                else:
+                    set_state(state, 'exp_avg_mean', mean_grad, actual_precision, random_int_state_tensor)
+
+                bias2 = sqrt_bias_correction2 ** 2
+                denom_sq = exp_avg_sq.sub(mean_grad.pow(2).div_(bias2)).clamp_min_(0.0)
+            else:
+                denom_sq = exp_avg_sq
+
             if group['use_atan2']:
-                denom = exp_avg_sq.sqrt()
+                denom = denom_sq.sqrt()
                 denom.div_(sqrt_bias_correction2)
                 if group.get('normed_momentum', False):
                     grad.atan2_(denom.to(grad.dtype))
             else:
-                denom = exp_avg_sq.sqrt()
+                denom = denom_sq.sqrt()
                 denom.div_(sqrt_bias_correction2).add_(adaptive_eps)
                 if group.get('normed_momentum', False):
                     grad.div_(denom.to(grad.dtype))
