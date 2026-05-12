@@ -47,13 +47,16 @@ def apply_sr_sinkhorn(update: torch.Tensor, p: torch.Tensor, ortho_project: bool
     # In-place alternating Sinkhorn normalization steps
     for _ in range(iters):
         # First normalization step
-        norm1 = update_2d.norm(p=2, dim=dim, keepdim=True).clamp_min_(1e-12)
+        # Stability floor: equivalent to a single-element vector norm lower bound (lb)
+        norm1_lb = 1 / math.sqrt(update_2d.shape[dim])
+        norm1 = update_2d.norm(p=2, dim=dim, keepdim=True).clamp_min_(norm1_lb)
         update_2d.mul_(scale_first / norm1)
         if ortho_project:
             update_2d = ortho_normed(param_2d, update_2d, p_norm_sq_dim, dim, scale_first)
 
         # Second normalization step
-        norm2 = update_2d.norm(p=2, dim=1-dim, keepdim=True).clamp_min_(1e-12)
+        norm2_lb = 1 / math.sqrt(update_2d.shape[1-dim])
+        norm2 = update_2d.norm(p=2, dim=1-dim, keepdim=True).clamp_min_(norm2_lb)
         update_2d.mul_(scale_second / norm2)
         if ortho_project:
             update_2d = ortho_normed(param_2d, update_2d, p_norm_sq_adim, 1-dim, scale_second)
@@ -72,6 +75,7 @@ def ortho_normed(p_2d, update_2d, p_norm_sq, dim, target_norm):
     update_2d.addcmul_(proj, p_2d, value=-1.0)
 
     # Magnitude Preservation
-    g_orth_norm = update_2d.norm(p=2, dim=dim, keepdim=True).clamp_min_(1e-12)
+    norm_lb = 1 / math.sqrt(update_2d.shape[dim])
+    g_orth_norm = update_2d.norm(p=2, dim=dim, keepdim=True).clamp_min_(norm_lb)
     scale_factor = target_norm / g_orth_norm
     return update_2d.mul_(scale_factor)
