@@ -1,7 +1,7 @@
 import torch
 
 from ..util import param_update
-from ..util.Muon_util import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update, approx_mars, get_spectral_scaling
+from ..util.Muon_util import newton_schulz, _is_suitable_for_muon, rms_adjustment, normuon_update, approx_mars
 from ..util.scaled_optm import spectral_normalization, init_spectral_norm
 from ..util.factorization_util import _get_effective_shape, _factorize_state, _reconstruct_state
 from ..util.OrthoGrad import _orthogonalize_gradient
@@ -33,7 +33,8 @@ class Muon_adv(torch.optim.Optimizer):
             and the sign of the optimizer update align (default: False).
         nesterov (bool): enables Nesterov momentum (default: True).
         ns_steps (int): number of Newton-Schulz iterations to perform (default: 5).
-        ns_eps (float): epsilon for Newton-Schulz normalization stability (default: 1e-7).
+        ns_eps (float): epsilon for Newton-Schulz normalization stability. When None
+            it's derived from scale invariant rule (default: None).
         ns_coeffs (tuple[float, float, float]): The (a, b, c) coefficients for the
             quintic polynomial in the Newton-Schulz iteration.
             (default: (3.4445, -4.7750, 2.0315)).
@@ -64,7 +65,8 @@ class Muon_adv(torch.optim.Optimizer):
             learning rate schedules. (default: True).
         accelerated_ns (bool): If True, enables Chebyshev-accelerated Newton-Schulz, which
             dynamically calculates optimal 3rd-order polynomial coefficients. (default: False)
-        cns_a_bound (float): Initial lower bound for singular values for CANS. (default: 1e-4)
+        cns_a_bound (float): Initial lower bound for singular values for CANS. When None
+            it's derived from scale invariant rule (default: None).
         approx_mars (bool): If True, enables Approximated MARS-M variance reduction.
         fom the paper "MARS-M: When Variance Reduction Meets Matrices"
             (default: False)
@@ -120,7 +122,7 @@ class Muon_adv(torch.optim.Optimizer):
         nesterov_coef: float | None = None,
         # Newton Schulz
         ns_steps: int = 5,
-        ns_eps: float = 1e-7,
+        ns_eps: float | None = 1e-7,
         ns_coeffs: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
@@ -144,7 +146,7 @@ class Muon_adv(torch.optim.Optimizer):
         normuon_eps: float = 1e-8,
         # CANS
         accelerated_ns: bool = False,
-        cns_a_bound: float = 1e-4,
+        cns_a_bound: float | None = None,
         # MARS-M
         approx_mars: bool = False,
         mars_gamma: float = 0.025,
@@ -463,13 +465,7 @@ class Muon_adv(torch.optim.Optimizer):
         nesterov = group['nesterov']
         nesterov_coef = group.get('nesterov_coef', None)
 
-        if group.get('spectral_normalization', False):
-
-            ns_eps, _, _, _ = get_spectral_scaling(p, p.shape, group.get('n_layers', 1))
-            decoupled_wd = True
-        else:
-            decoupled_wd = False
-            ns_eps = group['ns_eps']
+        ns_eps = group['ns_eps']
 
         # MARS-M Approximated (Variance Reduction)
         if group.get('approx_mars', False):
@@ -513,7 +509,6 @@ class Muon_adv(torch.optim.Optimizer):
                 cns_a_bound=group['cns_a_bound'],
                 low_rank_ortho=group['low_rank_ortho'],
                 ortho_rank=group['ortho_rank'],
-                spectral_normalization=group.get('spectral_normalization', False),
                 compiled=group.get('compiled_optimizer', False)
             )
 
@@ -556,7 +551,6 @@ class Muon_adv(torch.optim.Optimizer):
                     cns_a_bound=group['cns_a_bound'],
                     low_rank_ortho=group['low_rank_ortho'],
                     ortho_rank=group['ortho_rank'],
-                    spectral_normalization=group.get('spectral_normalization', False),
                     compiled=group.get('compiled_optimizer', False)
                 )
 
@@ -573,7 +567,7 @@ class Muon_adv(torch.optim.Optimizer):
 
             update = update.reshape(original_shape)
 
-        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor, decoupled=decoupled_wd)
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 
     @torch.no_grad()
     def step(self, closure=None):

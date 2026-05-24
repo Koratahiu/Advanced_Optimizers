@@ -10,7 +10,6 @@ def _newton_schulz_iteration(
     coeffs: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
     cns: bool = False,
     cns_a_bound: float = 1e-4,
-    spectral_normalization: bool = False,
 ) -> torch.Tensor:
     """
     Performs the Newton-Schulz iteration to find the nearest orthogonal matrix.
@@ -45,10 +44,7 @@ def _newton_schulz_iteration(
         X = X.mT
 
     # Normalize spectral norm to at most 1
-    if spectral_normalization:
-        X.div_(X.norm(dim=(-2, -1), keepdim=True).add_(eps))
-    else:
-        X.div_(X.norm(dim=(-2, -1), keepdim=True).clamp_min_(eps))
+    X.div_(X.norm(dim=(-2, -1), keepdim=True).clamp_min_(eps))
 
     # Select matrix multiplication function based on dimension (Batched vs Standard)
     mm_fn = torch.baddbmm if X.ndim > 2 else torch.addmm
@@ -130,7 +126,6 @@ def _compiled_newton_schulz_iteration(
     coeffs: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
     cns: bool = False,
     cns_a_bound: float = 1e-4,
-    spectral_normalization: bool = False,
 ) -> torch.Tensor:
     """
     Newton-Schulz iteration refactored for torch.compile compatibility.
@@ -148,10 +143,7 @@ def _compiled_newton_schulz_iteration(
         X = X.mT
 
     # Normalize spectral norm to at most 1
-    if spectral_normalization:
-        X.div_(X.norm(dim=(-2, -1), keepdim=True).add_(eps))
-    else:
-        X.div_(X.norm(dim=(-2, -1), keepdim=True).clamp_min_(eps))
+    X.div_(X.norm(dim=(-2, -1), keepdim=True).clamp_min_(eps))
 
     if cns:
         # Chebyshev-accelerated Newton-Schulz (CANS)
@@ -199,13 +191,12 @@ def _compiled_newton_schulz_iteration(
 def newton_schulz(
     G: torch.Tensor,
     steps: int = 5,
-    eps: float = 1e-7,
+    eps: float | None = 1e-7,
     coeffs: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
     cns: bool = False,
-    cns_a_bound: float = 1e-4,
+    cns_a_bound: float | None = None,
     low_rank_ortho: bool = False,
     ortho_rank: int = 128,
-    spectral_normalization: bool = False,
     compiled: bool = False,
 ) -> torch.Tensor:
     """
@@ -228,6 +219,19 @@ def newton_schulz(
         ns_fn = _compiled_newton_schulz_iteration
     else:
         ns_fn = _newton_schulz_iteration
+
+    if eps is None:
+        eps = 1 / math.sqrt(G.numel())
+
+    if cns_a_bound is None:
+        M = G.shape[0]
+        N = math.prod(G.shape[1:])
+        # baseline L2 norm bound (for square matrices)
+        baseline_bound = 1.0 / math.sqrt(M * N)
+        # Marchenko-Pastur theoretical minimum (for rectangular matrices)
+        mp_bound = abs(1.0 / math.sqrt(N) - 1.0 / math.sqrt(M))
+        # The optimal bound is safely the maximum of the two
+        cns_a_bound = max(baseline_bound, mp_bound)
 
     if low_rank_ortho:
         # Low-Rank Orthogonalization via Gaussian Sketching
@@ -259,7 +263,6 @@ def newton_schulz(
                 coeffs=coeffs,
                 cns=cns,
                 cns_a_bound=cns_a_bound,
-                spectral_normalization = spectral_normalization
             )
 
             # 5. Project back to the original space
@@ -273,7 +276,6 @@ def newton_schulz(
         coeffs=coeffs,
         cns=cns,
         cns_a_bound=cns_a_bound,
-        spectral_normalization=spectral_normalization
     )
 
 def _is_suitable_for_muon(
@@ -405,45 +407,3 @@ def _auto_projection_for_adamuon(raw_update: torch.Tensor, kappa_p: float) -> to
     # Denominator: ||x||_p^(p-1)
     den = x.norm(p=p).pow_(p - 1).clamp_min_(EPS)
     return num.div_(den)
-
-
-def get_spectral_scaling(p, shape: torch.Size, n_layers: int):
-    """
-    From the paper:
-    "Hyperparameter Transfer Enables Consistent Gains of Matrix-Preconditioned Optimizers Across Scales"
-    Calculates the scaling factors based on the paper's rules.
-    Assumes shape is (d_out, d_in).
-
-    Returns:
-        ns_eps: Damping for Newton-Schul.
-        adaptive_eps: Epsilon for AdaMuon/NorMuon denominator.
-        spectral_target: Target spectral norm
-        wd_scale: Weight decay scale
-    """
-    d_out, d_in = shape[0], shape[1]
-
-    # Handle Convolutional/Flattened tensors
-    if len(shape) > 2:
-        d_in = shape[1:].numel()
-
-
-    # Scaling for Epsilon (Table 2)
-    L = max(1, n_layers)
-
-    # A) Newton-Schulz Damping
-    # This ensures the matrix orthogonalization is stable across scales.
-    # Formula: (1/L) * sqrt(d_in / d_out)
-    ns_eps = (1.0 / L) * math.sqrt(d_in / d_out)
-
-    # B) Adaptive Denominator Epsilon
-    # This ensures the Adam-style division doesn't explode or vanish.
-    # Formula: (1 / sqrt(d_in * d_out))
-    adaptive_eps = (1.0 / math.sqrt(d_in * d_out))
-
-    # Spectral Target (Section F) -> sqrt(d_out/d_in)
-    spectral_target = math.sqrt(d_out / d_in)
-
-    # Weight Decay (Section 3.4) -> 1/width
-    wd_scale = 1.0 / d_in
-
-    return ns_eps, adaptive_eps, spectral_target, wd_scale
