@@ -1,7 +1,7 @@
 import math
 import torch
 
-def apply_sr_sinkhorn(update: torch.Tensor, p: torch.Tensor, ortho_project: bool, iters: int = 5) -> torch.Tensor:
+def apply_sr_sinkhorn(update: torch.Tensor, iters: int = 5, p: torch.Tensor | None = None, ortho_project: bool = False) -> torch.Tensor:
     """
     Applies Square-Root Sinkhorn (SR-Sinkhorn) multi-normalization.
     As described in 'Gradient Multi-Normalization for Efficient LLM Training'.
@@ -79,3 +79,65 @@ def ortho_normed(p_2d, update_2d, p_norm_sq, dim, target_norm):
     g_orth_norm = update_2d.norm(p=2, dim=dim, keepdim=True).clamp_min_(norm_lb)
     scale_factor = target_norm / g_orth_norm
     return update_2d.mul_(scale_factor)
+
+def _sinkhorn_sq_grad(
+    vt_row: torch.Tensor,
+    vt_col: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Reconstructs the variance precondition from its rank-1 factors.
+    Modified from:
+    https://github.com/jettify/pytorch-optimizer/blob/master/torch_optimizer/adafactor.py
+    """
+    r_factor = (
+        (vt_row / vt_row.mean(dim=-1).clamp_min_(1e-30))
+        .sqrt_()
+        .unsqueeze(-1)
+    )
+    c_factor = vt_col.unsqueeze(-2).sqrt()
+    return torch.mul(r_factor, c_factor) 
+
+def get_sinkhorn_wd_scaler(
+    p: torch.Tensor, 
+    row_denom: torch.Tensor | None = None, 
+    col_denom: torch.Tensor | None = None
+):
+    """
+    Computes a structural weight decay multiplier.
+    Penalizes parameters belonging to dominant rows/columns more heavily, 
+    while protecting parameters in under-utilized/noisy rows/columns from decay.
+    """
+    if p.ndim < 2:
+        return 1.0 
+
+    p_2d = p.view(p.shape[0], -1)
+
+    # Lower bounds based on the effective 2D shapes
+    row_lb = 1 / math.sqrt(p_2d.shape[1])
+    col_lb = 1 / math.sqrt(p_2d.shape[0])
+
+    # Get the norms
+    row_norms = torch.linalg.vector_norm(p_2d, ord=2, dim=1, keepdim=True).clamp_min_(row_lb)
+    col_norms = torch.linalg.vector_norm(p_2d, ord=2, dim=0, keepdim=True).clamp_min_(col_lb)
+
+    # Compute the structural scaler
+    row_factor = row_norms.sqrt_()
+    col_factor = col_norms.sqrt_()
+
+    if row_denom is not None and col_denom is not None:
+        # Reshape denominators to ensure safe in-place broadcasting
+        row_denom = row_denom.view(p_2d.shape[0], 1)
+        col_denom = col_denom.view(1, p_2d.shape[1])
+
+        # High denom (noise) -> smaller angle (protects weights)
+        # Low denom (confident) -> larger angle (decays weights)
+        row_factor.atan2_(row_denom)
+        col_factor.atan2_(col_denom)
+
+    # Outer product: merges the row and column confidences into a 2D matrix
+    wd_scaler = row_factor * col_factor
+
+    # Normalize the scaler so its mean is exactly 1.0
+    wd_scaler.div_(wd_scaler.mean().clamp_min_(1e-12))
+
+    return wd_scaler.view_as(p)

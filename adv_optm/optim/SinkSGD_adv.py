@@ -1,6 +1,6 @@
 import torch
 
-from typing import Optional, Callable
+import math
 
 from ..util import param_update
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
@@ -9,7 +9,7 @@ from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 from ..util.centered_decay import _init_anchor
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
-from ..util.sinkhorn import apply_sr_sinkhorn
+from ..util.sinkhorn import apply_sr_sinkhorn, _sinkhorn_sq_grad, get_sinkhorn_wd_scaler
 from ..util.signed_util import apply_stochastic_sign_
 
 class SinkSGD_adv(torch.optim.Optimizer):
@@ -61,11 +61,13 @@ class SinkSGD_adv(torch.optim.Optimizer):
         orthogonal_sinkhorn: bool = False,
         # Normalization then Momentum
         normed_momentum: bool = False,
+        # Centered Variance Precondition
+        centered_vt: bool = False,
         # Nesterov Momentum
         nesterov: bool = False,
         nesterov_coef: float | None = None,
-        # Decoupled/cautious weight decay
-        decoupled_wd: bool = False,
+        # weight decay features
+        geometric_wd: bool = False,
         cautious_wd: bool = False,
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
@@ -101,8 +103,8 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
         defaults = {
             "lr": lr, "momentum": momentum,
-            "weight_decay": weight_decay, "nesterov": nesterov, "nesterov_coef": nesterov_coef, "normed_momentum": normed_momentum,
-            "decoupled_wd": decoupled_wd, "cautious_wd": cautious_wd,
+            "weight_decay": weight_decay, "nesterov": nesterov, "nesterov_coef": nesterov_coef, "normed_momentum": normed_momentum, "centered_vt": centered_vt,
+            "geometric_wd": geometric_wd, "cautious_wd": cautious_wd,
             "orthogonal_gradient": orthogonal_gradient, 
             "compiled_optimizer": compiled_optimizer,
             "sinkhorn_iterations": sinkhorn_iterations,
@@ -182,6 +184,11 @@ class SinkSGD_adv(torch.optim.Optimizer):
                     if group['momentum'] != 0:
                         init_state_tensor(state, 'momentum_buffer', p.shape, actual_precision, p.device, dtype)
 
+                if group.get('centered_vt', False):
+                    p_shape = p.shape
+                    state['vt_row'] = torch.zeros(p_shape[:-1], device=device, dtype=torch.float32)
+                    state['vt_col'] = torch.zeros(p_shape[:-2] + p_shape[-1:], device=device, dtype=torch.float32)
+
             if group.get('spectral_normalization', False) and is_spectral(p):
                 init_spectral_norm(state, p)
 
@@ -237,7 +244,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         if group.get('normed_momentum', False):
             if not is_vector:
                 # Sinkhorn iterative normalization
-                grad = apply_sr_sinkhorn(grad, p, ortho_project=orthogonal_sinkhorn, iters=sinkhorn_iterations)
+                grad = apply_sr_sinkhorn(grad, iters=sinkhorn_iterations, p=p, ortho_project=orthogonal_sinkhorn)
             else:
                 # For vectors, apply adaptive stochastic sign
                 grad = apply_stochastic_sign_(grad, sign_noise, is_vector=is_vector)
@@ -271,6 +278,24 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
             if momentum != 0:
                 buf = get_state(state, 'momentum_buffer', actual_precision)
+
+                if group.get('centered_vt', False):
+                    vt_row, vt_col = state['vt_row'], state['vt_col']
+                    grad_vt = grad - buf
+                    grad_vt_sq = grad_vt * grad_vt
+                    mean_row_grad = grad_vt_sq.mean(dim=-1)
+                    mean_col_grad = grad_vt_sq.mean(dim=-2)
+                    vt_row.mul_(momentum).add_(mean_row_grad, alpha=1.0 - momentum)
+                    vt_col.mul_(momentum).add_(mean_col_grad, alpha=1.0 - momentum)
+                    if nesterov:
+                        nv_coef = momentum if nesterov_coef is None else nesterov_coef
+                        vt_row = vt_row.lerp(mean_row_grad, 1.0 - nv_coef)
+                        vt_col = vt_col.lerp(mean_col_grad, 1.0 - nv_coef)
+                    vt = _sinkhorn_sq_grad(vt_row, vt_col)
+                else:
+                    vt_row = None
+                    vt_col = None
+
                 buf.lerp_(grad, 1 - momentum)
 
                 set_state(state, 'momentum_buffer', buf, actual_precision, random_int_state_tensor)
@@ -285,21 +310,34 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
             del random_int_state_tensor
 
+        if group.get('centered_vt', False):
+            denom = vt
+            update.atan2_(denom)
+        else:
+            denom = None
+
         if not group.get('normed_momentum', False):
             if not is_vector:
                 # Sinkhorn iterative normalization
-                update = apply_sr_sinkhorn(update, p, ortho_project=orthogonal_sinkhorn, iters=sinkhorn_iterations)
+                update = apply_sr_sinkhorn(update, iters=sinkhorn_iterations, p=p, ortho_project=orthogonal_sinkhorn)
             else:
                 # For vectors, apply adaptive stochastic sign
                 update = apply_stochastic_sign_(update, sign_noise, is_vector=is_vector)
+
+        if group.get('geometric_wd', False):
+            wd_scaler = get_sinkhorn_wd_scaler(p, row_denom=vt_row, col_denom=vt_col)
+        else:
+            wd_scaler = None
 
         update_scaling = step_size
         if group.get('spectral_normalization', False):
             update = scale_update(p, update, update_scaling, state=state)
         else:
+            if group.get('centered_vt', False):
+                update_scaling = update_scaling * (4/math.pi)
             update.mul_(update_scaling)
 
-        param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor)
+        param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor, wd_scaler=wd_scaler)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
