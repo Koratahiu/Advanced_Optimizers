@@ -26,8 +26,6 @@ class SinkSGD_adv(torch.optim.Optimizer):
         weight_decay (float): weight decay (L2 penalty or decoupled) (default: 0).
         nesterov (bool): enables Nesterov momentum. Only applicable when momentum
             is non-zero. (default: False)
-        decoupled_wd (bool): whether to apply decoupled weight decay (like AdamW) 
-            instead of standard L2 penalty. (default: False)
         cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
             applied only to parameter coordinates where the sign of the parameter
             and the sign of the optimizer update align (default: False).
