@@ -183,9 +183,11 @@ class SinkSGD_adv(torch.optim.Optimizer):
                         init_state_tensor(state, 'momentum_buffer', p.shape, actual_precision, p.device, dtype)
 
                 if group.get('centered_vt', False):
-                    p_shape = p.shape
-                    state['vt_row'] = torch.zeros(p_shape[:-1], device=device, dtype=torch.float32)
-                    state['vt_col'] = torch.zeros(p_shape[:-2] + p_shape[-1:], device=device, dtype=torch.float32)
+                    # Align shapes with Sinkhorn's 2D flattening
+                    dim0 = p.shape[0]
+                    dim1 = p.numel() // dim0
+                    state['vt_row'] = torch.zeros(dim0, device=device, dtype=torch.float32)
+                    state['vt_col'] = torch.zeros(dim1, device=device, dtype=torch.float32)
 
             if group.get('spectral_normalization', False) and is_spectral(p):
                 init_spectral_norm(state, p)
@@ -280,7 +282,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 if group.get('centered_vt', False):
                     vt_row, vt_col = state['vt_row'], state['vt_col']
                     grad_vt = grad - buf
-                    grad_vt_sq = grad_vt * grad_vt
+                    grad_vt_sq = grad_vt.mul_(grad_vt).view(grad.shape[0], -1)
                     mean_row_grad = grad_vt_sq.mean(dim=-1)
                     mean_col_grad = grad_vt_sq.mean(dim=-2)
                     vt_row.mul_(momentum).add_(mean_row_grad, alpha=1.0 - momentum)
@@ -289,7 +291,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
                         nv_coef = momentum if nesterov_coef is None else nesterov_coef
                         vt_row = vt_row.lerp(mean_row_grad, 1.0 - nv_coef)
                         vt_col = vt_col.lerp(mean_col_grad, 1.0 - nv_coef)
-                    vt = _sinkhorn_sq_grad(vt_row, vt_col)
+                    vt = _sinkhorn_sq_grad(vt_row, vt_col).view_as(grad)
                 else:
                     vt_row = None
                     vt_col = None
