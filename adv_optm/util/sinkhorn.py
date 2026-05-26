@@ -85,17 +85,13 @@ def _sinkhorn_sq_grad(
     vt_col: torch.Tensor,
 ) -> torch.Tensor:
     """
-    Reconstructs the variance precondition from its rank-1 factors.
-    Modified from:
-    https://github.com/jettify/pytorch-optimizer/blob/master/torch_optimizer/adafactor.py
+    Reconstructs the variance preconditioner symmetrically from its rank-1 factors.
     """
-    r_factor = (
-        (vt_row / vt_row.mean(dim=-1).clamp_min_(1e-30))
-        .sqrt_()
-        .unsqueeze(-1)
-    )
-    c_factor = vt_col.unsqueeze(-2).sqrt()
-    return torch.mul(r_factor, c_factor) 
+    global_mean = (vt_row.mean() + vt_col.mean()) * 0.5
+    scale = global_mean.clamp_min_(1e-30).sqrt_().sqrt_()
+    r_factor = vt_row.sqrt().div_(scale).unsqueeze(-1)
+    c_factor = vt_col.sqrt().div_(scale).unsqueeze(-2)
+    return torch.mul(r_factor, c_factor)
 
 def get_sinkhorn_wd_scaler(
     p: torch.Tensor, 
