@@ -126,8 +126,8 @@ def get_sinkhorn_wd_scaler(
 
     if row_denom is not None and col_denom is not None:
         # Reshape denominators to ensure safe in-place broadcasting
-        row_denom = row_denom.view(p_2d.shape[0], 1)
-        col_denom = col_denom.view(1, p_2d.shape[1])
+        row_denom = row_denom.sqrt().view(p_2d.shape[0], 1)
+        col_denom = col_denom.sqrt().view(1, p_2d.shape[1])
 
         # High denom (noise) -> smaller angle (protects weights)
         # Low denom (confident) -> larger angle (decays weights)
