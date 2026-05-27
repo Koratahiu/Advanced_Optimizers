@@ -9,7 +9,7 @@ from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 from ..util.centered_decay import _init_anchor
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
-from ..util.sinkhorn import apply_sr_sinkhorn, _sinkhorn_sq_grad, get_sinkhorn_wd_scaler
+from ..util.sinkhorn import apply_sr_sinkhorn, get_sinkhorn_wd_scaler
 from ..util.signed_util import apply_stochastic_sign_
 
 class SinkSGD_adv(torch.optim.Optimizer):
@@ -293,7 +293,6 @@ class SinkSGD_adv(torch.optim.Optimizer):
                         nv_coef = momentum if nesterov_coef is None else nesterov_coef
                         vt_row = vt_row.lerp(mean_row_grad, 1.0 - nv_coef)
                         vt_col = vt_col.lerp(mean_col_grad, 1.0 - nv_coef)
-                    vt = _sinkhorn_sq_grad(vt_row, vt_col).view_as(grad)
                 else:
                     vt_row = None
                     vt_col = None
@@ -313,10 +312,11 @@ class SinkSGD_adv(torch.optim.Optimizer):
             del random_int_state_tensor
 
         if group.get('centered_vt', False):
-            denom = vt
-            update.atan2_(denom)
-        else:
-            denom = None
+            # Align with Sinkhorn: Alternate row/col preconditioning
+            update_2d = update.view(update.shape[0], -1)
+            update_2d.div_(vt_row.clamp_min(1e-30).sqrt().unsqueeze(1))
+            update_2d.div_(vt_col.clamp_min(1e-30).sqrt().unsqueeze(0))
+            update = update_2d.atan_().view_as(p)
 
         if not group.get('normed_momentum', False):
             if not is_vector:

@@ -80,19 +80,6 @@ def ortho_normed(p_2d, update_2d, p_norm_sq, dim, target_norm):
     scale_factor = target_norm / g_orth_norm
     return update_2d.mul_(scale_factor)
 
-def _sinkhorn_sq_grad(
-    vt_row: torch.Tensor,
-    vt_col: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Reconstructs the variance preconditioner symmetrically from its rank-1 factors.
-    """
-    global_mean = (vt_row.mean() + vt_col.mean()) * 0.5
-    scale = global_mean.clamp_min_(1e-30).sqrt_().sqrt_()
-    r_factor = vt_row.sqrt().div_(scale).unsqueeze(-1)
-    c_factor = vt_col.sqrt().div_(scale).unsqueeze(-2)
-    return torch.mul(r_factor, c_factor)
-
 def get_sinkhorn_wd_scaler(
     p: torch.Tensor, 
     row_denom: torch.Tensor | None = None, 
