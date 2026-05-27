@@ -313,8 +313,8 @@ class SinkSGD_adv(torch.optim.Optimizer):
         if group.get('centered_vt', False):
             # Align with Sinkhorn: Alternate row/col preconditioning
             update_2d = update.view(update.shape[0], -1)
-            update_2d.div_(vt_row.clamp_min(1e-30).sqrt().unsqueeze(1))
-            update_2d.div_(vt_col.clamp_min(1e-30).sqrt().unsqueeze(0))
+            update_2d.mul_(vt_row.clamp_min(1e-30).rsqrt().unsqueeze(1))
+            update_2d.mul_(vt_col.clamp_min(1e-30).rsqrt().unsqueeze(0))
             update = update_2d.atan_().view_as(p)
 
         if not group.get('normed_momentum', False):
