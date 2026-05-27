@@ -288,10 +288,6 @@ class SinkSGD_adv(torch.optim.Optimizer):
                     mean_col_grad = grad_vt_sq.mean(dim=-2)
                     vt_row.mul_(momentum).add_(mean_row_grad, alpha=1.0 - momentum)
                     vt_col.mul_(momentum).add_(mean_col_grad, alpha=1.0 - momentum)
-                    if nesterov:
-                        nv_coef = momentum if nesterov_coef is None else nesterov_coef
-                        vt_row = vt_row.lerp(mean_row_grad, 1.0 - nv_coef)
-                        vt_col = vt_col.lerp(mean_col_grad, 1.0 - nv_coef)
                 else:
                     vt_row = None
                     vt_col = None
