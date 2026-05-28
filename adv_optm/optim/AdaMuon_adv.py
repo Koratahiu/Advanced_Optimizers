@@ -368,17 +368,14 @@ class AdaMuon_adv(torch.optim.Optimizer):
             else:
                 # Determine effective state precision (small tensors always use fp32)
                 req_precision = group.get('state_precision', 'auto')
-                actual_precision = req_precision
-                if actual_precision != 'auto' and (p.numel() < 10000 or p.ndim == 1):
-                    actual_precision = 'fp32'
+                actual_precision = 'auto' if req_precision == 'factored' else req_precision
                 group['actual_state_precision'] = actual_precision
 
                 # factored_2nd: factorize v_t only; ignored for NorMuon (no v_t) and tiny params
                 use_factored_2nd = (
                     group.get('factored_2nd', False)
                     and not group['normuon_variant']
-                    and p.numel() >= 10000
-                    and p.ndim > 1
+                    and (p.ndim > 1 and not group['vector_reshape'])
                 )
                 state['factored_2nd'] = use_factored_2nd
 

@@ -253,6 +253,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
         # State Initialization
         if 'step' not in state:
+            grad = p.grad
             state['step'] = 0
 
             req_precision = group['state_precision']
@@ -262,14 +263,12 @@ class Adopt_adv(torch.optim.Optimizer):
             state['factored_2nd'] = group.get('factored_2nd', False) and not is_vector
 
             actual_precision = 'auto' if req_precision == 'factored' else req_precision
-            if actual_precision != 'auto' and (p.numel() < 10000 or p.ndim == 1):
-                actual_precision = 'fp32'
             group['actual_state_precision'] = actual_precision
 
             dtype = torch.float32 if (state['factored'] or req_precision == 'factored') else p.dtype
 
             vt_dtype = torch.float32 if (state['factored'] or state['factored_2nd'] or req_precision in ['factored', 'bf16_sr', 'fp8_sr', 'int8_sr']) else dtype
-            vt_init = grad.pow(2).to(vt_dtype) * (1-beta2)
+            vt_init = grad.pow(2).to(vt_dtype) * (1 - group['betas'][1])
 
             if state['factored']:
                 state['effective_shape'] = _get_effective_shape(p.numel())

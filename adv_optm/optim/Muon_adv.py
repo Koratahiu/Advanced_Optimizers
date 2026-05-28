@@ -339,8 +339,6 @@ class Muon_adv(torch.optim.Optimizer):
                 # Determine effective state precision (small tensors always use fp32)
                 req_precision = group.get('state_precision', 'auto')
                 actual_precision = req_precision
-                if actual_precision != 'auto' and (p.numel() < 10000 or p.ndim == 1):
-                    actual_precision = 'fp32'
                 group['actual_state_precision'] = actual_precision
 
                 default_dtype = p.dtype

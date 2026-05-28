@@ -193,7 +193,7 @@ def upcast_grad_for_precision(grad: torch.Tensor, state: dict, state_precision: 
 
     # Low-precision storage modes benefit from FP32 accumulation to 
     # maintain accuracy before quantizing back down in set_state.
-    if state_precision in ['bf16_sr', 'fp8_sr', 'int8_sr', 'factored']:
+    if state_precision in ['fp32', 'bf16_sr', 'fp8_sr', 'int8_sr', 'factored']:
         return grad.float()
 
     return grad
@@ -204,25 +204,20 @@ def fix_loaded_state_dtype(state: dict, p: torch.Tensor, group: dict) -> None:
     Accounts for state_precision options and works around PyTorch's auto-casting bug.
     """
     mode = group.get('centered_wd_mode', 'full')
-    is_factored = state.get('factored', False)
 
     # Retrieve the active precision mode
     actual_precision = group['actual_state_precision']
-    numel = p.numel()
-    is_full = (
-        numel < 10000 or
-        p.ndim == 1
-    )
+    is_factored = state.get('factored', False) or actual_precision == 'factored'
 
     # Determine the target dtype for general floating-point states based on state_precision
-    if actual_precision == 'fp32' or is_full:
+    if actual_precision == 'fp32':
         base_dtype = torch.float32
     elif actual_precision == 'bf16_sr':
         base_dtype = torch.bfloat16
-    elif actual_precision in ['fp8', 'fp8_sr'] and hasattr(torch, 'float8_e4m3fn'):
+    elif actual_precision in ['fp8', 'fp8_sr']:
         base_dtype = torch.float8_e4m3fn
     elif actual_precision == 'int8_sr':
-        base_dtype = torch.float32
+        base_dtype = torch.uint8
     else:
         # Fallback ('auto').
         base_dtype = torch.float32 if is_factored else p.dtype
@@ -231,8 +226,6 @@ def fix_loaded_state_dtype(state: dict, p: torch.Tensor, group: dict) -> None:
     numel = p.numel()
     is_skipped = (
         numel == 0 or
-        (mode in ['int8', 'int4'] and numel < 10000) or
-        p.ndim == 1 or
         getattr(p, '_is_dora_scale', False)
     )
 

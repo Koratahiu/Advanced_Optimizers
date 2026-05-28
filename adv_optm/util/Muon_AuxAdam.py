@@ -29,8 +29,6 @@ def _init_auxadam_state(self, p, group):
     state['factored_2nd'] = group.get('adam_factored_2nd', False) and not is_vector
 
     actual_precision = 'auto' if req_precision == 'factored' else req_precision
-    if actual_precision != 'auto' and (p.numel() < 10000 or p.ndim == 1):
-        actual_precision = 'fp32'
     group['adam_actual_state_precision'] = actual_precision
 
     dtype = torch.float32 if (state['factored'] or req_precision == 'factored') else p.dtype

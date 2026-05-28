@@ -49,12 +49,6 @@ def _init_anchor(p, state, group):
         return
 
     mode = group.get('centered_wd_mode', 'full')
-    numel = p.numel()
-
-    # Skip empty/tiny tensors or 1D tensors (store as full precision)
-    if numel == 0 or (mode in ['int8', 'int4'] and numel < 10000) or p.ndim == 1 or getattr(p, '_is_dora_scale', False):
-        state['anchor_data'] = p.clone()
-        return
 
     if mode == 'float8':
         state['anchor_data'] = p.to(torch.float8_e4m3fn)
