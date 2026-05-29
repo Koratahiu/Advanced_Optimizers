@@ -263,7 +263,8 @@ class SinkSGD_adv(torch.optim.Optimizer):
                         del buf_sq
                     else:
                         buf_sq = buf.square().view(p.shape)
-                        vt = buf_sq.rsub_(1)
+                        vt = (1.0 - buf_sq).relu_()
+                        del buf_sq
 
                 buf.lerp_(grad_reshaped, 1 - momentum)
 
@@ -294,7 +295,8 @@ class SinkSGD_adv(torch.optim.Optimizer):
                         del buf_sq
                     else:
                         buf_sq = buf.square()
-                        vt = buf_sq.rsub_(1)
+                        vt = (1.0 - buf_sq).relu_()
+                        del buf_sq
 
                 buf.lerp_(grad, 1 - momentum)
 
@@ -329,7 +331,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 # For vectors, apply sign operation
                 update = update.sign_()
 
-        if group.get('geometric_wd', False):
+        if group.get('geometric_wd', False) and group["weight_decay"] > 0 :
             if not is_vector:
                 wd_scaler = get_sinkhorn_wd_scaler(p, row_denom=vt_row, col_denom=vt_col)
             else:

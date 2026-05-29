@@ -7,7 +7,7 @@ from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
-from ..util.centered_decay import _init_anchor
+from ..util.centered_decay import _init_anchor, dequantize_anchor
 from ..util.signed_util import apply_stochastic_sign_, get_signsgd_wd_target
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 
@@ -278,7 +278,8 @@ class SignSGD_adv(torch.optim.Optimizer):
 
                 if centered_vt:
                     exp_avg_sq = exp_avg.square().view(p.shape)
-                    vt = exp_avg_sq.rsub_(1)
+                    vt = (1.0 - exp_avg_sq).relu_()
+                    del exp_avg_sq
 
                 exp_avg.lerp_(grad_reshaped, 1 - momentum)
 
@@ -303,7 +304,8 @@ class SignSGD_adv(torch.optim.Optimizer):
 
                 if centered_vt:
                     exp_avg_sq = exp_avg.square()
-                    vt = exp_avg_sq.rsub_(1)
+                    vt = (1.0 - exp_avg_sq).relu_()
+                    del exp_avg_sq
 
                 exp_avg.lerp_(grad, 1 - momentum)
 
@@ -330,7 +332,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             denom = vt.sqrt_()
             update.atan2_(denom)
 
-        if group.get('geometric_wd', False):
+        if group.get('geometric_wd', False) and group["weight_decay"] > 0 :
             wd_target = get_signsgd_wd_target(p, denom=denom, stochastic_sign=sso, noise=random_noise_tensor, is_vector=is_vector)
 
         if group.get('spectral_normalization', False):
