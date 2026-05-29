@@ -275,6 +275,11 @@ class SignSGD_adv(torch.optim.Optimizer):
             if momentum > 0:
                 # Reconstruct momentum m_{t-1}
                 exp_avg = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
+
+                if centered_vt:
+                    exp_avg_sq = exp_avg.square().view(p.shape)
+                    vt = exp_avg_sq.rsub_(1)
+
                 exp_avg.lerp_(grad_reshaped, 1 - momentum)
 
                 if nesterov:
@@ -299,6 +304,11 @@ class SignSGD_adv(torch.optim.Optimizer):
             if momentum > 0:
                 actual_precision = group['actual_state_precision']
                 exp_avg = get_state(state, 'exp_avg', actual_precision)
+
+                if centered_vt:
+                    exp_avg_sq = exp_avg.square()
+                    vt = exp_avg_sq.rsub_(1)
+
                 exp_avg.lerp_(grad, 1 - momentum)
 
                 if centered_vt:
@@ -324,7 +334,7 @@ class SignSGD_adv(torch.optim.Optimizer):
 
         if centered_vt:
             # mathematically: Variance of +/- 1 is estimated by (1 - E[X]^2).
-            denom = (1.0 - exp_avg_vt.square()).sqrt_()
+            denom = vt.sqrt_()
             update.atan2_(denom)
 
         if group.get('geometric_wd', False):

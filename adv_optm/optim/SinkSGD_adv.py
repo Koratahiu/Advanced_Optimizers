@@ -9,7 +9,7 @@ from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 from ..util.centered_decay import _init_anchor
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 from ..util.sinkhorn import apply_sr_sinkhorn, get_sinkhorn_wd_scaler
-from ..util.signed_util import apply_stochastic_sign_
+from ..util.signed_util import get_signsgd_wd_target
 
 class SinkSGD_adv(torch.optim.Optimizer):
     """
@@ -199,13 +199,9 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
         random_int_tensor = None
         random_int_state_tensor = None
-        sign_noise = None
 
         if group.get('compiled_optimizer', False):
             step_size = torch.as_tensor(step_size)
-            is_vector = grad.ndim < 2 or getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False)
-            if is_vector:
-                sign_noise = param_update._get_random_noise_for_sso(p)
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 random_int_tensor = param_update._get_random_int_for_sr(p)
                 random_int_state_tensor = random_int_tensor
@@ -219,11 +215,11 @@ class SinkSGD_adv(torch.optim.Optimizer):
         else:
             step_param_fn = self._step_parameter
 
-        step_param_fn(p, grad, state, group, step_size, random_int_tensor, random_int_state_tensor, sign_noise)
+        step_param_fn(p, grad, state, group, step_size, random_int_tensor, random_int_state_tensor)
 
         state['step'] += 1
 
-    def _step_parameter(self, p, grad, state, group, step_size, random_int_tensor, random_int_state_tensor, sign_noise):
+    def _step_parameter(self, p, grad, state, group, step_size, random_int_tensor, random_int_state_tensor):
         grad = upcast_grad_for_precision(grad, state, group['state_precision'])
         is_vector = grad.ndim < 2 or getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False)
         sinkhorn_iterations = group['sinkhorn_iterations']
@@ -232,14 +228,22 @@ class SinkSGD_adv(torch.optim.Optimizer):
         momentum = group['momentum']
         nesterov = group['nesterov']
         nesterov_coef = group.get('nesterov_coef', None)
+        centered_vt = group.get('centered_vt', False)
+
+        vt_row = None
+        vt_col = None
+        vt = None
+
+        wd_scaler = None
+        wd_target = None
 
         if group.get('normed_momentum', False):
             if not is_vector:
                 # Sinkhorn iterative normalization
                 grad = apply_sr_sinkhorn(grad, iters=sinkhorn_iterations, p=p, ortho_project=orthogonal_sinkhorn)
             else:
-                # For vectors, apply adaptive stochastic sign
-                grad = apply_stochastic_sign_(grad, sign_noise, is_vector=is_vector)
+                # For vectors, apply sign operation
+                grad = grad.sign_()
 
         if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)
@@ -251,14 +255,15 @@ class SinkSGD_adv(torch.optim.Optimizer):
             if momentum != 0:
                 buf = _reconstruct_state((state['mu_b_nmf'], state['mv_b_nmf'], state['sign'], d2), signed=True)
 
-                if group.get('centered_vt', False):
-                    buf_sq = buf.square().view(p.shape[0], -1)
-                    vt_row = (1.0 - buf_sq.mean(dim=-1))
-                    vt_col = (1.0 - buf_sq.mean(dim=-2))
-                    del buf_sq
-                else:
-                    vt_row = None
-                    vt_col = None
+                if centered_vt:
+                    if not is_vector:
+                        buf_sq = buf.square().view(p.shape[0], -1)
+                        vt_row = (1.0 - buf_sq.mean(dim=-1))
+                        vt_col = (1.0 - buf_sq.mean(dim=-2))
+                        del buf_sq
+                    else:
+                        buf_sq = buf.square().view(p.shape)
+                        vt = buf_sq.rsub_(1)
 
                 buf.lerp_(grad_reshaped, 1 - momentum)
 
@@ -281,14 +286,15 @@ class SinkSGD_adv(torch.optim.Optimizer):
             if momentum != 0:
                 buf = get_state(state, 'momentum_buffer', actual_precision)
 
-                if group.get('centered_vt', False):
-                    buf_sq = buf.square().view(buf.shape[0], -1)
-                    vt_row = (1.0 - buf_sq.mean(dim=-1))
-                    vt_col = (1.0 - buf_sq.mean(dim=-2))
-                    del buf_sq
-                else:
-                    vt_row = None
-                    vt_col = None
+                if centered_vt:
+                    if not is_vector:
+                        buf_sq = buf.square().view(buf.shape[0], -1)
+                        vt_row = (1.0 - buf_sq.mean(dim=-1))
+                        vt_col = (1.0 - buf_sq.mean(dim=-2))
+                        del buf_sq
+                    else:
+                        buf_sq = buf.square()
+                        vt = buf_sq.rsub_(1)
 
                 buf.lerp_(grad, 1 - momentum)
 
@@ -304,35 +310,40 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
             del random_int_state_tensor
 
-        if group.get('centered_vt', False):
-            # Align with Sinkhorn: Alternate row/col preconditioning
-            update_2d = update.view(update.shape[0], -1)
-            update_2d.mul_(vt_row.clamp_min(1e-30).rsqrt().unsqueeze(1))
-            update_2d.mul_(vt_col.clamp_min(1e-30).rsqrt().unsqueeze(0))
-            update = update_2d.atan_().view_as(p)
+        if centered_vt:
+            if not is_vector:
+                # Align with Sinkhorn: Alternate row/col preconditioning
+                update_2d = update.view(update.shape[0], -1)
+                update_2d.mul_(vt_row.clamp_min(1e-30).rsqrt().unsqueeze(1))
+                update_2d.mul_(vt_col.clamp_min(1e-30).rsqrt().unsqueeze(0))
+                update = update_2d.atan_().view_as(p)
+            else:
+                denom = vt.sqrt_()
+                update.atan2_(denom)
 
         if not group.get('normed_momentum', False):
             if not is_vector:
                 # Sinkhorn iterative normalization
                 update = apply_sr_sinkhorn(update, iters=sinkhorn_iterations, p=p, ortho_project=orthogonal_sinkhorn)
             else:
-                # For vectors, apply adaptive stochastic sign
-                update = apply_stochastic_sign_(update, sign_noise, is_vector=is_vector)
+                # For vectors, apply sign operation
+                update = update.sign_()
 
         if group.get('geometric_wd', False):
-            wd_scaler = get_sinkhorn_wd_scaler(p, row_denom=vt_row, col_denom=vt_col)
-        else:
-            wd_scaler = None
+            if not is_vector:
+                wd_scaler = get_sinkhorn_wd_scaler(p, row_denom=vt_row, col_denom=vt_col)
+            else:
+                wd_target = get_signsgd_wd_target(p, denom=denom)
 
         update_scaling = step_size
         if group.get('spectral_normalization', False):
             update = scale_update(p, update, update_scaling, state=state)
         else:
-            if group.get('centered_vt', False):
+            if centered_vt:
                 update_scaling = update_scaling * (4/math.pi)
             update.mul_(update_scaling)
 
-        param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor, wd_scaler=wd_scaler)
+        param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor, wd_scaler=wd_scaler, wd_target=wd_target)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
