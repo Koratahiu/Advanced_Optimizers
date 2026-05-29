@@ -258,15 +258,14 @@ class SignSGD_adv(torch.optim.Optimizer):
         wd_target = None
         cwd_target = None
 
+        if group["orthogonal_gradient"]:
+            grad = _orthogonalize_gradient(p, grad)
+
         if group.get('normed_momentum', False):
             if sso:
                 grad = apply_stochastic_sign_(grad, noise=random_noise_tensor, is_vector=is_vector)
             else:
                 grad = grad.sign_()
-
-        if group["orthogonal_gradient"]:
-            grad = _orthogonalize_gradient(p, grad)
-
 
         if state.get('factored'):
             # Factored Path
