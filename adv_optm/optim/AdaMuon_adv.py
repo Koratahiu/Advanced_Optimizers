@@ -51,7 +51,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             learning rate schedules. (default: True).
         ns_steps (int): number of Newton-Schulz iterations to perform (default: 5).
         ns_eps (float): epsilon for Newton-Schulz normalization stability. When None
-            it's derived from scale invariant rule (default: None).
+            it's derived from scale invariant rule (default: 1e-7).
         ns_coeffs (tuple[float, float, float]): The (a, b, c) coefficients for the
             quintic polynomial in the Newton-Schulz iteration.
             (default: (3.4445, -4.7750, 2.0315)).
