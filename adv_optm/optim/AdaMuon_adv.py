@@ -375,7 +375,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 use_factored_2nd = (
                     group.get('factored_2nd', False)
                     and not group['normuon_variant']
-                    and (p.ndim > 1 and not group['vector_reshape'])
+                    and not (len(p.shape) == 1 and not group['vector_reshape'])
                 )
                 state['factored_2nd'] = use_factored_2nd
 
