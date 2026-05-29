@@ -250,6 +250,16 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
             if momentum != 0:
                 buf = _reconstruct_state((state['mu_b_nmf'], state['mv_b_nmf'], state['sign'], d2), signed=True)
+
+                if group.get('centered_vt', False):
+                    buf_sq = buf.square().view(p.shape[0], -1)
+                    vt_row = (1.0 - buf_sq.mean(dim=-1))
+                    vt_col = (1.0 - buf_sq.mean(dim=-2))
+                    del buf_sq
+                else:
+                    vt_row = None
+                    vt_col = None
+
                 buf.lerp_(grad_reshaped, 1 - momentum)
 
                 # Factorize updated buffer
