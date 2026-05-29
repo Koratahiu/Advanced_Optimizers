@@ -21,6 +21,7 @@ def _apply_weight_decay(
     scaled_wd: float | Tensor | None,
     scaled_cwd: float | Tensor | None,
     wd_target: Tensor | None = None,
+    cwd_target: Tensor | None = None,
 ) -> None:
     """
     Apply decoupled weight decay (Standard and/or Centered) independently.
@@ -48,8 +49,12 @@ def _apply_weight_decay(
 
     # Centered Weight Decay (pulls toward anchor)
     if scaled_cwd is not None and 'anchor_type' in state:
-        anchor = dequantize_anchor(p, state, group, p_calc.dtype)
-        decay_target = p_calc.sub(anchor)
+        if cwd_target is not None:
+            decay_target = cwd_target
+        else:
+            anchor = dequantize_anchor(p, state, group, p_calc.dtype)
+            decay_target = p_calc.sub(anchor)
+            del anchor
 
         if cautious:
             # Cautious Weight Decay: only decay if the update pushes in the same direction as the decay
@@ -66,7 +71,8 @@ def _apply_weight_decay(
             else:
                 p_calc.add_(decay_target, alpha=-scaled_cwd)
 
-        del anchor, decay_target
+        if cwd_target is None:
+            del decay_target
 
 def apply_parameter_update(
     self,
@@ -78,7 +84,8 @@ def apply_parameter_update(
     random_int_tensor: Tensor | None = None,
     decoupled: bool = False,
     wd_scaler: float | Tensor | None = None,
-    wd_target: float | Tensor | None = None,
+    wd_target: Tensor | None = None,
+    cwd_target: Tensor | None = None,
 ) -> None:
     """
     Applies decoupled weight decay (standard, cautious, centered) and the final
@@ -118,9 +125,12 @@ def apply_parameter_update(
         p_fp32 = p.float()
         update_fp32 = update.float()
 
+        wd_t = wd_target.float() if wd_target is not None else None
+        cwd_t = cwd_target.float() if cwd_target is not None else None
+
         # Apply weight decay if needed
         if scaled_wd is not None or scaled_cwd is not None:
-            _apply_weight_decay(p_fp32, update_fp32, p, state, group, scaled_wd, scaled_cwd, wd_target)
+            _apply_weight_decay(p_fp32, update_fp32, p, state, group, scaled_wd, scaled_cwd, wd_t, cwd_t)
 
         # Apply main update
         p_fp32.add_(-update_fp32)
@@ -138,7 +148,7 @@ def apply_parameter_update(
     else:
         # Standard path for non-bfloat16 or without stochastic rounding
         if scaled_wd is not None or scaled_cwd is not None:
-            _apply_weight_decay(p, update, p, state, group, scaled_wd, scaled_cwd, wd_target)
+            _apply_weight_decay(p, update, p, state, group, scaled_wd, scaled_cwd, wd_target, cwd_target)
 
         # Apply main update
         p.add_(-update)

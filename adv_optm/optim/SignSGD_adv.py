@@ -7,7 +7,7 @@ from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
-from ..util.centered_decay import _init_anchor
+from ..util.centered_decay import _init_anchor, dequantize_anchor
 from ..util.signed_util import apply_stochastic_sign_, get_signsgd_wd_target
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 
@@ -256,6 +256,7 @@ class SignSGD_adv(torch.optim.Optimizer):
 
         denom = None
         wd_target = None
+        cwd_target = None
 
         if group.get('normed_momentum', False):
             if sso:
@@ -335,13 +336,18 @@ class SignSGD_adv(torch.optim.Optimizer):
         if group.get('geometric_wd', False) and group["weight_decay"] > 0 :
             wd_target = get_signsgd_wd_target(p, denom=denom, stochastic_sign=sso, noise=random_noise_tensor, is_vector=is_vector)
 
+            if group.get('centered_wd', 0.0) > 0 and 'anchor_type' in state:
+                anchor = dequantize_anchor(p, state, group, p.dtype)
+                cwd_target = get_signsgd_wd_target(p.sub(anchor), denom=denom, stochastic_sign=sso, noise=random_noise_tensor, is_vector=is_vector)
+                del anchor
+
         if group.get('spectral_normalization', False):
             update = scale_update(p, update, lr, state=state)
         else:
             update_scaling = lr * A if centered_vt else lr
             update.mul_(update_scaling)
 
-        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor, wd_target=wd_target)
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor, wd_target=wd_target, cwd_target=cwd_target)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
