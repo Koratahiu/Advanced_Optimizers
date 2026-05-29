@@ -181,13 +181,6 @@ class SinkSGD_adv(torch.optim.Optimizer):
                     if group['momentum'] != 0:
                         init_state_tensor(state, 'momentum_buffer', p.shape, actual_precision, p.device, dtype)
 
-                if group.get('centered_vt', False):
-                    # Align shapes with Sinkhorn's 2D flattening
-                    dim0 = p.shape[0]
-                    dim1 = p.numel() // dim0
-                    state['vt_row'] = torch.zeros(dim0, device=device, dtype=torch.float32)
-                    state['vt_col'] = torch.zeros(dim1, device=device, dtype=torch.float32)
-
             if group.get('spectral_normalization', False) and is_spectral(p):
                 init_spectral_norm(state, p)
 
@@ -279,13 +272,10 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 buf = get_state(state, 'momentum_buffer', actual_precision)
 
                 if group.get('centered_vt', False):
-                    vt_row, vt_col = state['vt_row'], state['vt_col']
-                    grad_vt = grad - buf
-                    grad_vt_sq = grad_vt.mul_(grad_vt).view(grad.shape[0], -1)
-                    mean_row_grad = grad_vt_sq.mean(dim=-1)
-                    mean_col_grad = grad_vt_sq.mean(dim=-2)
-                    vt_row.mul_(momentum).add_(mean_row_grad, alpha=1.0 - momentum)
-                    vt_col.mul_(momentum).add_(mean_col_grad, alpha=1.0 - momentum)
+                    buf_sq = buf.square().view(buf.shape[0], -1)
+                    vt_row = (1.0 - buf_sq.mean(dim=-1))
+                    vt_col = (1.0 - buf_sq.mean(dim=-2))
+                    del buf_sq
                 else:
                     vt_row = None
                     vt_col = None
