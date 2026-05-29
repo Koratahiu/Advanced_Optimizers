@@ -1,4 +1,5 @@
 import torch
+import math
 
 from . import param_update
 
@@ -54,3 +55,32 @@ def apply_stochastic_sign_(update: torch.Tensor, noise: torch.Tensor | None, is_
 
     # Final stochastic step: sign(v + U[-1, 1])
     return update.add_(noise).sign_()
+
+def get_signsgd_wd_target(
+    p: torch.Tensor,
+    denom: torch.Tensor | None = None,
+    stochastic_sign: bool = False,
+    noise: torch.Tensor | None = None,
+    is_vector: bool = False,
+):
+    """
+    Computes a signed weight decay target.
+    """
+    if stochastic_sign:
+        wd_target = apply_stochastic_sign_(p.clone(), noise, is_vector)
+    else:
+        wd_target = torch.sign(p)
+
+    if denom is not None:
+        wd_target.atan2_(denom)
+        norm_lb = 1 / math.sqrt(p.numel())
+        target_norm = torch.linalg.vector_norm(wd_target, ord=2).clamp_min_(norm_lb)
+    else:
+        target_norm = math.sqrt(p.numel())
+
+    p_norm = torch.linalg.vector_norm(p, ord=2)
+
+    # Scale the target so it match L2 wd strength
+    wd_target.mul_(p_norm / target_norm)
+
+    return wd_target.view_as(p)

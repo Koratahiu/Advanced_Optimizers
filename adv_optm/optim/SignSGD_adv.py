@@ -1,16 +1,17 @@
 import torch
+import math
 
 from typing import Optional
 
 from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
-from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state, _pack_bools, _unpack_bools
-from ..util.lion_k import _get_lion_k_update
+from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 from ..util.centered_decay import _init_anchor
-from ..util.signed_util import apply_stochastic_sign_
+from ..util.signed_util import apply_stochastic_sign_, get_signsgd_wd_target
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 
+A = 4 / math.pi
 
 class SignSGD_adv(torch.optim.Optimizer):
     """
@@ -55,6 +56,8 @@ class SignSGD_adv(torch.optim.Optimizer):
         momentum: float = 0.9,
         # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
+        # weight decay features
+        geometric_wd: bool = False,
         cautious_wd: bool = False,
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
@@ -67,6 +70,8 @@ class SignSGD_adv(torch.optim.Optimizer):
         nesterov_coef: float | None = None,
         # Normalization then Momentum
         normed_momentum: bool = False,
+        # Centered Variance Precondition
+        centered_vt: bool = False,
         # Centered WD
         centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
@@ -86,6 +91,8 @@ class SignSGD_adv(torch.optim.Optimizer):
             raise ValueError(f"momentum should be in [0.0, 1.0], but got {momentum}")
         if not weight_decay >= 0.0:
             raise ValueError(f"Weight decay must be >= 0.0, but got {weight_decay}")
+        if centered_vt and not normed_momentum and not momentum > 0:
+            raise NotImplementedError(f"centered_vt is intended to be used with normed_momentum")
 
         state_precision = state_precision.lower()
         valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp8_sr", "int8_sr"}
@@ -101,12 +108,14 @@ class SignSGD_adv(torch.optim.Optimizer):
             momentum=momentum,
             weight_decay=weight_decay,
             cautious_wd=cautious_wd,
+            geometric_wd=geometric_wd,
             vector_reshape=vector_reshape,
             orthogonal_gradient=orthogonal_gradient,
             stochastic_sign=stochastic_sign,
             nesterov=nesterov,
             nesterov_coef=nesterov_coef,
             normed_momentum=normed_momentum,
+            centered_vt=centered_vt,
             spectral_normalization=spectral_normalization,
             centered_wd= centered_wd,
             centered_wd_mode= centered_wd_mode,
@@ -242,9 +251,14 @@ class SignSGD_adv(torch.optim.Optimizer):
         momentum = group["momentum"]
         nesterov = group.get('nesterov', False)
         nesterov_coef = group.get('nesterov_coef', None)
+        sso = group.get('stochastic_sign', False)
+        centered_vt = group.get('centered_vt', False) and group.get('normed_momentum', False) and momentum > 0
+
+        denom = None
+        wd_target = None
 
         if group.get('normed_momentum', False):
-            if group.get('stochastic_sign', False):
+            if sso:
                 grad = apply_stochastic_sign_(grad, noise=random_noise_tensor, is_vector=is_vector)
             else:
                 grad = grad.sign_()
@@ -269,6 +283,10 @@ class SignSGD_adv(torch.optim.Optimizer):
                 else:
                     raw_update = exp_avg.clone()
 
+                if centered_vt:
+                    # Make exp_avg available in the correct shape for denominator tracking later
+                    exp_avg_vt = exp_avg.clone().view(p.shape)
+
                 # Compress new momentum m_t and store factors
                 state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True)
             else:
@@ -283,6 +301,9 @@ class SignSGD_adv(torch.optim.Optimizer):
                 exp_avg = get_state(state, 'exp_avg', actual_precision)
                 exp_avg.lerp_(grad, 1 - momentum)
 
+                if centered_vt:
+                    exp_avg_vt = exp_avg
+
                 if nesterov:
                     nv_coef = momentum if nesterov_coef is None else nesterov_coef
                     raw_update = grad.lerp(exp_avg, nv_coef)
@@ -294,19 +315,28 @@ class SignSGD_adv(torch.optim.Optimizer):
                 raw_update = grad.clone()
 
         if not group.get('normed_momentum', False):
-            if group.get('stochastic_sign', False):
+            if sso:
                 update = apply_stochastic_sign_(raw_update, noise=random_noise_tensor, is_vector=is_vector)
             else:
                 update = raw_update.sign_()
         else:
             update = raw_update
 
+        if centered_vt:
+            # mathematically: Variance of +/- 1 is estimated by (1 - E[X]^2).
+            denom = (1.0 - exp_avg_vt.square()).sqrt_()
+            update.atan2_(denom)
+
+        if group.get('geometric_wd', False):
+            wd_target = get_signsgd_wd_target(p, denom=denom, stochastic_sign=sso, noise=random_noise_tensor, is_vector=is_vector)
+
         if group.get('spectral_normalization', False):
             update = scale_update(p, update, lr, state=state)
         else:
-            update.mul_(lr)
+            update_scaling = lr * A if centered_vt else lr
+            update.mul_(update_scaling)
 
-        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor, decoupled=True, wd_target=wd_target)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
