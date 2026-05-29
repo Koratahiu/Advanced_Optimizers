@@ -7,7 +7,7 @@ from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
-from ..util.centered_decay import _init_anchor, dequantize_anchor
+from ..util.centered_decay import _init_anchor
 from ..util.signed_util import apply_stochastic_sign_, get_signsgd_wd_target
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 
