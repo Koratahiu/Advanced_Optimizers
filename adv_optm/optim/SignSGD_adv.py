@@ -288,10 +288,6 @@ class SignSGD_adv(torch.optim.Optimizer):
                 else:
                     raw_update = exp_avg.clone()
 
-                if centered_vt:
-                    # Make exp_avg available in the correct shape for denominator tracking later
-                    exp_avg_vt = exp_avg.clone().view(p.shape)
-
                 # Compress new momentum m_t and store factors
                 state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True)
             else:
@@ -310,9 +306,6 @@ class SignSGD_adv(torch.optim.Optimizer):
                     vt = exp_avg_sq.rsub_(1)
 
                 exp_avg.lerp_(grad, 1 - momentum)
-
-                if centered_vt:
-                    exp_avg_vt = exp_avg
 
                 if nesterov:
                     nv_coef = momentum if nesterov_coef is None else nesterov_coef
