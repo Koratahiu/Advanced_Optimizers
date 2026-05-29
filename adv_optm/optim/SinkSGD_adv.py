@@ -6,7 +6,7 @@ from ..util import param_update
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
-from ..util.centered_decay import _init_anchor
+from ..util.centered_decay import _init_anchor, dequantize_anchor
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 from ..util.sinkhorn import apply_sr_sinkhorn, get_sinkhorn_wd_scaler
 from ..util.signed_util import get_signsgd_wd_target
@@ -236,6 +236,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
         wd_scaler = None
         wd_target = None
+        cwd_target = None
 
         if group.get('normed_momentum', False):
             if not is_vector:
@@ -331,11 +332,16 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 # For vectors, apply sign operation
                 update = update.sign_()
 
-        if group.get('geometric_wd', False) and group["weight_decay"] > 0 :
-            if not is_vector:
-                wd_scaler = get_sinkhorn_wd_scaler(p, row_denom=vt_row, col_denom=vt_col)
-            else:
-                wd_target = get_signsgd_wd_target(p, denom=denom)
+        if group.get('geometric_wd', False):
+            if group["weight_decay"] > 0:
+                if not is_vector:
+                    wd_scaler = get_sinkhorn_wd_scaler(p, row_denom=vt_row, col_denom=vt_col)
+                else:
+                    wd_target = get_signsgd_wd_target(p, denom=denom)
+            if is_vector and group.get('centered_wd', 0.0) > 0 and 'anchor_type' in state:
+                anchor = dequantize_anchor(p, state, group, p.dtype)
+                cwd_target = get_signsgd_wd_target(p.sub(anchor), denom=denom)
+                del anchor
 
         update_scaling = step_size
         if group.get('spectral_normalization', False):
@@ -345,7 +351,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 update_scaling = update_scaling * (4/math.pi)
             update.mul_(update_scaling)
 
-        param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor, wd_scaler=wd_scaler, wd_target=wd_target)
+        param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor, wd_scaler=wd_scaler, wd_target=wd_target, cwd_target=cwd_target)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
