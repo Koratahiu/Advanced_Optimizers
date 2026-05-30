@@ -106,7 +106,7 @@ class Adopt_adv(torch.optim.Optimizer):
             while only factorizing the second moment. (default: False)
         state_precision (str): Precision method for Adopt states. Options: 'auto'
             (parameter precision), 'fp32', 'factored' (SMMF low-rank FP32), 'bf16_sr' (with
-            stochastic rounding), 'fp8_sr', 'int8_sr'. (default: 'auto')
+            stochastic rounding), 'fp16' , 'fp8_sr', 'int8_sr'. (default: 'auto')
     """
 
     def __init__(
@@ -175,7 +175,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
 
         state_precision = state_precision.lower()
-        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp8_sr", "int8_sr"}
+        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp16", "fp8_sr", "int8_sr"}
         if state_precision not in valid_precisions:
             raise ValueError(f"state_precision must be one of {valid_precisions}. Got {state_precision}")
 

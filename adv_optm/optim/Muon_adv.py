@@ -104,7 +104,7 @@ class Muon_adv(torch.optim.Optimizer):
         adam_tiny_spike (float): Tiny spike for Kourkoutas-β. (default: 1e-9)
         adam_k_warmup_steps (int): Warmup steps for Kourkoutas-β. (default: 0)
         adam_spectral_normalization (bool): Enable explicit spectral normalization for AdamW. (default: False)
-        adam_state_precision (str): Precision for AuxAdam states. Options: 'auto', 'fp32', 'bf16_sr', 'fp8_sr', 'int8_sr', 'factored'. (default: 'auto')
+        adam_state_precision (str): Precision for AuxAdam states. Options: 'auto', 'fp32', 'bf16_sr', 'fp16', 'fp8_sr', 'int8_sr', 'factored'. (default: 'auto')
         adam_nnmf_factor (bool): 1-bit factored for AdamW.
         adam_factored_2nd (bool): Factorize only the second moment (v_t) for AuxAdam. (default: False)
         """
@@ -200,7 +200,7 @@ class Muon_adv(torch.optim.Optimizer):
             ValueError("spectral_normalization violates accelerated Newton-Schulz assumptions. Pick one of them.")
 
         state_precision = state_precision.lower()
-        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp8_sr", "int8_sr"}
+        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp16", "fp8_sr", "int8_sr"}
         if state_precision not in valid_precisions:
             raise ValueError(f"state_precision must be one of {valid_precisions}. Got {state_precision}")
 
