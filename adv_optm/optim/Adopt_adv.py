@@ -50,10 +50,6 @@ class Adopt_adv(torch.optim.Optimizer):
             rounding for BF16 parameter updates (default: True).
         use_atan2 (bool): whether to use an atan2-based normalization, which can
             improve stability by removing the need for `eps`. (default: False)
-        cautious_mask (bool):  whether to use cautious masking to align the gradient's
-            direction with the first moment's.  (default: False)
-        grams_moment (bool): whether to combine the gradient's direction with the
-            first moment's magnitude (default: False).
         orthogonal_gradient (bool): whether to use OrthoGrad. (default: False)
         kourkoutas_beta (bool): whether to enable the layer-wise dynamic β₂ logic.
             If `False`, the optimizer behaves as standard Adopt. (default: False)
@@ -111,9 +107,6 @@ class Adopt_adv(torch.optim.Optimizer):
         use_atan2: bool = False,
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
-        # Cautious and GRAMS
-        cautious_mask: bool = False,
-        grams_moment: bool = False,
         # OrthoGrad
         orthogonal_gradient: bool = False,
         # Nesterov momentum
@@ -149,9 +142,6 @@ class Adopt_adv(torch.optim.Optimizer):
             raise ValueError(f"Epsilon should be >= 0.0. Got {eps}")
         if not (weight_decay >= 0.0):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
-        if cautious_mask and grams_moment:
-            print("Warning: cautious is incompatible with grams, Disabling cautious.")
-            cautious_mask = False
         if kourkoutas_beta and not (betas[1] > beta2_min):
             raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
 
@@ -181,8 +171,6 @@ class Adopt_adv(torch.optim.Optimizer):
         self.clip_lambda = clip_lambda
         self.stochastic_rounding = stochastic_rounding
         self.use_atan2 = use_atan2
-        self.cautious_mask = cautious_mask
-        self.grams_moment = grams_moment
         self.orthogonal_gradient = orthogonal_gradient
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
@@ -391,12 +379,7 @@ class Adopt_adv(torch.optim.Optimizer):
                 # Factorize
                 state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
 
-                if self.grams_moment:
-                    update_mt = _grams_update(mt, grad_reshaped, inplace=True)
-                elif self.cautious_mask:
-                    update_mt = _cautious_update(mt, grad_reshaped, inplace=True)
-                else:
-                    update_mt = mt
+                update_mt = mt
 
                 if nesterov:
                     nv_coef = beta1 if nesterov_coef is None else nesterov_coef
@@ -438,12 +421,7 @@ class Adopt_adv(torch.optim.Optimizer):
                 mt = get_state(state, 'exp_avg', actual_precision) # m_{t-1}
                 mt.lerp_(normalized_grad, 1.0 - beta1)
 
-                if self.grams_moment:
-                    update_mt = _grams_update(mt, grad)
-                elif self.cautious_mask:
-                    update_mt = _cautious_update(mt, grad)
-                else:
-                    update_mt = mt.clone()
+                update_mt = mt.clone()
 
                 if nesterov:
                     nv_coef = beta1 if nesterov_coef is None else nesterov_coef

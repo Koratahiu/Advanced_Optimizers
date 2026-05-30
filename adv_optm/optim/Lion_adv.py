@@ -33,7 +33,6 @@ class Lion_adv(torch.optim.Optimizer):
         stochastic_rounding (bool, optional): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
         orthogonal_gradient (bool): whether to orthogonalize the gradient (default: False).
-        cautious_mask (bool): whether to use the cautious masking technique. (default: False).
         clip_threshold (float, optional): whether to clip the gradients norm
             per-parameter (default: 0.0).
         kappa_p (float, optional): The p-value for the Lp-norm in Lion-K (domain [1.0, 2.0]).
@@ -71,9 +70,6 @@ class Lion_adv(torch.optim.Optimizer):
         stochastic_rounding: bool = True,
         # OrthoGrad
         orthogonal_gradient: bool = False,
-        # Cautious variant
-        cautious_mask: bool = False,
-        clip_threshold: float = 0.0,
         # Lion-k
         kappa_p: float = 1.0,
         auto_kappa_p: bool = False,
@@ -104,7 +100,6 @@ class Lion_adv(torch.optim.Optimizer):
             cautious_wd=cautious_wd,
             vector_reshape=vector_reshape,
             orthogonal_gradient=orthogonal_gradient,
-            clip_threshold=clip_threshold,
             kappa_p=kappa_p,
             auto_kappa_p=auto_kappa_p,
             stochastic_sign=stochastic_sign,
@@ -114,7 +109,6 @@ class Lion_adv(torch.optim.Optimizer):
             centered_wd_mode= centered_wd_mode,
         )
         self.stochastic_rounding = stochastic_rounding
-        self.cautious_mask = cautious_mask
         self._init_lr = lr
         super().__init__(params, defaults)
 
@@ -220,11 +214,6 @@ class Lion_adv(torch.optim.Optimizer):
     def _step_parameter(self, p, grad, state, group, lr, random_int_tensor, random_noise_tensor):
         if grad.dtype != torch.float32 and state['factored']:
             grad = grad.float()
-        if group["clip_threshold"] > 0.0:
-            grad_norm = torch.norm(grad.detach())
-            if grad_norm > group["clip_threshold"]:
-                clip_coef = group["clip_threshold"] / grad_norm
-                grad.mul_(clip_coef)
         if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)
 
@@ -259,12 +248,6 @@ class Lion_adv(torch.optim.Optimizer):
             state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True)
             del exp_avg
 
-            if self.cautious_mask:
-                mask = (update * grad_reshaped > 0).to(grad_reshaped.dtype)
-                mask.div_(mask.mean().clamp_min_(1e-3))
-                update.mul_(mask)
-                del mask
-
             update = update.view(p.shape)
 
             if group.get('stochastic_sign', False):
@@ -281,12 +264,6 @@ class Lion_adv(torch.optim.Optimizer):
 
             # Standard Lion momentum update
             exp_avg.lerp_(grad, 1 - beta2)
-
-            if self.cautious_mask:
-                mask = (update * grad > 0).to(grad.dtype)
-                mask.div_(mask.mean().clamp_min_(1e-3))
-                update.mul_(mask)
-                del mask
 
             if group.get('stochastic_sign', False):
                 update = apply_stochastic_sign_(update, noise=random_noise_tensor)

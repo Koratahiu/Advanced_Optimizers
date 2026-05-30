@@ -96,12 +96,7 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
             # Factorize
             state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
 
-            if group.get('adam_grams_moment'):
-                update_mt = _grams_update(mt, grad_reshaped, inplace=True)
-            elif group.get('adam_cautious_mask'):
-                update_mt = _cautious_update(mt, grad_reshaped, inplace=True)
-            else:
-                update_mt = mt
+            update_mt = mt
 
             if nesterov:
                 nv_coef = beta1_adam if nesterov_coef is None else nesterov_coef
@@ -144,12 +139,7 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
             exp_avg = get_state(state, 'exp_avg', actual_precision)
             exp_avg.lerp_(grad, 1.0 - beta1_adam)
 
-            if group.get('adam_grams_moment'):
-                update_mt = _grams_update(exp_avg, grad)
-            elif group.get('adam_cautious_mask'):
-                update_mt = _cautious_update(exp_avg, grad)
-            else:
-                update_mt = exp_avg.clone()
+            update_mt = exp_avg.clone()
 
             if nesterov:
                 nv_coef = beta1_adam if nesterov_coef is None else nesterov_coef

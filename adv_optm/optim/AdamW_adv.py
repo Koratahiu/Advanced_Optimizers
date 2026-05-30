@@ -45,9 +45,6 @@ class AdamW_adv(torch.optim.Optimizer):
         stochastic_rounding (bool): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
         use_atan2 (bool): whether to use the atan2 update rule. (default: False)
-        grams_moment (bool): whether to use Grams-style updates. (default: False)
-        cautious_mask (bool):  whether to use cautious masking to align the gradient's
-            direction with the first moment's.  (default: False)
         orthogonal_gradient (bool): whether to use OrthoGrad.  (default: False)
         normed_momentum (bool): whether to compute the first moment on the normalized gradient. (default: False)
         kourkoutas_beta (bool): whether to enable the layer-wise dynamic β₂ logic.
@@ -106,9 +103,6 @@ class AdamW_adv(torch.optim.Optimizer):
         stochastic_rounding: bool = True,
         # Adam_atan2 (scale invariant)
         use_atan2: bool = False,
-        # Cautious and GRAMS
-        cautious_mask: bool = False,
-        grams_moment: bool = False,
         # OrthoGrad
         orthogonal_gradient: bool = False,
         # Nesterov momentum
@@ -149,10 +143,6 @@ class AdamW_adv(torch.optim.Optimizer):
         if kourkoutas_beta and not (betas[1] > beta2_min):
             raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
 
-        if cautious_mask and grams_moment:
-            print("Warning: cautious is incompatible with grams, Disabling cautious.")
-            cautious_mask = False
-
         state_precision = state_precision.lower()
         valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp16", "fp8_sr", "int8_sr"}
         if state_precision not in valid_precisions:
@@ -177,8 +167,6 @@ class AdamW_adv(torch.optim.Optimizer):
             "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape, "factored_2nd": factored_2nd
         }
         self.stochastic_rounding = stochastic_rounding
-        self.cautious_mask = cautious_mask
-        self.grams_moment = grams_moment
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
         self._init_lr = lr
@@ -386,12 +374,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 # Factorize
                 state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
 
-                if self.grams_moment:
-                    update_mt = _grams_update(mt, grad_reshaped, inplace=True)
-                elif self.cautious_mask:
-                    update_mt = _cautious_update(mt, grad_reshaped, inplace=True)
-                else:
-                    update_mt = mt
+                update_mt = mt
 
                 if nesterov:
                     nv_coef = beta1 if nesterov_coef is None else nesterov_coef
@@ -452,12 +435,7 @@ class AdamW_adv(torch.optim.Optimizer):
                 exp_avg = get_state(state, 'exp_avg', actual_precision)
                 exp_avg.lerp_(grad, 1.0 - beta1)
 
-                if self.grams_moment:
-                    update_mt = _grams_update(exp_avg, grad)
-                elif self.cautious_mask:
-                    update_mt = _cautious_update(exp_avg, grad)
-                else:
-                    update_mt = exp_avg.clone()
+                update_mt = exp_avg.clone()
 
                 if nesterov:
                     nv_coef = beta1 if nesterov_coef is None else nesterov_coef

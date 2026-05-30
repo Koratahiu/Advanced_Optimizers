@@ -43,9 +43,6 @@ class Prodigy_adv(torch.optim.Optimizer):
         stochastic_rounding (bool): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
         use_atan2 (bool): whether to use the atan2 update rule. (default: False)
-        grams_moment (bool): whether to use Grams-style updates. (default: False)
-        cautious_mask (bool):  whether to use cautious masking to align the gradient's
-            direction with the first moment's.  (default: False)
         orthogonal_gradient (bool): whether to use OrthoGrad.  (default: False)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
@@ -121,9 +118,6 @@ class Prodigy_adv(torch.optim.Optimizer):
         stochastic_rounding: bool = True,
         # Adam_atan2 (scale invariant)
         use_atan2: bool = False,
-        # Cautious and GRAMS
-        cautious_mask: bool = False,
-        grams_moment: bool = False,
         # OrthoGrad
         orthogonal_gradient: bool = False,
         # Nesterov momentum
@@ -169,9 +163,6 @@ class Prodigy_adv(torch.optim.Optimizer):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
         if not (prodigy_steps >= 0):
             raise ValueError(f"prodigy_steps should be >= 0. Got {prodigy_steps}")
-        if cautious_mask and grams_moment:
-            print("Warning: cautious is incompatible with grams, Disabling cautious.")
-            cautious_mask = False
         if kourkoutas_beta and not (betas[1] > beta2_min):
             raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
 
@@ -191,8 +182,6 @@ class Prodigy_adv(torch.optim.Optimizer):
             "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape, "factored_2nd": factored_2nd
         }
         self.stochastic_rounding = stochastic_rounding
-        self.cautious_mask = cautious_mask
-        self.grams_moment = grams_moment
         self.fsdp_in_use = fsdp_in_use
 
         self.kourkoutas_beta = kourkoutas_beta
@@ -399,12 +388,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 # Factorize
                 state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
 
-                if self.grams_moment:
-                    update_mt = _grams_update(mt, grad_reshaped, inplace=True)
-                elif self.cautious_mask:
-                    update_mt = _cautious_update(mt, grad_reshaped, inplace=True)
-                else:
-                    update_mt = mt
+                update_mt = mt
 
                 if nesterov:
                     nv_coef = self.beta1 if nesterov_coef is None else nesterov_coef
@@ -447,12 +431,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 exp_avg = get_state(state, 'exp_avg', actual_precision)
                 exp_avg.mul_(self.beta1).add_(grad, alpha=d * (1.0 - self.beta1))
 
-                if self.grams_moment:
-                    update_mt = _grams_update(exp_avg, grad)
-                elif self.cautious_mask:
-                    update_mt = _cautious_update(exp_avg, grad)
-                else:
-                    update_mt = exp_avg.clone()
+                update_mt = exp_avg.clone()
 
                 if nesterov:
                     nv_coef = self.beta1 if nesterov_coef is None else nesterov_coef
