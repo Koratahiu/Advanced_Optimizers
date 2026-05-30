@@ -174,6 +174,7 @@ class SignSGD_adv(torch.optim.Optimizer):
         if group["momentum"] > 0 and len(state) == 0:
             req_precision = group['state_precision']
             is_vector = len(p.shape) == 1 and not group['vector_reshape']
+            centered_vt = group.get('centered_vt', False)
 
             state['factored'] = req_precision == 'factored' and not is_vector
 
@@ -190,9 +191,14 @@ class SignSGD_adv(torch.optim.Optimizer):
                     state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=torch.float32)
                     packed_d2 = (d2 + 7) // 8
                     state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+                    if centered_vt:
+                        state['mu_vt_nmf'] = torch.zeros(d1, device=p.device, dtype=torch.float32)
+                        state['mv_vt_nmf'] = torch.zeros(d2, device=p.device, dtype=torch.float32)
                 else:
                     init_state_tensor(state, 'exp_avg', p.shape, actual_precision, p.device, dtype)
-
+                    if centered_vt:
+                        # Align with sign operation
+                        init_state_tensor(state, 'exp_avg_sq', p.shape, actual_precision, p.device, dtype)
 
             if group.get('spectral_normalization', False) and is_spectral(p):
                 init_spectral_norm(state, p)
@@ -277,9 +283,11 @@ class SignSGD_adv(torch.optim.Optimizer):
                 exp_avg = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
                 if centered_vt:
-                    exp_avg_sq = exp_avg.square().view(p.shape)
-                    vt = (1.0 - exp_avg_sq).relu_()
-                    del exp_avg_sq
+                    vt = _reconstruct_state((state['mu_vt_nmf'], state['mv_vt_nmf']))
+                    grad_vt = grad_reshaped - exp_avg
+                    vt.mul_(momentum).addcmul_(grad_vt, grad_vt, value=1.0 - momentum)
+                    state['mu_vt_nmf'], state['mv_vt_nmf'] = _factorize_state(vt, signed=False)
+                    denom = vt.sqrt_().view_as(p)
 
                 exp_avg.lerp_(grad_reshaped, 1 - momentum)
 
@@ -303,9 +311,11 @@ class SignSGD_adv(torch.optim.Optimizer):
                 exp_avg = get_state(state, 'exp_avg', actual_precision)
 
                 if centered_vt:
-                    exp_avg_sq = exp_avg.square()
-                    vt = (1.0 - exp_avg_sq).relu_()
-                    del exp_avg_sq
+                    vt = get_state(state, 'exp_avg_sq', actual_precision)
+                    grad_vt = grad - exp_avg
+                    vt.mul_(momentum).addcmul_(grad_vt, grad_vt, value=1.0 - momentum)
+                    set_state(state, 'exp_avg_sq', vt, actual_precision, random_int_state_tensor)
+                    denom = vt.sqrt()
 
                 exp_avg.lerp_(grad, 1 - momentum)
 
@@ -329,7 +339,6 @@ class SignSGD_adv(torch.optim.Optimizer):
 
         if centered_vt:
             # mathematically: Variance of +/- 1 is estimated by (1 - E[X]^2).
-            denom = vt.sqrt_()
             update.atan2_(denom)
 
         if group.get('geometric_wd', False) and group["weight_decay"] > 0 :
