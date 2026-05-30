@@ -321,7 +321,14 @@ class AdaMuon_adv(torch.optim.Optimizer):
         if 'is_muon' in state:
             return
 
-        if group['use_muon']:
+        if group.get('use_muon') is not None:
+            state['is_muon'] = group['use_muon']
+        elif group.get('optim_type') is not None:
+            state['is_muon'] = group['optim_type'] == 'muon'
+        else: # Auto-detect per parameter
+            state['is_muon'] = _is_suitable_for_muon(p)
+
+        if state['is_muon']:
 
             state['factored'] = (
                 group['nnmf_factor'] and
