@@ -120,7 +120,7 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
 
         vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
         if isinstance(beta2_adam, torch.Tensor) and beta2_adam.dim() > 0:
-            vt.mul_(beta2_adam).addcmul_(grad_reshaped, grad_reshaped * (1.0 - beta2_adam))
+            vt = vt.view_as(p).mul_(beta2_adam).addcmul_(grad, grad * (1.0 - beta2_adam)).view_as(grad_reshaped)
         else:
             vt.mul_(beta2_adam).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2_adam)
 

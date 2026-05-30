@@ -444,7 +444,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
 
             if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
-                vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped * (d * d * (1.0 - beta2)))
+                vt = vt.view_as(p).mul_(beta2).addcmul_(grad, grad * (d * d * (1.0 - beta2))).view_as(grad_reshaped)
             else:
                 vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=d * d * (1.0 - beta2))
 
