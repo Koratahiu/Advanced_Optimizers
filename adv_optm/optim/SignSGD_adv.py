@@ -216,6 +216,8 @@ class SignSGD_adv(torch.optim.Optimizer):
         random_noise_tensor = None
         random_int_state_tensor = None
 
+        is_vector = p.ndim < 2 or getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False)
+
         if group.get('compiled_optimizer', False):
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 # Pre-generate random tensor for stochastic rounding if needed.
@@ -230,7 +232,7 @@ class SignSGD_adv(torch.optim.Optimizer):
                 elif group['actual_state_precision'] == 'fp8_sr':
                     random_int_state_tensor = param_update._get_random_int_for_fp8_sr(p)
 
-            if group.get('stochastic_sign', False):
+            if group.get('stochastic_sign', False) and not is_vector:
                 random_noise_tensor = param_update._get_random_noise_for_sso(p)
 
             lr = torch.as_tensor(lr)
