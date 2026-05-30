@@ -6,10 +6,6 @@ A comprehensive, all-in-one collection of optimization algorithms for deep learn
 
 ## 🔥 What's New
 
-### in 2.2.2
-
-- `Simplified_AdEMAMix` now uses the same LR as AdamW for all `beta1` and `alpha_grad` values!
-
 ### in 2.1.x
 
 - Added Signum (SignSGD with momentum): A new optimizer in the family (SignSGD_adv)
@@ -70,7 +66,6 @@ This library integrates multiple state-of-the-art optimization techniques valida
 |-----------|--------------|-------------|
 | `Adopt_Factored` | 328 MB | 4 small vectors + 1-bit state |
 | `Adopt_Factored + AdEMAMix` | 625 MB | 6 small vectors + two 1-bit states |
-| `Simplified_AdEMAMix` | 328 MB | Same as standard factored (no extra state) |
 
 ### Speed Comparison (SDXL, Batch Size 4)
 | Optimizer | Speed | Notes |
@@ -89,7 +84,6 @@ This library integrates multiple state-of-the-art optimization techniques valida
 | `Adam_Adv` | Advanced Adam implementation | General purpose |
 | `Adopt_Adv` | Adam-variant with independent beta2 | Stable training for small batch size regimes |
 | `Prodigy_Adv` | Prodigy with D-Adaptation | Adam with automatic LR tuning |
-| `Simplified_AdEMAMix` | Adam variant with accumulator momentum | Small/large batch training when tuned correctly |
 | `Lion_Adv` | Advanced Lion implementation | Memory-constrained environments |
 | `Prodigy_Lion_Adv` | Prodigy + Lion combination | Lion with automatic LR tuning |
 
@@ -97,18 +91,17 @@ This library integrates multiple state-of-the-art optimization techniques valida
 
 ## ⚙️ Feature Matrix
 
-| Feature | Adam_Adv | Adopt_Adv | Prodigy_Adv | Simplified_AdEMAMix | Lion_Adv |
-|---------|----------|-----------|-------------|---------------------|----------|
-| Factored | ✓ | ✓ | ✓ | ✓ | ✓ |
-| AdEMAMix | ✓ | ✓ | ✓ | ✗ | ✗ |
-| Simplified_AdEMAMix | ✗ | ✓ | ✓ | ✓ | ✗ |
-| OrthoGrad | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Grams | ✓ | ✓ | ✓ | ✗ | ✗ |
-| Cautious | ✓ | ✓ | ✓ | ✗ | ✓ |
-| atan2 | ✓ | ✓ | ✓ | ✗ | ✗ |
-| Stochastic Rounding | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Fused Backward Pass | ✓ | ✓ | ✓ | ✓ | ✓ |
-| **Kourkoutas-β** | ✓ | ✓ | ✓ | ✓ | ✗ |
+| Feature | Adam_Adv | Adopt_Adv | Prodigy_Adv | Lion_Adv |
+|---------|----------|-----------|-------------|----------|
+| Factored | ✓ | ✓ | ✓ ✓ |
+| AdEMAMix | ✓ | ✓ | ✓ | ✗ |
+| OrthoGrad | ✓ | ✓ | ✓ | ✓ |
+| Grams | ✓ | ✓ | ✓ | ✗ |
+| Cautious | ✓ | ✓ | ✓ | ✓ |
+| atan2 | ✓ | ✓ | ✓ |✗ |
+| Stochastic Rounding | ✓ | ✓ | ✓ |✓ |
+| Fused Backward Pass | ✓ | ✓ | ✓ | ✓ |
+| **Kourkoutas-β** | ✓ | ✓ | ✓ | ✗ |
 
 ---
 
@@ -131,9 +124,8 @@ This library integrates multiple state-of-the-art optimization techniques valida
 | **Cautious** | Only applies update if gradient direction aligns with momentum direction | Accelerating convergence | No overhead | [C-Optim](https://github.com/kyleliang919/C-Optim) | Adam/Adopt/Prodigy/Lion |
 | **Grams** | Update direction derived purely from current gradient | When Cautious is insufficient | No overhead | [Grams](https://github.com/Gunale0926/Grams) | Adam/Adopt/Prodigy |
 | **AdEMAMix** | Dual EMA system that retains relevance of gradients over tens of thousands of steps | Long training runs, especially where model forgetting is a concern | +1 state memory | [AdEMAMix](https://arxiv.org/abs/2409.03137) | Adam/Adopt/Prodigy |
-| **Simplified_AdEMAMix** | Accumulator-based momentum, single EMA variant of AdEMAMix | All scenarios when tuned correctly | No overhead | [Connections](https://arxiv.org/abs/2502.02431) | Adam/Adopt/Prodigy |
 | **atan2** | Robust epsilon replacement with built-in gradient clipping | Use for stable bounded updates (or for Adopt as it needs that) | No overhead | [Adam-atan2](https://github.com/lucidrains/adam-atan2-pytorch) | Adam/Adopt/Prodigy |
-| **Kourkoutas-β** | Layer-wise adaptive β₂ based on gradient “sunspike” ratio | Noisy/small/large-batch/high-LR training | No overhead | [Kourkoutas-β]() | Adam/Adopt/Prodigy/Simplified_AdEMAMix |
+| **Kourkoutas-β** | Layer-wise adaptive β₂ based on gradient “sunspike” ratio | Noisy/small/large-batch/high-LR training | No overhead | [Kourkoutas-β]() | Adam/Adopt/Prodigy |
 
 > **Note**: If both **Cautious** and **Grams** are enabled, **Grams takes precedence** and Cautious is disabled.
 
@@ -156,20 +148,6 @@ This library integrates multiple state-of-the-art optimization techniques valida
 
 ---
 
-### Simplified_AdEMAMix
-
-- Introduced in [Connections between Schedule-Free Optimizers, AdEMAMix, and Accelerated SGD Variants (arXiv:2502.02431)](https://arxiv.org/abs/2502.02431).
-- Replaces Adam’s first moment with a **theory-based momentum** with emphasize on raw gradient, combining the stability of long memory with responsiveness to recent gradients.
-- **Key insight**: Classical momentum **does not accelerate** in noisy (small-batch) regimes; this accumulator do.
-
-#### Tunable Hyperparameters
-| Parameter | Default | Tuning Guide |
-|----------|---------|--------------|
-| `beta1` | 0.99 | Controls accumulator memory length:<br>• Small BS: **0.99–0.9999**<br>• Large BS: **0.9** |
-| `Grad α` | 100 | Most critical parameter:<br>• Inversely scales with batch size<br>• **100–10** for small BS (≤32)<br>• **1–0.1** for large BS (≥512) |
-
----
-
 ### atan2
 
 - Replaces `eps` in Adam-family optimizers with a **scale-invariant**, bounded update rule.
@@ -184,7 +162,7 @@ This library integrates multiple state-of-the-art optimization techniques valida
 
 ### **Kourkoutas-β**
 
-**Kourkoutas-β** introduces a **sunspike-driven, layer-wise adaptive second-moment decay (β₂)** as an optional enhancement for `Adam_Adv`, `Adopt_Adv`, `Prodigy_Adv`, and `Simplified_AdEMAMix`.
+**Kourkoutas-β** introduces a **sunspike-driven, layer-wise adaptive second-moment decay (β₂)** as an optional enhancement for `Adam_Adv`, `Adopt_Adv`, `Prodigy_Adv`.
 
 Instead of using a fixed β₂ (e.g., 0.999 or 0.95), it **dynamically modulates β₂ per layer** based on a bounded *sunspike ratio*:
 
