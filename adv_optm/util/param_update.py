@@ -321,7 +321,7 @@ def _get_random_int_for_8bit_sr(source: torch.Tensor, numel: int | None = None) 
     # NotImplementedError: UserDefinedObjectVariable(generator) is fixed
     generator = _generators[device]
 
-    size = (numel,) if numel is not None else (source.numel(),)
+    size = (numel,) if numel is not None else (((source.numel() + 2047) // 2048) * 2048,)
     return torch.randint(
         size=size,
         device=source.device,
