@@ -277,7 +277,10 @@ def fix_loaded_state_dtype(state: dict, p: torch.Tensor, group: dict) -> None:
 
         # Handle INT8 Stochastic-Rounded States specifically
         elif actual_precision == 'int8_sr' and val.dtype not in (torch.int8, torch.uint8):
-            state[key] = val.to(torch.int8)
+            if key in ['exp_avg_sq', 'second_momentum_buffer']:
+                state[key] = val.to(torch.uint8)
+            else:
+                state[key] = val.to(torch.int8)
 
         # Ensure device match
         if state[key].device != p.device:
