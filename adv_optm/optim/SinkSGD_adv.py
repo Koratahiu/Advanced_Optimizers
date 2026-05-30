@@ -238,6 +238,9 @@ class SinkSGD_adv(torch.optim.Optimizer):
         wd_target = None
         cwd_target = None
 
+        if group["orthogonal_gradient"]:
+            grad = _orthogonalize_gradient(p, grad)
+
         if group.get('normed_momentum', False):
             if not is_vector:
                 # Sinkhorn iterative normalization
@@ -245,9 +248,6 @@ class SinkSGD_adv(torch.optim.Optimizer):
             else:
                 # For vectors, apply sign operation
                 grad = grad.sign_()
-
-        if group["orthogonal_gradient"]:
-            grad = _orthogonalize_gradient(p, grad)
 
         if state['factored']:
             d1, d2 = state['effective_shape']
