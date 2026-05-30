@@ -158,6 +158,8 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
             req_precision = group['state_precision']
             is_vector = len(p.shape) == 1 and not group['vector_reshape']
+            is_sink_vector = p.ndim < 2 or getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False)
+            centered_vt = group.get('centered_vt', False)
 
             state['factored'] = req_precision == 'factored' and not is_vector
 
@@ -172,14 +174,27 @@ class SinkSGD_adv(torch.optim.Optimizer):
                     state['effective_shape'] = _get_effective_shape(p.numel())
                     d1, d2 = state['effective_shape']
 
-                    if group['momentum'] != 0:
-                        state['mu_b_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
-                        state['mv_b_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
-                        packed_d2 = (d2 + 7) // 8
-                        state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                    state['mu_b_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
+                    state['mv_b_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
+                    packed_d2 = (d2 + 7) // 8
+                    state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                    if centered_vt and is_sink_vector:
+                        # Align with sign operation
+                        state['mu_vt_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
+                        state['mv_vt_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
                 else: 
                     if group['momentum'] != 0:
                         init_state_tensor(state, 'momentum_buffer', p.shape, actual_precision, p.device, dtype)
+                    if centered_vt and is_sink_vector:
+                        # Align with sign operation
+                        init_state_tensor(state, 'vt_buffer', p.shape, actual_precision, p.device, dtype)
+
+                if centered_vt and not is_sink_vector:
+                    # Align shapes with Sinkhorn's 2D flattening
+                    dim0 = p.shape[0]
+                    dim1 = p.numel() // dim0
+                    state['vt_row'] = torch.zeros(dim0, device=device, dtype=torch.float32)
+                    state['vt_col'] = torch.zeros(dim1, device=device, dtype=torch.float32)
 
             if group.get('spectral_normalization', False) and is_spectral(p):
                 init_spectral_norm(state, p)
@@ -232,7 +247,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
         vt_row = None
         vt_col = None
-        vt = None
+        denom = None
 
         wd_scaler = None
         wd_target = None
@@ -258,14 +273,19 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
                 if centered_vt:
                     if not is_vector:
-                        buf_sq = buf.square().view(p.shape[0], -1)
-                        vt_row = (1.0 - buf_sq.mean(dim=-1))
-                        vt_col = (1.0 - buf_sq.mean(dim=-2))
-                        del buf_sq
+                        vt_row, vt_col = state['vt_row'], state['vt_col']
+                        grad_vt = grad - buf.view(p.shape)
+                        grad_vt_sq = grad_vt.mul_(grad_vt).view(grad.shape[0], -1)
+                        mean_row_grad = grad_vt_sq.mean(dim=-1)
+                        mean_col_grad = grad_vt_sq.mean(dim=-2)
+                        vt_row.mul_(momentum).add_(mean_row_grad, alpha=1.0 - momentum)
+                        vt_col.mul_(momentum).add_(mean_col_grad, alpha=1.0 - momentum)
                     else:
-                        buf_sq = buf.square().view(p.shape)
-                        vt = (1.0 - buf_sq).relu_()
-                        del buf_sq
+                        vt = _reconstruct_state((state['mu_vt_nmf'], state['mv_vt_nmf']))
+                        grad_vt = grad_reshaped - buf
+                        vt.mul_(momentum).addcmul_(grad_vt, grad_vt, value=1.0 - momentum)
+                        state['mu_vt_nmf'], state['mv_vt_nmf'] = _factorize_state(vt, signed=False)
+                        denom = vt.sqrt_()
 
                 buf.lerp_(grad_reshaped, 1 - momentum)
 
@@ -290,14 +310,19 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
                 if centered_vt:
                     if not is_vector:
-                        buf_sq = buf.square().view(buf.shape[0], -1)
-                        vt_row = (1.0 - buf_sq.mean(dim=-1))
-                        vt_col = (1.0 - buf_sq.mean(dim=-2))
-                        del buf_sq
+                        vt_row, vt_col = state['vt_row'], state['vt_col']
+                        grad_vt = grad - buf
+                        grad_vt_sq = grad_vt.mul_(grad_vt).view(grad.shape[0], -1)
+                        mean_row_grad = grad_vt_sq.mean(dim=-1)
+                        mean_col_grad = grad_vt_sq.mean(dim=-2)
+                        vt_row.mul_(momentum).add_(mean_row_grad, alpha=1.0 - momentum)
+                        vt_col.mul_(momentum).add_(mean_col_grad, alpha=1.0 - momentum)
                     else:
-                        buf_sq = buf.square()
-                        vt = (1.0 - buf_sq).relu_()
-                        del buf_sq
+                        vt = get_state(state, 'vt_buffer', actual_precision)
+                        grad_vt = grad - buf
+                        vt.mul_(momentum).addcmul_(grad_vt, grad_vt, value=1.0 - momentum)
+                        set_state(state, 'vt_buffer', vt, actual_precision, random_int_state_tensor)
+                        denom = vt.sqrt()
 
                 buf.lerp_(grad, 1 - momentum)
 
@@ -321,7 +346,6 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 update_2d.mul_(vt_col.clamp_min(1e-30).rsqrt().unsqueeze(0))
                 update = update_2d.atan_().view_as(p)
             else:
-                denom = vt.sqrt_()
                 update.atan2_(denom)
 
         if not group.get('normed_momentum', False):
