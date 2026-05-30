@@ -285,7 +285,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
                         grad_vt = grad_reshaped - buf
                         vt.mul_(momentum).addcmul_(grad_vt, grad_vt, value=1.0 - momentum)
                         state['mu_vt_nmf'], state['mv_vt_nmf'] = _factorize_state(vt, signed=False)
-                        denom = vt.sqrt_()
+                        denom = vt.sqrt_().view_as(p)
 
                 buf.lerp_(grad_reshaped, 1 - momentum)
 
