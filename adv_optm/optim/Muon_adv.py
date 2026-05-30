@@ -324,6 +324,7 @@ class Muon_adv(torch.optim.Optimizer):
                 state['mv_mbuf_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
                 packed_d2 = (d2 + 7) // 8
                 state['sign_buf'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                state['shifter'] = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], device=device, dtype=torch.uint8)
             else:
                 # Determine effective state precision (small tensors always use fp32)
                 req_precision = group.get('state_precision', 'auto')
@@ -472,7 +473,7 @@ class Muon_adv(torch.optim.Optimizer):
             grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct momentum from previous step's factors & sign
-            mt_buf = _reconstruct_state((state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'], d2), signed=True)
+            mt_buf = _reconstruct_state((state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'], d2), signed=True, shifter=state['shifter'])
 
             # Update momentum in full-size
             mt_buf.lerp_(grad_reshaped, 1 - beta1)
@@ -486,7 +487,7 @@ class Muon_adv(torch.optim.Optimizer):
                 update = mt_buf.clone()
 
             # Factorize
-            state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True)
+            state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True, shifter=state['shifter'])
             del mt_buf
 
             # Orthogonalization step

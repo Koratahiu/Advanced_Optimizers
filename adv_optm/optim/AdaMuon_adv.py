@@ -352,6 +352,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 state['mv_mbuf_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
                 packed_d2 = (d2 + 7) // 8
                 state['sign_buf'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                state['shifter'] = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], device=device, dtype=torch.uint8)
                 if not group['normuon_variant']:
                     state['mu_vbuf_nmf'] = torch.zeros(d1, device=device, dtype=dtype)
                     state['mv_vbuf_nmf'] = torch.zeros(d2, device=device, dtype=dtype)
@@ -529,7 +530,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct momentum from previous step's factors & sign
-            mt_buf = _reconstruct_state((state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'], d2), signed=True)
+            mt_buf = _reconstruct_state((state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'], d2), signed=True, shifter=state['shifter'])
 
             # Update momentum in full-size
             mt_buf.lerp_(grad_reshaped, 1 - beta1)
@@ -541,7 +542,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 update = mt_buf.clone()
 
             # Factorize
-            state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True)
+            state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True, shifter=state['shifter'])
             del mt_buf
 
             # Apply update projection
@@ -565,10 +566,10 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 normuon_update(update, state['normuon_v'], beta2, group['eps'])
             else:
                 # Reconstruct second momentum from previous step's factors
-                vt_buf = _reconstruct_state((state['mu_vbuf_nmf'], state['mv_vbuf_nmf']), signed=False)
+                vt_buf = _reconstruct_state((state['mu_vbuf_nmf'], state['mv_vbuf_nmf']), signed=False, shifter=state['shifter'])
                 # Update second momentum in full-size
                 vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
-                state['mu_vbuf_nmf'], state['mv_vbuf_nmf'] = _factorize_state(vt_buf, signed=False)
+                state['mu_vbuf_nmf'], state['mv_vbuf_nmf'] = _factorize_state(vt_buf, signed=False, shifter=state['shifter'])
                 # Apply second momentum update (adaptive scaling)
                 if group['use_atan2']:
                     denom = vt_buf.sqrt_()
@@ -625,9 +626,9 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 d1, d2 = state['effective_shape']
                 update = update.view(original_shape)
                 update_f32 = update.float()
-                vt_buf = _reconstruct_state((state['mu_vbuf_nmf'], state['mv_vbuf_nmf']), signed=False)
+                vt_buf = _reconstruct_state((state['mu_vbuf_nmf'], state['mv_vbuf_nmf']), signed=False, shifter=state['shifter'])
                 vt_buf.mul_(beta2).addcmul_(update_f32.view(d1, d2), update_f32.view(d1, d2), value=1 - beta2)
-                state['mu_vbuf_nmf'], state['mv_vbuf_nmf'] = _factorize_state(vt_buf, signed=False)
+                state['mu_vbuf_nmf'], state['mv_vbuf_nmf'] = _factorize_state(vt_buf, signed=False, shifter=state['shifter'])
                 # Apply second moment scaling
                 if group['use_atan2']:
                     denom = vt_buf.sqrt_().view(original_shape)

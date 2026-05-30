@@ -176,6 +176,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
                     state['mv_b_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
                     packed_d2 = (d2 + 7) // 8
                     state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                    state['shifter'] = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], device=device, dtype=torch.uint8)
                 else: 
                     if group['momentum'] != 0:
                         init_state_tensor(state, 'momentum_buffer', p.shape, actual_precision, p.device, dtype)
@@ -253,7 +254,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
             grad_reshaped = grad.view(d1, d2)
 
             if momentum != 0:
-                buf = _reconstruct_state((state['mu_b_nmf'], state['mv_b_nmf'], state['sign'], d2), signed=True)
+                buf = _reconstruct_state((state['mu_b_nmf'], state['mv_b_nmf'], state['sign'], d2), signed=True, shifter=state['shifter'])
 
                 if centered_vt:
                     if not is_vector:
@@ -267,7 +268,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 buf.lerp_(grad_reshaped, 1 - momentum)
 
                 # Factorize updated buffer
-                state['mu_b_nmf'], state['mv_b_nmf'], state['sign'] = _factorize_state(buf.clone(), signed=True)
+                state['mu_b_nmf'], state['mv_b_nmf'], state['sign'] = _factorize_state(buf.clone(), signed=True, shifter=state['shifter'])
 
                 if nesterov:
                     nv_coef = momentum if nesterov_coef is None else nesterov_coef

@@ -249,6 +249,7 @@ class Adopt_adv(torch.optim.Optimizer):
                     state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=torch.float32)
                     packed_d2 = (d2 + 7) // 8
                     state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+                    state['shifter'] = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], device=p.device, dtype=torch.uint8)
 
                 # Second moment (v)
                 state['mu_v_nmf'], state['mv_v_nmf'] = _nnmf(vt_init.view(d1, d2))
@@ -347,7 +348,7 @@ class Adopt_adv(torch.optim.Optimizer):
             grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct v_{t-1}
-            vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
+            vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False, shifter=state['shifter'])
 
             # ADOPT Step A: Decorrelate g_t using v_{t-1}
             denom = vt.sqrt()
@@ -360,7 +361,7 @@ class Adopt_adv(torch.optim.Optimizer):
             else:
                 vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
             # Factorize
-            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
+            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False, shifter=state['shifter'])
             del vt
 
             if self.use_atan2:
@@ -373,12 +374,12 @@ class Adopt_adv(torch.optim.Optimizer):
 
             # ADOPT Step B: Update momentum m_t using normalized gradient
             if use_mt:
-                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
+                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True, shifter=state['shifter'])
 
                 mt.lerp_(normalized_grad, 1.0 - beta1)
 
                 # Factorize
-                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
+                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True, shifter=state['shifter'])
 
                 update_mt = mt
 
@@ -400,7 +401,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
             if factored_2nd:
                 d1, d2 = state['effective_shape']
-                vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
+                vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False, shifter=state['shifter'])
                 vt = vt.view(p.shape).to(grad.dtype)
             else:
                 vt = get_state(state, 'exp_avg_sq', actual_precision) # v_{t-1}
@@ -445,7 +446,7 @@ class Adopt_adv(torch.optim.Optimizer):
                 vt.mul_(beta2).addcmul_(grad_vt, grad_vt, value=1 - beta2)
 
             if factored_2nd:
-                state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt.view(d1, d2), signed=False)
+                state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt.view(d1, d2), signed=False, shifter=state['shifter'])
             else:
                 set_state(state, 'exp_avg_sq', vt, actual_precision, random_int_state_tensor, non_neg=True)
             del random_int_state_tensor

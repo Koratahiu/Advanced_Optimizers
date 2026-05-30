@@ -174,6 +174,7 @@ class Lion_adv(torch.optim.Optimizer):
                 state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                 packed_d2 = (d2 + 7) // 8
                 state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+                state['shifter'] = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], device=p.device, dtype=torch.uint8)
             else: # Fallback to standard Lion
                 state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
 
@@ -235,7 +236,7 @@ class Lion_adv(torch.optim.Optimizer):
             grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct momentum m_{t-1}
-            exp_avg = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
+            exp_avg = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True, shifter=state['shifter'])
 
             # Compute update term c_t
             update = torch.lerp(grad_reshaped, exp_avg, beta1)
@@ -245,7 +246,7 @@ class Lion_adv(torch.optim.Optimizer):
             exp_avg.lerp_(grad_reshaped, 1 - beta2)
 
             # Compress new momentum m_t and store factors
-            state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True)
+            state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True, shifter=state['shifter'])
             del exp_avg
 
             update = update.view(p.shape)

@@ -6,14 +6,14 @@ import torch
 # ------------------------------------------
 
 @torch.no_grad()
-def _reconstruct_state(factors: tuple, signed: bool):
+def _reconstruct_state(factors: tuple, signed: bool, shifter: torch.Tensor):
     """
     Reconstruct full state from its factors and optionally sign
     """
     if signed:
         mu_factor, mv_factor, sign, d2 = factors
         full_state = _unnmf((mu_factor, mv_factor))
-        unpacked_sign = _unpack_bools(sign, original_m=d2)
+        unpacked_sign = _unpack_bools(sign, original_m=d2, shifter=shifter)
         torch.where(unpacked_sign, full_state, -full_state, out=full_state)
         del unpacked_sign
         return full_state
@@ -23,12 +23,12 @@ def _reconstruct_state(factors: tuple, signed: bool):
         return full_state
 
 @torch.no_grad()
-def _factorize_state(full_state: torch.Tensor, signed: bool):
+def _factorize_state(full_state: torch.Tensor, signed: bool, shifter: torch.Tensor):
     """
     Compress a full state to its two rank-1 factors and optionally 1-bit sign
     """
     if signed:
-        sign = _pack_bools(full_state > 0)
+        sign = _pack_bools(full_state > 0, shifter=shifter)
         mu_factor, mv_factor = _nnmf(full_state.abs_())
         return mu_factor, mv_factor, sign
     else:
@@ -84,22 +84,21 @@ def _nnmf(matrix: torch.Tensor):
 # ------------------------------------------
 
 @torch.no_grad()
-def _pack_bools(tensor: torch.Tensor) -> torch.Tensor:
+def _pack_bools(tensor: torch.Tensor, shifter: torch.Tensor) -> torch.Tensor:
     """Packs a boolean tensor into a uint8 tensor to achieve 1-bit storage."""
     n, m = tensor.shape
     packed_m = (m + 7) // 8
     padded_tensor = torch.nn.functional.pad(tensor, (0, packed_m * 8 - m), 'constant', 0)
     reshaped = padded_tensor.view(n, packed_m, 8)
-    shifter = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], device=tensor.device, dtype=torch.uint8)
     packed = (reshaped.to(torch.uint8) * shifter).sum(dim=2, dtype=torch.uint8)
     return packed
 
 @torch.no_grad()
-def _unpack_bools(packed_tensor: torch.Tensor, original_m: int) -> torch.Tensor:
+def _unpack_bools(packed_tensor: torch.Tensor, original_m: int, shifter: torch.Tensor) -> torch.Tensor:
     """Unpacks a uint8 tensor back into a boolean tensor."""
     if packed_tensor.dtype != torch.uint8:
         packed_tensor = packed_tensor.to(torch.uint8)
-    shifter = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], device=packed_tensor.device, dtype=torch.uint8).view(1, 1, 8)
-    unpacked_padded = (packed_tensor.unsqueeze(2) & shifter) != 0
+    shifter_3d = shifter.view(1, 1, 8)
+    unpacked_padded = (packed_tensor.unsqueeze(2) & shifter_3d) != 0
     unpacked = unpacked_padded.view(packed_tensor.shape[0], -1)[:, :original_m]
     return unpacked

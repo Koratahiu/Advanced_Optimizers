@@ -190,6 +190,7 @@ class SignSGD_adv(torch.optim.Optimizer):
                     state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=torch.float32)
                     packed_d2 = (d2 + 7) // 8
                     state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+                    state['shifter'] = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], device=p.device, dtype=torch.uint8)
                 else:
                     init_state_tensor(state, 'exp_avg', p.shape, actual_precision, p.device, dtype)
 
@@ -275,7 +276,7 @@ class SignSGD_adv(torch.optim.Optimizer):
 
             if momentum > 0:
                 # Reconstruct momentum m_{t-1}
-                exp_avg = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
+                exp_avg = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True, shifter=state['shifter'])
 
                 if centered_vt:
                     denom = (1.0 - exp_avg.square()).clamp_min_(1e-30).sqrt_().view_as(p)
@@ -289,7 +290,7 @@ class SignSGD_adv(torch.optim.Optimizer):
                     raw_update = exp_avg.clone()
 
                 # Compress new momentum m_t and store factors
-                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True)
+                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True, shifter=state['shifter'])
             else:
                 raw_update = grad_reshaped.clone()
 

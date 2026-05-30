@@ -43,6 +43,7 @@ def _init_auxadam_state(self, p, group):
             state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
             packed_d2 = (d2 + 7) // 8
             state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+            state['shifter'] = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], device=device, dtype=torch.uint8)
         # Second moment (v)
         state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
         state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
@@ -88,13 +89,13 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
 
         # Reconstruct momentum from previous step's factors
         if use_mt:
-            mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
+            mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True, shifter=state['shifter'])
 
             # Update momentum in full-size
             mt.lerp_(grad_reshaped, 1.0 - beta1_adam)
 
             # Factorize
-            state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
+            state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True, shifter=state['shifter'])
 
             update_mt = mt
 
@@ -102,7 +103,7 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
                 nv_coef = beta1_adam if nesterov_coef is None else nesterov_coef
                 update_mt = update_mt.lerp_(grad_reshaped, 1 - nv_coef)
 
-        vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
+        vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False, shifter=state['shifter'])
         if isinstance(beta2_adam, torch.Tensor) and beta2_adam.dim() > 0:
             vt = vt.view_as(p).mul_(beta2_adam).addcmul_(grad, grad * (1.0 - beta2_adam)).view_as(grad_reshaped)
         else:
@@ -114,7 +115,7 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
             update = grad_reshaped.clone()
 
         # Factorize
-        state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
+        state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False, shifter=state['shifter'])
 
         if group.get('adam_use_atan2'):
             denom = vt.sqrt_()
@@ -151,7 +152,7 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
 
         if factored_2nd:
             d1, d2 = state['effective_shape']
-            exp_avg_sq = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
+            exp_avg_sq = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False, shifter=state['shifter'])
             exp_avg_sq = exp_avg_sq.view(p.shape)
         else:
             exp_avg_sq = get_state(state, 'exp_avg_sq', actual_precision)
@@ -164,7 +165,7 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
             exp_avg_sq.mul_(beta2_adam).addcmul_(grad_vt, grad_vt, value=1.0 - beta2_adam)
 
         if factored_2nd:
-            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(exp_avg_sq.view(d1, d2), signed=False)
+            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(exp_avg_sq.view(d1, d2), signed=False, shifter=state['shifter'])
         else:
             set_state(state, 'exp_avg_sq', exp_avg_sq, actual_precision, random_int_state_tensor, non_neg=True)
         del random_int_state_tensor

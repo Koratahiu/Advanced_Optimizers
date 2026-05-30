@@ -286,6 +286,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                     state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
                     packed_d2 = (d2 + 7) // 8
                     state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
+                    state['shifter'] = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], device=device, dtype=torch.uint8)
 
                 # Second moment (v)
                 state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
@@ -381,13 +382,13 @@ class Prodigy_adv(torch.optim.Optimizer):
 
             # Reconstruct momentum from previous step's factors
             if use_mt:
-                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
+                mt = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True, shifter=state['shifter'])
 
                 # Update momentum in full-size
                 mt.mul_(self.beta1).add_(grad_reshaped, alpha=d * (1.0 - self.beta1))
 
                 # Factorize
-                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True)
+                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True, shifter=state['shifter'])
 
                 update_mt = mt
 
@@ -395,7 +396,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                     nv_coef = self.beta1 if nesterov_coef is None else nesterov_coef
                     update_mt = update_mt.lerp_(grad_reshaped, 1-nv_coef)
 
-            vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
+            vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False, shifter=state['shifter'])
 
             if isinstance(beta2, torch.Tensor) and beta2.dim() > 0:
                 vt = vt.view_as(p).mul_(beta2).addcmul_(grad, grad * (d * d * (1.0 - beta2))).view_as(grad_reshaped)
@@ -408,7 +409,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 update = grad_reshaped.mul(d)
 
             # Factorize
-            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
+            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False, shifter=state['shifter'])
 
             if group['use_atan2']:
                 denom = vt.sqrt_()
@@ -447,7 +448,7 @@ class Prodigy_adv(torch.optim.Optimizer):
 
             if factored_2nd:
                 d1, d2 = state['effective_shape']
-                exp_avg_sq = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False)
+                exp_avg_sq = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False, shifter=state['shifter'])
                 exp_avg_sq = exp_avg_sq.view(p.shape)
             else:
                 exp_avg_sq = get_state(state, 'exp_avg_sq', actual_precision)
@@ -460,7 +461,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                 exp_avg_sq.mul_(beta2).addcmul_(grad_vt, grad_vt, value=d * d * (1.0 - beta2))
 
             if factored_2nd:
-                state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(exp_avg_sq.view(d1, d2), signed=False)
+                state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(exp_avg_sq.view(d1, d2), signed=False, shifter=state['shifter'])
             else:
                 set_state(state, 'exp_avg_sq', exp_avg_sq, actual_precision, random_int_state_tensor, non_neg=True)
             del random_int_state_tensor
