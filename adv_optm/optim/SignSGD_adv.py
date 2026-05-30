@@ -283,7 +283,7 @@ class SignSGD_adv(torch.optim.Optimizer):
                 exp_avg = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
 
                 if centered_vt:
-                    vt = _reconstruct_state((state['mu_vt_nmf'], state['mv_vt_nmf']))
+                    vt = _reconstruct_state((state['mu_vt_nmf'], state['mv_vt_nmf']), signed=False)
                     grad_vt = grad_reshaped - exp_avg
                     vt.mul_(momentum).addcmul_(grad_vt, grad_vt, value=1.0 - momentum)
                     state['mu_vt_nmf'], state['mv_vt_nmf'] = _factorize_state(vt, signed=False)
@@ -314,7 +314,7 @@ class SignSGD_adv(torch.optim.Optimizer):
                     vt = get_state(state, 'exp_avg_sq', actual_precision)
                     grad_vt = grad - exp_avg
                     vt.mul_(momentum).addcmul_(grad_vt, grad_vt, value=1.0 - momentum)
-                    set_state(state, 'exp_avg_sq', vt, actual_precision, random_int_state_tensor)
+                    set_state(state, 'exp_avg_sq', vt, actual_precision, random_int_state_tensor, non_neg=True)
                     denom = vt.sqrt()
 
                 exp_avg.lerp_(grad, 1 - momentum)
@@ -338,7 +338,6 @@ class SignSGD_adv(torch.optim.Optimizer):
             update = raw_update
 
         if centered_vt:
-            # mathematically: Variance of +/- 1 is estimated by (1 - E[X]^2).
             update.atan2_(denom)
 
         if group.get('geometric_wd', False) and group["weight_decay"] > 0 :
