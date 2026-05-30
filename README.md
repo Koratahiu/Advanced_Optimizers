@@ -95,8 +95,6 @@ This library integrates multiple state-of-the-art optimization techniques valida
 |---------|----------|-----------|-------------|----------|
 | Factored | ✓ | ✓ | ✓ ✓ |
 | OrthoGrad | ✓ | ✓ | ✓ | ✓ |
-| Grams | ✓ | ✓ | ✓ | ✗ |
-| Cautious | ✓ | ✓ | ✓ | ✓ |
 | atan2 | ✓ | ✓ | ✓ |✗ |
 | Stochastic Rounding | ✓ | ✓ | ✓ |✓ |
 | Fused Backward Pass | ✓ | ✓ | ✓ | ✓ |
@@ -120,12 +118,8 @@ This library integrates multiple state-of-the-art optimization techniques valida
 
 | Feature | Description | Recommended Usage | Performance Impact | Theoretical Basis | Compatibility |
 |--------|-------------|-------------------|--------------------|-------------------|--------------|
-| **Cautious** | Only applies update if gradient direction aligns with momentum direction | Accelerating convergence | No overhead | [C-Optim](https://github.com/kyleliang919/C-Optim) | Adam/Adopt/Prodigy/Lion |
-| **Grams** | Update direction derived purely from current gradient | When Cautious is insufficient | No overhead | [Grams](https://github.com/Gunale0926/Grams) | Adam/Adopt/Prodigy |
 | **atan2** | Robust epsilon replacement with built-in gradient clipping | Use for stable bounded updates (or for Adopt as it needs that) | No overhead | [Adam-atan2](https://github.com/lucidrains/adam-atan2-pytorch) | Adam/Adopt/Prodigy |
 | **Kourkoutas-β** | Layer-wise adaptive β₂ based on gradient “sunspike” ratio | Noisy/small/large-batch/high-LR training | No overhead | [Kourkoutas-β]() | Adam/Adopt/Prodigy |
-
-> **Note**: If both **Cautious** and **Grams** are enabled, **Grams takes precedence** and Cautious is disabled.
 
 ---
 
