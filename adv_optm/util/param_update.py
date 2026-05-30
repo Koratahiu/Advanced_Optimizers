@@ -496,3 +496,26 @@ def _get_random_noise_for_sso(source: torch.Tensor) -> torch.Tensor:
         dtype=source.dtype,
         generator=generator,
     ).mul_(2).sub_(1)
+
+
+def _get_random_noise_for_low_rank_ortho(source: torch.Tensor, ortho_rank: int) -> torch.Tensor:
+    """
+    Generates a random noise tensor for low-rank orthogonalization.
+    This function is not torch.compile-path friendly due to its use of torch.Generator.
+    """
+    global _generators
+    device = source.device
+    if device not in _generators:
+        set_seed(device)
+    # TODO, this is a workaround until torch compile error
+    # NotImplementedError: UserDefinedObjectVariable(generator) is fixed
+    generator = _generators[device]
+    source_flat = source.flatten(1)
+    r = min(ortho_rank, source_flat.shape[0], source_flat.shape[1])
+    return torch.randn(
+        source_flat.shape[1],
+        r,
+        device=source_flat.device,
+        dtype=source_flat.dtype,
+        generator=generator
+        )

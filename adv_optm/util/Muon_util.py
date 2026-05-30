@@ -2,6 +2,8 @@ import torch
 
 import math
 
+from . import param_update
+
 @torch.no_grad()
 def _newton_schulz_iteration(
     G: torch.Tensor,
@@ -197,6 +199,7 @@ def newton_schulz(
     cns_a_bound: float | None = None,
     low_rank_ortho: bool = False,
     ortho_rank: int = 128,
+    G_sketch: torch.Tensor | None = None,
     compiled: bool = False,
 ) -> torch.Tensor:
     """
@@ -240,7 +243,8 @@ def newton_schulz(
 
         if r > 0:
             # 1. Sketch the matrix
-            G_sketch = torch.randn(M.shape[1], r, device=M.device, dtype=M.dtype)
+            if G_sketch is None:
+                G_sketch = param_update._get_random_noise_for_low_rank_ortho(M, ortho_rank)
             MG = M @ G_sketch
 
             # 2. QR decomposition to get orthogonal basis Q

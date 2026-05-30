@@ -8,7 +8,6 @@ from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util import Muon_AuxAdam
 from ..util.centered_decay import _init_anchor
-from typing import Optional
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 
 class Muon_adv(torch.optim.Optimizer):
@@ -445,19 +444,22 @@ class Muon_adv(torch.optim.Optimizer):
                     random_int_state_tensor = param_update._get_random_int_for_8bit_sr(p)
                 elif actual_precision == 'fp8_sr':
                     random_int_state_tensor = param_update._get_random_int_for_fp8_sr(p)
+                if group['low_rank_ortho']:
+                    random_G_sketch = param_update._get_random_noise_for_low_rank_ortho(p, group['ortho_rank'])
             else:
                 lr = group['lr']
-                muon_step_param = self._muon_step_parameter
                 random_int_state_tensor = None
+                random_G_sketch = None
+                muon_step_param = self._muon_step_parameter
 
-            muon_step_param(p, grad, state, group, lr, random_int_tensor, random_int_state_tensor)
+            muon_step_param(p, grad, state, group, lr, random_int_tensor, random_int_state_tensor, random_G_sketch)
 
     def compile(self, *args, **kwargs):
         self._compiled_muon_step_parameter = torch.compile(self._muon_step_parameter, *args, **kwargs)
         self._compiled_adam_step_parameter = torch.compile(Muon_AuxAdam._adam_step_parameter, *args, **kwargs)
 
     @torch.no_grad()
-    def _muon_step_parameter(self, p, grad, state, group, lr, random_int_tensor, random_int_state_tensor=None):
+    def _muon_step_parameter(self, p, grad, state, group, lr, random_int_tensor, random_int_state_tensor, random_G_sketch):
         # Upcast grad for low-precision state modes (non-factored path)
         grad = upcast_grad_for_precision(grad, state, group.get('state_precision', 'auto'))
 
@@ -509,6 +511,7 @@ class Muon_adv(torch.optim.Optimizer):
                 cns_a_bound=group['cns_a_bound'],
                 low_rank_ortho=group['low_rank_ortho'],
                 ortho_rank=group['ortho_rank'],
+                G_sketch=random_G_sketch,
                 compiled=group.get('compiled_optimizer', False)
             )
 
@@ -551,6 +554,7 @@ class Muon_adv(torch.optim.Optimizer):
                     cns_a_bound=group['cns_a_bound'],
                     low_rank_ortho=group['low_rank_ortho'],
                     ortho_rank=group['ortho_rank'],
+                    G_sketch=random_G_sketch,
                     compiled=group.get('compiled_optimizer', False)
                 )
 
