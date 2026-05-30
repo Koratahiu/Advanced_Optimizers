@@ -49,20 +49,6 @@ class AdamW_adv(torch.optim.Optimizer):
         cautious_mask (bool):  whether to use cautious masking to align the gradient's
             direction with the first moment's.  (default: False)
         orthogonal_gradient (bool): whether to use OrthoGrad.  (default: False)
-        use_AdEMAMix (bool): whether to enable the AdEMAMix feature. This adds
-            a second, slow-moving average of the momentum (`mt_slow`) which is
-            combined with the primary momentum (`mt`) to stabilize updates,
-            especially in noisy, small-batch settings. If `False`, the
-            optimizer behaves as standard AdamW. (default: False)
-        beta3_ema (float): The decay rate for the slow exponential moving average of
-            the momentum (only used when `use_AdEMAMix` is `True`). A higher
-            value (e.g., 0.9999) gives the EMA a longer memory, making it more
-            stable but slower to adapt. A lower value (e.g., 0.999) is often
-            better for shorter training runs. (default: 0.9999)
-        alpha (float): The mixing coefficient that scales the slow momentum term
-            before it is added to the fast momentum term (`update = mt + alpha * mt_slow`).
-            A higher value increases the stabilizing influence of the slow
-            momentum. (default: 5.0)
         normed_momentum (bool): whether to compute the first moment on the normalized gradient. (default: False)
         kourkoutas_beta (bool): whether to enable the layer-wise dynamic β₂ logic.
             If `False`, the optimizer behaves as standard AdamW. (default: False)
@@ -125,10 +111,6 @@ class AdamW_adv(torch.optim.Optimizer):
         grams_moment: bool = False,
         # OrthoGrad
         orthogonal_gradient: bool = False,
-        # AdEMAMix (long-term momentum)
-        use_AdEMAMix: bool = False,
-        beta3_ema: float = 0.9999,
-        alpha: float = 5.0,
         # Nesterov momentum
         nesterov: bool = False,
         nesterov_coef: float | None = None,
@@ -186,7 +168,7 @@ class AdamW_adv(torch.optim.Optimizer):
             "use_atan2": use_atan2, "nesterov": nesterov, "nesterov_coef": nesterov_coef,
             "normed_momentum": normed_momentum,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,
-            "beta3_ema": beta3_ema, "alpha": alpha, "compiled_optimizer": compiled_optimizer,
+            "compiled_optimizer": compiled_optimizer,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
             "spectral_normalization": spectral_normalization,
@@ -197,7 +179,6 @@ class AdamW_adv(torch.optim.Optimizer):
         self.stochastic_rounding = stochastic_rounding
         self.cautious_mask = cautious_mask
         self.grams_moment = grams_moment
-        self.use_AdEMAMix = use_AdEMAMix
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
         self._init_lr = lr
@@ -278,12 +259,6 @@ class AdamW_adv(torch.optim.Optimizer):
                     state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
                     packed_d2 = (d2 + 7) // 8
                     state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
-                # AdEMAMix slow moment (m_slow)
-                if self.use_AdEMAMix:
-                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
-                    state['mv_m_slow_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
-                    packed_d2 = (d2 + 7) // 8
-                    state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
 
                 # Second moment (v)
                 state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
@@ -292,9 +267,6 @@ class AdamW_adv(torch.optim.Optimizer):
                 # First moment
                 if group['betas'][0] > 0:
                     init_state_tensor(state, 'exp_avg', p.shape, actual_precision, p.device, dtype)
-                # AdEMAMix slow moment
-                if self.use_AdEMAMix:
-                    init_state_tensor(state, 'exp_avg_slow', p.shape, actual_precision, p.device, dtype)
 
                 # Second moment (v)
                 if state['factored_2nd']:
@@ -368,9 +340,6 @@ class AdamW_adv(torch.optim.Optimizer):
         if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)
 
-        if self.use_AdEMAMix:
-            beta3_ema = group['beta3_ema']
-            alpha = group['alpha']
         nesterov = group.get('nesterov', False)
         nesterov_coef = group.get('nesterov_coef', None)
         use_mt = group['betas'][0] > 0
@@ -428,24 +397,10 @@ class AdamW_adv(torch.optim.Optimizer):
                     nv_coef = beta1 if nesterov_coef is None else nesterov_coef
                     update_mt = update_mt.lerp_(grad_reshaped, 1-nv_coef)
 
-            if self.use_AdEMAMix:
-                mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
-
-                mt_slow.lerp_(grad_reshaped, 1.0 - beta3_ema)
-
-                if use_mt:
-                    update = update_mt.add_(mt_slow, alpha=alpha)
-                else:
-                    update = grad_reshaped.add(mt_slow, alpha=alpha)
-
-                # Factorize
-                state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
-                del mt_slow
+            if use_mt:
+                update = update_mt
             else:
-                if use_mt:
-                    update = update_mt
-                else:
-                    update = grad_reshaped.clone()
+                update = grad_reshaped.clone()
 
             if not group.get('normed_momentum', False):
                 if group['use_atan2']:
@@ -510,17 +465,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
                 set_state(state, 'exp_avg', exp_avg, actual_precision, random_int_state_tensor)
 
-            if self.use_AdEMAMix:
-                exp_avg_slow = get_state(state, 'exp_avg_slow', actual_precision)
-                exp_avg_slow.lerp_(grad, 1.0 - beta3_ema)
-
-                if use_mt:
-                    update = update_mt.add_(exp_avg_slow, alpha=alpha)
-                else:
-                    update = torch.add(grad, exp_avg_slow, alpha=alpha)
-                set_state(state, 'exp_avg_slow', exp_avg_slow, actual_precision, random_int_state_tensor)
-            else:
-                update = update_mt if use_mt else grad.clone()
+            update = update_mt if use_mt else grad.clone()
 
             if not group.get('normed_momentum', False):
                 if group['use_atan2']:

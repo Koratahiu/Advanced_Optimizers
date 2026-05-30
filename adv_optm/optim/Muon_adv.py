@@ -92,9 +92,6 @@ class Muon_adv(torch.optim.Optimizer):
         adam_cautious_mask (bool): Cautious masking for AdamW.
         adam_grams_moment (bool): Grams-style updates for AdamW.
         adam_orthogonal_gradient (bool): OrthoGrad for AdamW.
-        adam_use_AdEMAMix (bool): AdEMAMix for AdamW.
-        adam_beta3_ema (float): Beta3 for AdEMAMix.
-        adam_alpha (float): Alpha for AdEMAMix.
         adam_nesterov (bool): Nesterov momentum for AdamW. (default: False)
         adam_nesterov_coef (float, optional): Nesterov coefficient for AdamW. (default: None)
         adam_kourkoutas_beta (bool): Kourkoutas-β for AdamW.
@@ -167,9 +164,6 @@ class Muon_adv(torch.optim.Optimizer):
         adam_cautious_mask: bool = False,
         adam_grams_moment: bool = False,
         adam_orthogonal_gradient: bool = False,
-        adam_use_AdEMAMix: bool = False,
-        adam_beta3_ema: float = 0.9999,
-        adam_alpha: float = 5.0,
         adam_nesterov: bool = False,
         adam_nesterov_coef: float | None = None,
         adam_kourkoutas_beta: bool = False,
@@ -237,7 +231,6 @@ class Muon_adv(torch.optim.Optimizer):
             "adam_use_bias_correction": adam_use_bias_correction, "adam_use_atan2": adam_use_atan2,
             "adam_cautious_mask": adam_cautious_mask, "adam_grams_moment": adam_grams_moment,
             "adam_orthogonal_gradient": adam_orthogonal_gradient,
-            "adam_use_AdEMAMix": adam_use_AdEMAMix, "adam_beta3_ema": adam_beta3_ema, "adam_alpha": adam_alpha,
             "adam_nesterov": adam_nesterov, "adam_nesterov_coef": adam_nesterov_coef,
             "adam_kourkoutas_beta": adam_kourkoutas_beta, "adam_beta2_min": adam_beta2_min,
             "adam_ema_alpha": adam_ema_alpha, "adam_tiny_spike": adam_tiny_spike,

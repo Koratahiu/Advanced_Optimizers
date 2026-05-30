@@ -43,19 +43,12 @@ def _init_auxadam_state(self, p, group):
             state['mv_m_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
             packed_d2 = (d2 + 7) // 8
             state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
-        if group.get('adam_use_AdEMAMix'):
-            state['mu_m_slow_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
-            state['mv_m_slow_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
-            packed_d2 = (d2 + 7) // 8
-            state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=device)
         # Second moment (v)
         state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
         state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
     else:  # Fallback to standard AdamW for non-factored tensors
         if group['adam_betas'][0] > 0:
             init_state_tensor(state, 'exp_avg', p.shape, actual_precision, p.device, dtype)
-        if group.get('adam_use_AdEMAMix'):
-            init_state_tensor(state, 'exp_avg_slow', p.shape, actual_precision, p.device, dtype)
 
         if state.get('factored_2nd', False):
             state['effective_shape'] = _get_effective_shape(p.numel())
@@ -82,10 +75,6 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
     if hasattr(self, 'kourkoutas_helper') and self.kourkoutas_helper:
         # Accumulate current grad's norm for the *next* step
         self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
-
-    if group.get('adam_use_AdEMAMix'):
-        beta3_ema = group['adam_beta3_ema']
-        alpha = group['adam_alpha']
 
     nesterov = group.get('adam_nesterov', False)
     nesterov_coef = group.get('adam_nesterov_coef', None)
@@ -124,23 +113,10 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
         else:
             vt.mul_(beta2_adam).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2_adam)
 
-        if group.get('adam_use_AdEMAMix'):
-            mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
-
-            mt_slow.lerp_(grad_reshaped, 1.0 - beta3_ema)
-
-            if use_mt:
-                update = update_mt.add_(mt_slow, alpha=alpha)
-            else:
-                update = grad_reshaped.add(mt_slow, alpha=alpha)
-            # Factorize
-            state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
-            del mt_slow
+        if use_mt:
+            update = update_mt
         else:
-            if use_mt:
-                update = update_mt
-            else:
-                update = grad_reshaped.clone()
+            update = grad_reshaped.clone()
 
         # Factorize
         state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False)
@@ -181,17 +157,7 @@ def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sq
 
             set_state(state, 'exp_avg', exp_avg, actual_precision, random_int_state_tensor)
 
-        if group.get('adam_use_AdEMAMix'):
-            exp_avg_slow = get_state(state, 'exp_avg_slow', actual_precision)
-            exp_avg_slow.lerp_(grad, 1.0 - beta3_ema)
-
-            if use_mt:
-                update = update_mt.add_(exp_avg_slow, alpha=alpha)
-            else:
-                update = torch.add(grad, exp_avg_slow, alpha=alpha)
-            set_state(state, 'exp_avg_slow', exp_avg_slow, actual_precision, random_int_state_tensor)
-        else:
-            update = update_mt if use_mt else grad.clone()
+        update = update_mt if use_mt else grad.clone()
 
         if factored_2nd:
             d1, d2 = state['effective_shape']

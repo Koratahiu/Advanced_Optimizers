@@ -94,7 +94,6 @@ This library integrates multiple state-of-the-art optimization techniques valida
 | Feature | Adam_Adv | Adopt_Adv | Prodigy_Adv | Lion_Adv |
 |---------|----------|-----------|-------------|----------|
 | Factored | ✓ | ✓ | ✓ ✓ |
-| AdEMAMix | ✓ | ✓ | ✓ | ✗ |
 | OrthoGrad | ✓ | ✓ | ✓ | ✓ |
 | Grams | ✓ | ✓ | ✓ | ✗ |
 | Cautious | ✓ | ✓ | ✓ | ✓ |
@@ -123,7 +122,6 @@ This library integrates multiple state-of-the-art optimization techniques valida
 |--------|-------------|-------------------|--------------------|-------------------|--------------|
 | **Cautious** | Only applies update if gradient direction aligns with momentum direction | Accelerating convergence | No overhead | [C-Optim](https://github.com/kyleliang919/C-Optim) | Adam/Adopt/Prodigy/Lion |
 | **Grams** | Update direction derived purely from current gradient | When Cautious is insufficient | No overhead | [Grams](https://github.com/Gunale0926/Grams) | Adam/Adopt/Prodigy |
-| **AdEMAMix** | Dual EMA system that retains relevance of gradients over tens of thousands of steps | Long training runs, especially where model forgetting is a concern | +1 state memory | [AdEMAMix](https://arxiv.org/abs/2409.03137) | Adam/Adopt/Prodigy |
 | **atan2** | Robust epsilon replacement with built-in gradient clipping | Use for stable bounded updates (or for Adopt as it needs that) | No overhead | [Adam-atan2](https://github.com/lucidrains/adam-atan2-pytorch) | Adam/Adopt/Prodigy |
 | **Kourkoutas-β** | Layer-wise adaptive β₂ based on gradient “sunspike” ratio | Noisy/small/large-batch/high-LR training | No overhead | [Kourkoutas-β]() | Adam/Adopt/Prodigy |
 
@@ -132,21 +130,6 @@ This library integrates multiple state-of-the-art optimization techniques valida
 ---
 
 ## 🔍 Feature Deep Dives
-
-### AdEMAMix
-
-- Adds a **slow-decaying second EMA** (`beta3`) that retains gradient memory over tens of thousands of steps.
-- Particularly effective for **small batch sizes**, where Adam’s standard first moment is nearly useless.
-
-#### Tunable Hyperparameters
-| Parameter | Default | Tuning Guide |
-|-----------|---------|--------------|
-| `beta3` | 0.9999 | • Runs >120k steps: **0.9999**<br>• Runs ≤120k steps: **0.999** |
-| `alpha` | 5 | • Reduce to **2–3** if diverging<br>• Increase to strengthen long-term memory |
-
-> ✅ **Pro Tip**: Set `beta1=0` in Adam/Adopt/Prodigy to skip standard EMA entirely and rely solely on AdEMAMix’s slow EMA, ideal for small-batch regimes.
-
----
 
 ### atan2
 
@@ -190,7 +173,5 @@ This is especially effective for **noisy training, small batch sizes, and high l
 
 1. [Revisiting BFloat16 Training](https://arxiv.org/abs/2010.06192)
 2. [SMMF: Square-Matricized Momentum Factorization](https://arxiv.org/abs/2412.08894)
-3. [The AdEMAMix Optimizer](https://arxiv.org/abs/2409.03137)
-4. [Connections between Schedule-Free Optimizers, AdEMAMix, and Accelerated SGD](https://arxiv.org/abs/2502.02431)
 6. [Kourkoutas-β: A Sunspike-Driven Adam Optimizer with Desert Flair](https://arxiv.org/abs/2508.12996)
 7. [Scaling Exponents Across Parameterizations and Optimizers](https://arxiv.org/abs/2407.05872)

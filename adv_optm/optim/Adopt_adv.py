@@ -55,20 +55,6 @@ class Adopt_adv(torch.optim.Optimizer):
         grams_moment (bool): whether to combine the gradient's direction with the
             first moment's magnitude (default: False).
         orthogonal_gradient (bool): whether to use OrthoGrad. (default: False)
-        use_AdEMAMix (bool): whether to enable the AdEMAMix feature. This adds
-            a second, slow-moving average of the momentum (`mt_slow`) which is
-            combined with the primary momentum (`mt`) to stabilize updates,
-            especially in noisy, small-batch settings. If `False`, the
-            optimizer behaves as standard ADOPT. (default: False)
-        beta3_ema (float): The decay rate for the slow exponential moving average of
-            the momentum (only used when `use_AdEMAMix` is `True`). A higher
-            value (e.g., 0.9999) gives the EMA a longer memory, making it more
-            stable but slower to adapt. A lower value (e.g., 0.999) is often
-            better for shorter training runs. (default: 0.9999)
-        alpha (float): The mixing coefficient that scales the slow momentum term
-            before it is added to the fast momentum term (`update = mt + alpha * mt_slow`).
-            A higher value increases the stabilizing influence of the slow
-            momentum. (default: 5.0)
         kourkoutas_beta (bool): whether to enable the layer-wise dynamic β₂ logic.
             If `False`, the optimizer behaves as standard Adopt. (default: False)
         beta2_min (float): The minimum value for dynamic β₂, used during periods of
@@ -130,10 +116,6 @@ class Adopt_adv(torch.optim.Optimizer):
         grams_moment: bool = False,
         # OrthoGrad
         orthogonal_gradient: bool = False,
-        # AdEMAMix (long-term momentum)
-        use_AdEMAMix: bool = False,
-        beta3_ema: float = 0.9999,
-        alpha: float = 5.0,
         # Nesterov momentum
         nesterov: bool = False,
         nesterov_coef: float | None = None,
@@ -186,7 +168,6 @@ class Adopt_adv(torch.optim.Optimizer):
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
-            "beta3_ema": beta3_ema, "alpha": alpha,
             "nesterov": nesterov, "nesterov_coef": nesterov_coef,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
@@ -203,7 +184,6 @@ class Adopt_adv(torch.optim.Optimizer):
         self.cautious_mask = cautious_mask
         self.grams_moment = grams_moment
         self.orthogonal_gradient = orthogonal_gradient
-        self.use_AdEMAMix = use_AdEMAMix
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
         self._init_lr = lr
@@ -280,12 +260,6 @@ class Adopt_adv(torch.optim.Optimizer):
                     state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=torch.float32)
                     packed_d2 = (d2 + 7) // 8
                     state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
-                # AdEMAMix slow moment (m_slow)
-                if self.use_AdEMAMix:
-                    state['mu_m_slow_nmf'] = torch.zeros(d1, device=p.device, dtype=torch.float32)
-                    state['mv_m_slow_nmf'] = torch.zeros(d2, device=p.device, dtype=torch.float32)
-                    packed_d2 = (d2 + 7) // 8
-                    state['sign_slow'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
 
                 # Second moment (v)
                 state['mu_v_nmf'], state['mv_v_nmf'] = _nnmf(vt_init.view(d1, d2))
@@ -293,8 +267,6 @@ class Adopt_adv(torch.optim.Optimizer):
             else: # Fallback for non-factored tensors (or factored_2nd)
                 if group['betas'][0] > 0:
                     init_state_tensor(state, 'exp_avg', p.shape, actual_precision, p.device, dtype)
-                if self.use_AdEMAMix:
-                    init_state_tensor(state, 'exp_avg_slow', p.shape, actual_precision, p.device, dtype)
 
                 if state['factored_2nd']:
                     state['effective_shape'] = _get_effective_shape(p.numel())
@@ -371,9 +343,6 @@ class Adopt_adv(torch.optim.Optimizer):
         if self.orthogonal_gradient:
             grad = _orthogonalize_gradient(p, grad)
 
-        if self.use_AdEMAMix:
-            beta3_ema = group['beta3_ema']
-            alpha = group['alpha']
         nesterov = group.get('nesterov', False)
         nesterov_coef = group.get('nesterov_coef', None)
         use_mt = group['betas'][0] > 0
@@ -433,26 +402,11 @@ class Adopt_adv(torch.optim.Optimizer):
                     nv_coef = beta1 if nesterov_coef is None else nesterov_coef
                     update_mt = update_mt.lerp_(grad_reshaped, 1-nv_coef)
 
-            if self.use_AdEMAMix:
-                # Reconstruct AdEMAMix EMA
-                mt_slow = _reconstruct_state((state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'], d2), signed=True)
-
-                mt_slow.lerp_(normalized_grad, 1.0 - beta3_ema)
-
-                if use_mt:
-                    update = update_mt.add_(mt_slow, alpha=alpha)
-                    del normalized_grad
-                else:
-                    update = normalized_grad.add_(mt_slow, alpha=alpha)
-                # Factorize
-                state['mu_m_slow_nmf'], state['mv_m_slow_nmf'], state['sign_slow'] = _factorize_state(mt_slow, signed=True)
-                del mt_slow
+            if use_mt:
+                update = update_mt
+                del normalized_grad
             else:
-                if use_mt:
-                    update = update_mt
-                    del normalized_grad
-                else:
-                    update = normalized_grad
+                update = normalized_grad
 
             update = update.view(p.shape)
 
@@ -497,21 +451,11 @@ class Adopt_adv(torch.optim.Optimizer):
 
                 set_state(state, 'exp_avg', mt, actual_precision, random_int_state_tensor)
 
-            if self.use_AdEMAMix:
-                m_slow = get_state(state, 'exp_avg_slow', actual_precision)
-                m_slow.lerp_(normalized_grad, 1.0 - beta3_ema)
-                if use_mt:
-                    update = update_mt.add_(m_slow, alpha=alpha)
-                    del normalized_grad
-                else:
-                    update = normalized_grad.add_(m_slow, alpha=alpha)
-                set_state(state, 'exp_avg_slow', m_slow, actual_precision, random_int_state_tensor)
+            if use_mt:
+                update = update_mt
+                del normalized_grad
             else:
-                if use_mt:
-                    update = update_mt
-                    del normalized_grad
-                else:
-                    update = normalized_grad
+                update = normalized_grad
 
             grad_vt, vt = (grad.float(), vt.float()) if factored_2nd else (grad, vt)
 
