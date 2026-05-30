@@ -236,7 +236,7 @@ class Muon_adv(torch.optim.Optimizer):
         }
         self.stochastic_rounding = stochastic_rounding
         self.compiled_optimizer = compiled_optimizer
-        self._init_lr = lr
+        self._init_lr = lr if lr > 0 else 1
 
         super().__init__(params, defaults)
 

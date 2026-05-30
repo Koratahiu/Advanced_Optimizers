@@ -264,7 +264,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
             "adam_nnmf_factor": adam_nnmf_factor, "adam_factored_2nd": adam_factored_2nd,
         }
         self.stochastic_rounding = stochastic_rounding
-        self._init_lr = lr
+        self._init_lr = lr if lr > 0 else 1
 
         super().__init__(params, defaults)
 

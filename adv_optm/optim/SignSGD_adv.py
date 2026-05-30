@@ -123,7 +123,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             nnmf_factor=nnmf_factor,
         )
         self.stochastic_rounding = stochastic_rounding
-        self._init_lr = lr
+        self._init_lr = lr if lr > 0 else 1
         super().__init__(params, defaults)
 
         self.init_step()

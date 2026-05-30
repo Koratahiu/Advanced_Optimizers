@@ -170,7 +170,7 @@ class AdamW_adv(torch.optim.Optimizer):
         self.stochastic_rounding = stochastic_rounding
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
-        self._init_lr = lr
+        self._init_lr = lr if lr > 0 else 1
         super().__init__(params, defaults)
 
         self.init_step()
