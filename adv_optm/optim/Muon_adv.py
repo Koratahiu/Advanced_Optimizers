@@ -188,6 +188,10 @@ class Muon_adv(torch.optim.Optimizer):
         if spectral_normalization and accelerated_ns:
             ValueError("spectral_normalization violates accelerated Newton-Schulz assumptions. Pick one of them.")
 
+        # Legacy backwards compatibility support for `nnmf_factor=True`
+        if nnmf_factor:
+            state_precision = "factored"
+
         state_precision = state_precision.lower()
         valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp16", "fp8_sr", "int8_sr"}
         if state_precision not in valid_precisions:
@@ -302,10 +306,10 @@ class Muon_adv(torch.optim.Optimizer):
 
         if state['is_muon']:
 
-            state['factored'] = (
-                group['nnmf_factor'] and
-                not (len(p.shape) == 1 and not group['vector_reshape'])
-            )
+            req_precision = group['state_precision']
+            is_vector = len(p.shape) == 1 and not group['vector_reshape']
+
+            state['factored'] = req_precision == 'factored' and not is_vector
             dtype = torch.float32 if state['factored'] else p.dtype
             device = p.device
 

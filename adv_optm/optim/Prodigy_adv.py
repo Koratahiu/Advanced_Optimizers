@@ -167,6 +167,15 @@ class Prodigy_adv(torch.optim.Optimizer):
         if kourkoutas_beta and not (betas[1] > beta2_min):
             raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
 
+        state_precision = state_precision.lower()
+        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp16", "fp8_sr", "int8_sr"}
+        if state_precision not in valid_precisions:
+            raise ValueError(f"state_precision must be one of {valid_precisions}. Got {state_precision}")
+
+        # Legacy backwards compatibility support for `nnmf_factor=True`
+        if nnmf_factor:
+            state_precision = "factored"
+
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
