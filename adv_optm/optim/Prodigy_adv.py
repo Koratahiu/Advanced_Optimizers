@@ -125,10 +125,11 @@ class Prodigy_adv(torch.optim.Optimizer):
         nesterov_coef: float | None = None,
         # States precision
         state_precision: str = "auto", # 'fp32', 'factored', 'bf16_sr', 'fp8_sr', 'int8_sr'.
+        # Factorized second moment only
+        factored_2nd: bool = False,
         # SMMF factorization (legacy)
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
-        factored_2nd: bool = False,
         # torch.compile
         compiled_optimizer: bool = False,
         # prodigy parameters
