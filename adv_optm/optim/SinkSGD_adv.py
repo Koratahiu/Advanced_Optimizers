@@ -58,8 +58,8 @@ class SinkSGD_adv(torch.optim.Optimizer):
         orthogonal_sinkhorn: bool = False,
         # Normalization then Momentum
         normed_momentum: bool = False,
-        # Centered Variance Precondition
-        centered_vt: bool = False,
+        # SNR Precondition
+        snr_cond: bool = False,
         # Nesterov Momentum
         nesterov: bool = False,
         nesterov_coef: float | None = None,
@@ -89,8 +89,8 @@ class SinkSGD_adv(torch.optim.Optimizer):
             raise ValueError(f"Momentum should be >= 0.0. Got {momentum}")
         if not (weight_decay >= 0.0):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
-        if centered_vt and not normed_momentum:
-            raise NotImplementedError(f"centered_vt is intended to be used with normed_momentum")
+        if snr_cond and not normed_momentum:
+            raise NotImplementedError(f"snr_cond is intended to be used with normed_momentum")
 
         state_precision = state_precision.lower()
         valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp16", "fp8_sr", "int8_sr"}
@@ -102,7 +102,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
         defaults = {
             "lr": lr, "momentum": momentum,
-            "weight_decay": weight_decay, "nesterov": nesterov, "nesterov_coef": nesterov_coef, "normed_momentum": normed_momentum, "centered_vt": centered_vt,
+            "weight_decay": weight_decay, "nesterov": nesterov, "nesterov_coef": nesterov_coef, "normed_momentum": normed_momentum, "snr_cond": snr_cond,
             "geometric_wd": geometric_wd, "cautious_wd": cautious_wd,
             "orthogonal_gradient": orthogonal_gradient, 
             "compiled_optimizer": compiled_optimizer,
@@ -228,7 +228,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         momentum = group['momentum']
         nesterov = group['nesterov']
         nesterov_coef = group.get('nesterov_coef', None)
-        centered_vt = group.get('centered_vt', False)
+        snr_cond = group.get('snr_cond', False)
 
         vt_row = None
         vt_col = None
@@ -256,7 +256,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
             if momentum != 0:
                 buf = _reconstruct_state((state['mu_b_nmf'], state['mv_b_nmf'], state['sign'], d2), signed=True, shifter=state['shifter'])
 
-                if centered_vt:
+                if snr_cond:
                     if not is_vector:
                         buf_2d_sq = buf.view(grad.shape[0], -1).square()
                         vt_row = (1 - buf_2d_sq.mean(dim=-1)).clamp_min_(1e-30)
@@ -286,7 +286,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
             if momentum != 0:
                 buf = get_state(state, 'momentum_buffer', actual_precision)
 
-                if centered_vt:
+                if snr_cond:
                     if not is_vector:
                         buf_2d_sq = buf.view(grad.shape[0], -1).square()
                         vt_row = (1 - buf_2d_sq.mean(dim=-1)).clamp_min_(1e-30)
@@ -309,7 +309,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
             del random_int_state_tensor
 
-        if centered_vt:
+        if snr_cond:
             if not is_vector:
                 # Align with Sinkhorn: Alternate row/col preconditioning
                 update_2d = update.view(update.shape[0], -1)
@@ -342,7 +342,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         if group.get('spectral_normalization', False):
             update = scale_update(p, update, update_scaling, state=state)
         else:
-            if centered_vt:
+            if snr_cond:
                 update_scaling = update_scaling * (4/math.pi)
             update.mul_(update_scaling)
 
