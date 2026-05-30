@@ -227,8 +227,8 @@ def newton_schulz(
         eps = 1 / math.sqrt(G.numel())
 
     if cns_a_bound is None:
-        M = G.shape[0]
-        N = math.prod(G.shape[1:])
+        M = G.shape[-2]
+        N = G.shape[-1]
         # baseline L2 norm bound (for square matrices)
         baseline_bound = 1.0 / math.sqrt(M * N)
         # Marchenko-Pastur theoretical minimum (for rectangular matrices)
