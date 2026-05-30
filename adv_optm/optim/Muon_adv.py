@@ -240,21 +240,6 @@ class Muon_adv(torch.optim.Optimizer):
 
         super().__init__(params, defaults)
 
-        # Validate that every group has a determined optimizer type
-        for i, group in enumerate(self.param_groups):
-            if group.get('use_muon') is None and group.get('optim_type') is None:
-                # Automatic shape-based detection if not explicit
-                has_muon_shape = False
-                for p in group['params']:
-                    has_muon_shape = _is_suitable_for_muon(p)
-                    if has_muon_shape:
-                        group['use_muon'] = True
-                    else:
-                        group['use_muon'] = False
-
-            if group.get('use_muon') is None: # Fallback
-                 group['use_muon'] = group.get('optim_type') == 'muon'
-
         self.init_step()
 
         self.kourkoutas_helper = None
@@ -308,7 +293,14 @@ class Muon_adv(torch.optim.Optimizer):
         if 'is_muon' in state:
             return
 
-        if group['use_muon']:
+        if group.get('use_muon') is not None:
+            state['is_muon'] = group['use_muon']
+        elif group.get('optim_type') is not None:
+            state['is_muon'] = group['optim_type'] == 'muon'
+        else: # Auto-detect per parameter
+            state['is_muon'] = _is_suitable_for_muon(p)
+
+        if state['is_muon']:
 
             state['factored'] = (
                 group['nnmf_factor'] and
