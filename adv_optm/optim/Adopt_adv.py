@@ -262,6 +262,7 @@ class Adopt_adv(torch.optim.Optimizer):
                     state['effective_shape'] = _get_effective_shape(p.numel())
                     d1, d2 = state['effective_shape']
                     state['mu_v_nmf'], state['mv_v_nmf'] = _nnmf(vt_init.view(d1, d2))
+                    state['shifter'] = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], device=p.device, dtype=torch.uint8)
                 else:
                     init_state_tensor(state, 'exp_avg_sq', p.shape, actual_precision, p.device, dtype)
                     set_state(state, 'exp_avg_sq', vt_init, actual_precision, None, non_neg=True)

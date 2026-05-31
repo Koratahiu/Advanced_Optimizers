@@ -311,6 +311,7 @@ class Prodigy_adv(torch.optim.Optimizer):
                     d1, d2 = state['effective_shape']
                     state['mu_v_nmf'] = torch.zeros(d1, device=device, dtype=torch.float32)
                     state['mv_v_nmf'] = torch.zeros(d2, device=device, dtype=torch.float32)
+                    state['shifter'] = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], device=p.device, dtype=torch.uint8)
                 else:
                     init_state_tensor(state, 'exp_avg_sq', p.shape, actual_precision, p.device, dtype, non_neg=True)
 

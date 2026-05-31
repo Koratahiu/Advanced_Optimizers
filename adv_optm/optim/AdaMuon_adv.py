@@ -374,6 +374,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     d1, d2 = state['effective_shape']
                     state['mu_vbuf_nmf'] = torch.zeros(d1, device=p.device, dtype=torch.float32)
                     state['mv_vbuf_nmf'] = torch.zeros(d2, device=p.device, dtype=torch.float32)
+                    state['shifter'] = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], device=p.device, dtype=torch.uint8)
                 elif not group['normuon_variant']:
                     init_state_tensor(state, 'second_momentum_buffer', p.shape, actual_precision, p.device, default_dtype, non_neg=True)
 
