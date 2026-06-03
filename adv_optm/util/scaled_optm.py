@@ -29,13 +29,13 @@ def scale_update(
 
     # DoRA Magnitude Scales (1D) or 1D Bias/Norm layers
     if p.ndim < 2 or is_dora_scale:
-        return rms_normalization(update, dim=None, lr=lr)
+        return max_abs_normalization(update, dim=None, lr=lr)
 
     # OFT Block Parameters: shape (k, C(b,2))
     # Normalise by max per-block row norm so that
     #   ‖ΔR_block‖_spec = max_i ‖ΔRᵢ‖_spec ≤ 2 · max_i ‖Δθᵢ‖₂ ≤ target_scale · lr
     if is_oft:
-        return max_row_norm_normalization(update, lr)
+        return max_row_norm_oft_normalization(p, update, lr)
 
     # LoRA Factors or Full Finetuning weights
     # Scales update to maintain consistent spectral norm across different layer sizes and ranks.
@@ -124,9 +124,7 @@ def init_spectral_norm(state: dict, p: torch.Tensor):
 @torch.no_grad()
 def l2_normalization(update: torch.Tensor, dim: int | None, lr: float) -> torch.Tensor:
     """Performs L2 normalization on the update tensor."""
-    n = update.numel() if dim is None else update.shape[dim]
-    norm_eps = 1 / math.sqrt(n)
-    norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).clamp_min(norm_eps)
+    norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).clamp_min(1e-12)
     return update.mul_(lr / norm)
 
 
@@ -134,16 +132,25 @@ def l2_normalization(update: torch.Tensor, dim: int | None, lr: float) -> torch.
 def rms_normalization(update: torch.Tensor, dim: int | None, lr: float) -> torch.Tensor:
     """Performs Root Mean Square normalization on the update tensor."""
     n = update.numel() if dim is None else update.shape[dim]
-    norm_eps = 1 / math.sqrt(n)
-    norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).clamp_min(norm_eps)
+    norm = torch.linalg.vector_norm(update, ord=2, dim=dim, keepdim=True).clamp_min(1e-12)
     scale_n = math.sqrt(n)
     return update.mul_(lr * scale_n / norm)
 
 @torch.no_grad()
-def max_row_norm_normalization(
+def max_abs_normalization(update: torch.Tensor, dim: int | None, lr: float) -> torch.Tensor:
+    """
+    Performs L-infinity (Max Absolute) normalization.
+    Strictly bounds the maximum update of any single element to 'lr'.
+    """
+    # ord=float('inf') computes the maximum absolute value
+    norm = torch.linalg.vector_norm(update, ord=float('inf'), dim=dim, keepdim=True).clamp_min(1e-12)
+    return update.mul_(lr / norm)
+
+@torch.no_grad()
+def max_row_norm_oft_normalization(
+    p: torch.Tensor,
     update: torch.Tensor,
     lr: float,
-    target_scale: float = 0.5,
 ) -> torch.Tensor:
     """
     Normalizes OFT parameter updates by the maximum per-block (row) L2 norm.
@@ -154,31 +161,43 @@ def max_row_norm_normalization(
 
         ‖ΔR_block‖_spec = max_i ‖ΔRᵢ‖_spec ≤ 2 · max_i ‖Δθᵢ‖₂
 
-    Unlike spectral normalization of the full (k × C(b,2)) parameter matrix,
-    this guarantee is exact for all update distributions — including worst-case
-    concentrated updates where all energy sits in a single block.
-
     Result: Var[Δyⱼ] ≤ (target_scale · lr)² = O(1) for every block configuration.
-
-    Args:
-        update: OFT parameter update, shape (k, C(b,2)).
-        lr: Learning rate.
-        target_scale: Desired bound on max_i ‖Δθᵢ‖₂ / lr. Default 0.5 keeps
-                      the effective rotation step ‖ΔR_block‖_spec ≤ lr.
-
-    Returns:
-        Scaled update tensor (in-place).
     """
-    # Row norms: shape (k,) — one per block
-    row_norms = torch.linalg.vector_norm(update, ord=2, dim=1)
-    max_norm = row_norms.max()
+    # keeps the effective rotation step ‖ΔR_block‖_spec ≤ lr.
+    target_scale = 0.5 
 
+    # Row norms: shape (k,) - one per block
+    row_norms = torch.linalg.vector_norm(update, ord=2, dim=-1)
     # Stability floor: equivalent to a single-element vector norm lower bound
-    norm_eps = 1.0 / math.sqrt(update.shape[1])
-    max_norm = max_norm.clamp_min(norm_eps)
+    norm_lb = 1.0 / math.sqrt(update.shape[1])
+    max_norm = row_norms.max().clamp_min(norm_lb)
 
-    return update.mul_(lr * target_scale / max_norm)
+    # Get the magnitude correction factor
+    cayley_correction = get_oft_magnitude_correction(p)
 
+    return update.mul_(lr * cayley_correction *  target_scale / max_norm)
+
+@torch.no_grad()
+def get_oft_magnitude_correction(p: torch.Tensor) -> torch.Tensor:
+    """
+    Approximates the magnitude correction of exact Riemannian preconditioning (M @ G @ M).
+    Neutralizes the derivative shrinkage of the Cayley transform using a scalar multiplier.
+    """
+    n_el = p.shape[-1]
+    b = (1 + math.sqrt(1 + 8 * n_el)) / 2
+
+    # Calculate the squared L2 norm for each block independently.
+    p_norm_sq = torch.linalg.vector_norm(p, ord=2, dim=-1).square_()
+
+    # The expected shrinkage of the Cayley derivative is roughly (1 + lambda^2)^-1, 
+    # where lambda^2 is the average eigenvalue of -Q^2. 
+    # Since Tr(-Q^2) = 2 * ||p||_2^2, the average eigenvalue is 2 * ||p||_2^2 / b.
+    cayley_correction = 1.0 + (2.0 * p_norm_sq / b)
+
+    # Reshape correction to broadcast against the update tensor (shape (k, 1))
+    cayley_correction = cayley_correction.unsqueeze(-1)
+
+    return cayley_correction
 
 @torch.no_grad()
 def spectral_normalization(
