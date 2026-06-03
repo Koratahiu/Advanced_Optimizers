@@ -21,7 +21,7 @@ def quantize_blockwise(p, block_size, bits=8):
     if pad_len > 0:
         val_padded = F.pad(val_flat, (0, pad_len), mode='replicate')
     else:
-        val_padded = val_flat
+        val_padded = val_flat.clone()
 
     # Block Reshape
     val_blocks = val_padded.view(-1, block_size).float()
