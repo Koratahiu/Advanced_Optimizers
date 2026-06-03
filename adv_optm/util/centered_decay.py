@@ -29,13 +29,14 @@ def quantize_blockwise(p, block_size, bits=8):
     # Calc Stats
     min_vals, max_vals = torch.aminmax(val_blocks, dim=1, keepdim=True)
 
-    # Scale calculation
-    max_int = (1 << bits) - 1
-    scales = (max_vals - min_vals).div_(float(max_int))
+    # Scale calculation for signed ints
+    q_min = -(1 << (bits - 1))
+    q_max = (1 << (bits - 1)) - 1
+    scales = (max_vals - min_vals).div_(float(q_max - q_min))
     scales.masked_fill_(scales == 0, 1.0)
 
-    # Quantize: (val - min) / scale
-    quantized = val_blocks.sub_(min_vals).div_(scales).round_().clamp_(0, max_int).to(torch.uint8)
+    # Quantize: (val - min) / scale + q_min
+    quantized = val_blocks.sub_(min_vals).div_(scales).add_(q_min).round_().clamp_(q_min, q_max).to(torch.int8)
 
     return quantized, scales.squeeze(1), min_vals.squeeze(1)
 
@@ -64,7 +65,8 @@ def _init_anchor(p, state, group):
         q_blocks, scales, mins = quantize_blockwise(p, block_size=32, bits=4)
         q_flat = q_blocks.view(-1)
         # Vectorized packing: High bits | Low bits
-        packed = (q_flat[0::2] << 4) | q_flat[1::2]
+        # Masking with 0x0F prevents two's complement sign extension from overwriting bits
+        packed = ((q_flat[0::2] & 0x0F) << 4) | (q_flat[1::2] & 0x0F)
 
         state['anchor_data'] = packed
         state['anchor_scale'] = scales.to(p.dtype)
@@ -88,24 +90,29 @@ def dequantize_anchor(p, state, group, dtype):
     orig_shape = p.shape
     orig_numel = p.numel()
 
-    if mode == 'int4' and anchor_data.dtype == torch.uint8:
+    if mode == 'int4' and anchor_data.dtype == torch.int8:
         block_size = 32
-        unpacked = torch.empty(anchor_data.numel() * 2, dtype=torch.uint8, device=anchor_data.device)
-        unpacked[0::2] = anchor_data >> 4
-        unpacked[1::2] = anchor_data & 0x0F
-        quantized_blocks = unpacked.view(-1, block_size)
+        unpacked = torch.empty(anchor_data.numel() * 2, dtype=torch.int8, device=anchor_data.device)
 
-    elif mode == 'int8' and anchor_data.dtype == torch.uint8:
+        # Unpack utilizing standard PyTorch arithmetic shift (sign extends natively)
+        unpacked[0::2] = anchor_data >> 4
+        unpacked[1::2] = (anchor_data << 4) >> 4
+
+        quantized_blocks = unpacked.view(-1, block_size)
+        q_min = -8
+
+    elif mode == 'int8' and anchor_data.dtype == torch.int8:
         block_size = 128
         quantized_blocks = anchor_data
+        q_min = -128
 
     else:
         # Unrecognised mode/dtype combination
         return anchor_data.to(dtype)
 
-    # Core Dequantization: (q * scale) + min
+    # Core Dequantization: (q - q_min) * scale + min
     anchor_blocks = (
-        quantized_blocks.float() * scales.float().unsqueeze(1)
+        (quantized_blocks.float() - q_min) * scales.float().unsqueeze(1)
         + mins.float().unsqueeze(1)
     )
 
