@@ -44,7 +44,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             'int4': Uses 4-bit block-wise quantization (block size 32).
         state_precision (str): Precision method for Adopt states. Options: 'auto'
             (parameter precision), 'fp32', 'factored' (SMMF low-rank FP32), 'bf16_sr' (with
-            stochastic rounding), 'fp16' , 'fp8_sr', 'int8_sr'. (default: 'auto')
+            stochastic rounding), 'fp16' , 'int8_sr'. (default: 'auto')
         nnmf_factor (bool): whether to use the factorization or use the
             uncompressed optimizer. (default: True)
     """
@@ -76,7 +76,7 @@ class SignSGD_adv(torch.optim.Optimizer):
         centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
         # States precision
-        state_precision: str = "auto", # 'fp32', 'factored', 'bf16_sr', 'fp8_sr', 'int8_sr'.
+        state_precision: str = "auto", # 'fp32', 'factored', 'bf16_sr', 'int8_sr'.
         # Spectral Normed Optimizer
         spectral_normalization: bool = False,
         # SMMF factorization
@@ -95,7 +95,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             raise NotImplementedError(f"snr_cond is intended to be used with normed_momentum")
 
         state_precision = state_precision.lower()
-        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp16", "fp8_sr", "int8_sr"}
+        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp16", "int8_sr"}
         if state_precision not in valid_precisions:
             raise ValueError(f"state_precision must be one of {valid_precisions}. Got {state_precision}")
 

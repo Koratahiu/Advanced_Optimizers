@@ -42,7 +42,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         nnmf_factor (bool): whether to use factorization or disable it. (default: False)
         state_precision (str): Precision method for states. Options: 'auto'
             (parameter precision), 'fp32', 'factored' (SMMF low-rank FP32), 'bf16_sr',
-            'fp8_sr', 'int8_sr'. (default: 'auto')
+            'int8_sr'. (default: 'auto')
         compiled_optimizer (bool): Compiles the core step function using torch.compile
             for faster execution. (default: False)
     """
@@ -93,7 +93,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
             raise NotImplementedError(f"snr_cond is intended to be used with normed_momentum")
 
         state_precision = state_precision.lower()
-        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp16", "fp8_sr", "int8_sr"}
+        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp16", "int8_sr"}
         if state_precision not in valid_precisions:
             raise ValueError(f"state_precision must be one of {valid_precisions}. Got {state_precision}")
 

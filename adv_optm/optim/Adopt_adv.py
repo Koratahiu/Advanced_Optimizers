@@ -88,7 +88,7 @@ class Adopt_adv(torch.optim.Optimizer):
             while only factorizing the second moment. (default: False)
         state_precision (str): Precision method for Adopt states. Options: 'auto'
             (parameter precision), 'fp32', 'factored' (SMMF low-rank FP32), 'bf16_sr' (with
-            stochastic rounding), 'fp16' , 'fp8_sr', 'int8_sr'. (default: 'auto')
+            stochastic rounding), 'fp16' , 'int8_sr'. (default: 'auto')
     """
 
     def __init__(
@@ -126,7 +126,7 @@ class Adopt_adv(torch.optim.Optimizer):
         centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
         # States precision
-        state_precision: str = "auto", # 'fp32', 'factored', 'bf16_sr', 'fp8_sr', 'int8_sr'.
+        state_precision: str = "auto", # 'fp32', 'factored', 'bf16_sr', 'int8_sr'.
         # Factorized second moment only
         factored_2nd: bool = False,
         # SMMF factorization (legacy)
@@ -148,7 +148,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
 
         state_precision = state_precision.lower()
-        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp16", "fp8_sr", "int8_sr"}
+        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp16", "int8_sr"}
         if state_precision not in valid_precisions:
             raise ValueError(f"state_precision must be one of {valid_precisions}. Got {state_precision}")
 
@@ -236,7 +236,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
             dtype = torch.float32 if (state['factored'] or req_precision == 'factored') else p.dtype
 
-            vt_dtype = torch.float32 if (state['factored'] or state['factored_2nd'] or req_precision in ['factored', 'bf16_sr', 'fp8_sr', 'int8_sr']) else dtype
+            vt_dtype = torch.float32 if (state['factored'] or state['factored_2nd'] or req_precision in ['factored', 'bf16_sr', 'int8_sr']) else dtype
             vt_init = grad.pow(2).to(vt_dtype) * (1 - group['betas'][1])
 
             if state['factored']:

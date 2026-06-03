@@ -47,7 +47,7 @@ class Muon_adv(torch.optim.Optimizer):
         use_muon (bool | None): whether to use Muon or AuxAdamW. MUST be provided
             either here or via `optim_type` in parameter groups. (default: None)
         state_precision (str): Precision for Muon optimizer states. Options: 'auto' (parameter dtype), 'fp32',
-            'bf16_sr' (BF16 with stochastic rounding), 'fp8_sr', 'int8_sr'.
+            'bf16_sr' (BF16 with stochastic rounding), 'int8_sr'.
             (default: 'auto')
         low_rank_ortho (bool): If True, enables low-rank orthogonalization, which
             projects the update to a lower rank before orthogonalization.
@@ -98,7 +98,7 @@ class Muon_adv(torch.optim.Optimizer):
         adam_tiny_spike (float): Tiny spike for Kourkoutas-β. (default: 1e-9)
         adam_k_warmup_steps (int): Warmup steps for Kourkoutas-β. (default: 0)
         adam_spectral_normalization (bool): Enable explicit spectral normalization for AdamW. (default: False)
-        adam_state_precision (str): Precision for AuxAdam states. Options: 'auto', 'fp32', 'bf16_sr', 'fp16', 'fp8_sr', 'int8_sr', 'factored'. (default: 'auto')
+        adam_state_precision (str): Precision for AuxAdam states. Options: 'auto', 'fp32', 'bf16_sr', 'fp16', 'int8_sr', 'factored'. (default: 'auto')
         adam_nnmf_factor (bool): 1-bit factored for AdamW.
         adam_factored_2nd (bool): Factorize only the second moment (v_t) for AuxAdam. (default: False)
         """
@@ -130,7 +130,7 @@ class Muon_adv(torch.optim.Optimizer):
         # Boolean to spilt param
         use_muon: bool | None = None,
         # States precision (Muon path)
-        state_precision: str = "auto",  # 'fp32', 'bf16_sr', 'fp8_sr', 'int8_sr'
+        state_precision: str = "auto",  # 'fp32', 'bf16_sr', 'int8_sr'
         # Low-rank Muon
         low_rank_ortho: bool = False,
         ortho_rank: int = 128,
@@ -193,7 +193,7 @@ class Muon_adv(torch.optim.Optimizer):
             state_precision = "factored"
 
         state_precision = state_precision.lower()
-        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp16", "fp8_sr", "int8_sr"}
+        valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp16", "int8_sr"}
         if state_precision not in valid_precisions:
             raise ValueError(f"state_precision must be one of {valid_precisions}. Got {state_precision}")
 

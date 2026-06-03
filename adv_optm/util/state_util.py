@@ -195,7 +195,7 @@ def upcast_grad_for_precision(grad: torch.Tensor, state: dict, state_precision: 
 
     # Low-precision storage modes benefit from FP32 accumulation to 
     # maintain accuracy before quantizing back down in set_state.
-    if state_precision in ['fp32', 'bf16_sr', 'fp8_sr', 'int8_sr', 'factored']:
+    if state_precision in ['fp32', 'bf16_sr', 'int8_sr', 'factored']:
         return grad.float()
 
     return grad
