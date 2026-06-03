@@ -19,7 +19,7 @@ def quantize_blockwise(p, block_size, bits=8):
     # Pad to multiple of block_size
     pad_len = (block_size - (numel % block_size)) % block_size
     if pad_len > 0:
-        val_padded = F.pad(val_flat, (0, pad_len), mode='replicate')
+        val_padded = F.pad(val_flat.unsqueeze(0), (0, pad_len), mode='replicate').squeeze(0)
     else:
         val_padded = val_flat.clone()
 
@@ -68,7 +68,7 @@ def _init_anchor(p, state, group):
         # Masking with 0x0F prevents two's complement sign extension from overwriting bits
         packed = ((q_flat[0::2] & 0x0F) << 4) | (q_flat[1::2] & 0x0F)
 
-        state['anchor_data'] = packed
+        state['anchor_data'] = packed.to(torch.int8)
         state['anchor_scale'] = scales.to(p.dtype)
         state['anchor_min'] = mins.to(p.dtype)
 
