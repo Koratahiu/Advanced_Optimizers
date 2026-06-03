@@ -209,8 +209,6 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 random_int_state_tensor = param_update._get_random_int_for_sr(p)
             elif group['actual_state_precision'] == 'int8_sr':
                 random_int_state_tensor = param_update._get_random_int_for_8bit_sr(p)
-            elif group['actual_state_precision'] == 'fp8_sr':
-                random_int_state_tensor = param_update._get_random_int_for_fp8_sr(p)
             step_param_fn = self._compiled_step_parameter
         else:
             step_param_fn = self._step_parameter

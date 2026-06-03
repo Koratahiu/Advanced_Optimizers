@@ -455,8 +455,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     random_int_state_tensor = param_update._get_random_int_for_sr(p)
                 elif actual_precision == 'int8_sr':
                     random_int_state_tensor = param_update._get_random_int_for_8bit_sr(p)
-                elif actual_precision == 'fp8_sr':
-                    random_int_state_tensor = param_update._get_random_int_for_fp8_sr(p)
             else:
                 adam_step_param = Muon_AuxAdam._adam_step_parameter
 
@@ -476,8 +474,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
                     random_int_state_tensor = param_update._get_random_int_for_sr(p)
                 elif actual_precision == 'int8_sr':
                     random_int_state_tensor = param_update._get_random_int_for_8bit_sr(p)
-                elif actual_precision == 'fp8_sr':
-                    random_int_state_tensor = param_update._get_random_int_for_fp8_sr(p)
                 if group['low_rank_ortho']:
                     random_G_sketch = param_update._get_random_noise_for_low_rank_ortho(p, group['ortho_rank'])
             else:
