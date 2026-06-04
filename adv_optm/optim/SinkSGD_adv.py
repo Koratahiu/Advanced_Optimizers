@@ -58,7 +58,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         orthogonal_sinkhorn: bool = False,
         # Normalization then Momentum
         normed_momentum: bool = False,
-        # SNR Precondition
+        # SNR Precondition (requires normed_momentum)
         snr_cond: bool = False,
         # Nesterov Momentum
         nesterov: bool = False,

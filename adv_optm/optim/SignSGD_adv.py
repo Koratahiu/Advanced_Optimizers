@@ -70,7 +70,7 @@ class SignSGD_adv(torch.optim.Optimizer):
         nesterov_coef: float | None = None,
         # Normalization then Momentum
         normed_momentum: bool = False,
-        # SNR Precondition
+        # SNR Precondition (requires normed_momentum)
         snr_cond: bool = False,
         # Centered WD
         centered_wd: float = 0.0,
