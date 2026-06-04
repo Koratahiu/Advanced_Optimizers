@@ -221,8 +221,8 @@ def fix_loaded_state_dtype(state: dict, p: torch.Tensor, group: dict) -> None:
                 if val.dtype != p.dtype:
                     state[key] = val.to(p.dtype)
             elif mode in ['int8', 'int4']:
-                if val.dtype != torch.uint8:
-                    state[key] = val.to(torch.uint8)
+                if val.dtype != torch.int8:
+                    state[key] = val.to(torch.int8)
             elif mode == 'float8':
                 if val.dtype != torch.float8_e4m3fn:
                     state[key] = val.to(torch.float8_e4m3fn)
