@@ -189,10 +189,10 @@ def get_oft_magnitude_correction(p: torch.Tensor) -> torch.Tensor:
     # Calculate the squared L2 norm for each block independently.
     p_norm_sq = torch.linalg.vector_norm(p, ord=2, dim=-1).square_()
 
-    # The expected shrinkage of the Cayley derivative is roughly (1 + lambda^2)^-1.
-    # Because Exact Preconditioning wraps the gradient on both sides (M @ G @ M),
-    # the magnitude correction must be squared to match the true average scaling.
-    cayley_correction = (1.0 + (2.0 * p_norm_sq / b)) ** 2
+    # The expected shrinkage of the Cayley derivative is roughly (1 + lambda^2)^-1, 
+    # where lambda^2 is the average eigenvalue of -Q^2. 
+    # Since Tr(-Q^2) = 2 * ||p||_2^2, the average eigenvalue is 2 * ||p||_2^2 / b.
+    cayley_correction = 1.0 + (2.0 * p_norm_sq / b)
 
     # Reshape correction to broadcast against the update tensor (shape (k, 1))
     cayley_correction = cayley_correction.unsqueeze(-1)
