@@ -33,8 +33,6 @@ class Lion_adv(torch.optim.Optimizer):
         stochastic_rounding (bool, optional): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
         orthogonal_gradient (bool): whether to orthogonalize the gradient (default: False).
-        clip_threshold (float, optional): whether to clip the gradients norm
-            per-parameter (default: 0.0).
         kappa_p (float, optional): The p-value for the Lp-norm in Lion-K (domain [1.0, 2.0]).
             - 1.0: Standard Lion (sign update).
             - 2.0: Spherical Lion (normalized L2 update).
