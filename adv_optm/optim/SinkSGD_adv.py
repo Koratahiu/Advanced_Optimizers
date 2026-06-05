@@ -224,6 +224,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         orthogonal_sinkhorn = group['orthogonal_sinkhorn']
 
         momentum = group['momentum']
+        normed_mt = group.get('normed_momentum', False)
         nesterov = group['nesterov']
         nesterov_coef = group.get('nesterov_coef', None)
         snr_cond = group.get('snr_cond', False)
@@ -239,7 +240,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)
 
-        if group.get('normed_momentum', False):
+        if normed_mt:
             if not is_vector:
                 # Sinkhorn iterative normalization
                 grad = apply_sr_sinkhorn(grad, iters=sinkhorn_iterations, p=p, ortho_project=orthogonal_sinkhorn)
@@ -270,7 +271,12 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
                 if nesterov:
                     nv_coef = momentum if nesterov_coef is None else nesterov_coef
-                    update = grad_reshaped.lerp(buf, nv_coef)
+                    if normed_mt:
+                        # Scale the normalized gradient down to match the buffer's variance
+                        ema_std = math.sqrt((1 - momentum) / (1 + momentum))
+                        update = (grad_reshaped * ema_std).lerp_(buf, nv_coef)
+                    else:
+                        update = grad_reshaped.lerp(buf, nv_coef)
                 else:
                     update = buf.clone()
             else:
@@ -299,7 +305,12 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
                 if nesterov:
                     nv_coef = momentum if nesterov_coef is None else nesterov_coef
-                    update = grad.lerp(buf, nv_coef)
+                    if normed_mt:
+                        # Scale the normalized gradient down to match the buffer's variance
+                        ema_std = math.sqrt((1 - momentum) / (1 + momentum))
+                        update = (grad * ema_std).lerp_(buf, nv_coef)
+                    else:
+                        update = grad.lerp(buf, nv_coef)
                 else:
                     update = buf.clone()
             else:

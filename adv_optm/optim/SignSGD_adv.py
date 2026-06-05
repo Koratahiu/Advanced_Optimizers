@@ -252,7 +252,8 @@ class SignSGD_adv(torch.optim.Optimizer):
         nesterov = group.get('nesterov', False)
         nesterov_coef = group.get('nesterov_coef', None)
         sso = group.get('stochastic_sign', False)
-        snr_cond = group.get('snr_cond', False) and group.get('normed_momentum', False) and momentum > 0
+        normed_mt = group.get('normed_momentum', False)
+        snr_cond = group.get('snr_cond', False) and normed_mt and momentum > 0
 
         denom = None
         wd_target = None
@@ -261,7 +262,7 @@ class SignSGD_adv(torch.optim.Optimizer):
         if group["orthogonal_gradient"]:
             grad = _orthogonalize_gradient(p, grad)
 
-        if group.get('normed_momentum', False):
+        if normed_mt:
             if sso:
                 grad = apply_stochastic_sign_(grad, noise=random_noise_tensor, is_vector=is_vector)
             else:
@@ -283,7 +284,12 @@ class SignSGD_adv(torch.optim.Optimizer):
 
                 if nesterov:
                     nv_coef = momentum if nesterov_coef is None else nesterov_coef
-                    raw_update = grad_reshaped.lerp(exp_avg, nv_coef)
+                    if normed_mt:
+                        # Scale the normalized gradient down to match the buffer's variance
+                        ema_std = math.sqrt((1 - momentum) / (1 + momentum))
+                        raw_update = (grad_reshaped * ema_std).lerp_(exp_avg, nv_coef)
+                    else:
+                        raw_update = grad.lerp(exp_avg, nv_coef)
                 else:
                     raw_update = exp_avg.clone()
 
@@ -307,7 +313,12 @@ class SignSGD_adv(torch.optim.Optimizer):
 
                 if nesterov:
                     nv_coef = momentum if nesterov_coef is None else nesterov_coef
-                    raw_update = grad.lerp(exp_avg, nv_coef)
+                    if normed_mt:
+                        # Scale the normalized gradient down to match the buffer's variance
+                        ema_std = math.sqrt((1 - momentum) / (1 + momentum))
+                        raw_update = (grad * ema_std).lerp_(exp_avg, nv_coef)
+                    else:
+                        raw_update = grad.lerp(exp_avg, nv_coef)
                 else:
                     raw_update = exp_avg.clone()
 
