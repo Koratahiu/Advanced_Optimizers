@@ -289,7 +289,7 @@ class SignSGD_adv(torch.optim.Optimizer):
                         ema_std = math.sqrt((1 - momentum) / (1 + momentum))
                         raw_update = (grad_reshaped * ema_std).lerp_(exp_avg, nv_coef)
                     else:
-                        raw_update = grad.lerp(exp_avg, nv_coef)
+                        raw_update = grad_reshaped.lerp(exp_avg, nv_coef)
                 else:
                     raw_update = exp_avg.clone()
 
