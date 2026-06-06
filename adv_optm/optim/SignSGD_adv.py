@@ -280,14 +280,16 @@ class SignSGD_adv(torch.optim.Optimizer):
                 if snr_cond:
                     denom = (1.0 - exp_avg.square()).clamp_min_(1e-30).sqrt_().view_as(p)
 
+                if nesterov and normed_mt:
+                    # Scale the normalized gradient using empirical buffer magnitude (SNR recovery)
+                    normed_grad = grad_reshaped * exp_avg.abs()
+
                 exp_avg.lerp_(grad_reshaped, 1 - momentum)
 
                 if nesterov:
                     nv_coef = momentum if nesterov_coef is None else nesterov_coef
                     if normed_mt:
-                        # Scale the normalized gradient down to match the buffer's variance
-                        ema_std = math.sqrt((1 - momentum) / (1 + momentum))
-                        raw_update = (grad_reshaped * ema_std).lerp_(exp_avg, nv_coef)
+                        raw_update = normed_grad.lerp_(exp_avg, nv_coef)
                     else:
                         raw_update = grad_reshaped.lerp(exp_avg, nv_coef)
                 else:
@@ -308,15 +310,17 @@ class SignSGD_adv(torch.optim.Optimizer):
 
                 if snr_cond:
                     denom = (1.0 - exp_avg.square()).clamp_min_(1e-30).sqrt_()
+                
+                if nesterov and normed_mt:
+                    # Scale the normalized gradient using empirical buffer magnitude (SNR recovery)
+                    normed_grad = grad * exp_avg.abs()
 
                 exp_avg.lerp_(grad, 1 - momentum)
 
                 if nesterov:
                     nv_coef = momentum if nesterov_coef is None else nesterov_coef
                     if normed_mt:
-                        # Scale the normalized gradient down to match the buffer's variance
-                        ema_std = math.sqrt((1 - momentum) / (1 + momentum))
-                        raw_update = (grad * ema_std).lerp_(exp_avg, nv_coef)
+                        raw_update = normed_grad.lerp_(exp_avg, nv_coef)
                     else:
                         raw_update = grad.lerp(exp_avg, nv_coef)
                 else:
@@ -351,7 +355,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             update_scaling = lr * A if snr_cond else lr
             update.mul_(update_scaling)
 
-        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor, wd_target=wd_target, cwd_target=cwd_target)
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor, wd_target=wd_target, cwd_target=cwd_target, decoupled=True)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)

@@ -264,6 +264,10 @@ class SinkSGD_adv(torch.optim.Optimizer):
                     else:
                         denom = (1.0 - buf.square()).clamp_min_(1e-30).sqrt_().view_as(p)
 
+                if nesterov and normed_mt:
+                    # Scale the normalized gradient using empirical buffer magnitude (SNR recovery)
+                    normed_grad = grad_reshaped * buf.abs()
+
                 buf.lerp_(grad_reshaped, 1 - momentum)
 
                 # Factorize updated buffer
@@ -272,9 +276,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 if nesterov:
                     nv_coef = momentum if nesterov_coef is None else nesterov_coef
                     if normed_mt:
-                        # Scale the normalized gradient down to match the buffer's variance
-                        ema_std = math.sqrt((1 - momentum) / (1 + momentum))
-                        update = (grad_reshaped * ema_std).lerp_(buf, nv_coef)
+                        update = normed_grad.lerp_(buf, nv_coef)
                     else:
                         update = grad_reshaped.lerp(buf, nv_coef)
                 else:
@@ -299,6 +301,10 @@ class SinkSGD_adv(torch.optim.Optimizer):
                     else:
                         denom = (1.0 - buf.square()).clamp_min_(1e-30).sqrt_()
 
+                if nesterov and normed_mt:
+                    # Scale the normalized gradient using empirical buffer magnitude (SNR recovery)
+                    normed_grad = grad * buf.abs()
+
                 buf.lerp_(grad, 1 - momentum)
 
                 set_state(state, 'momentum_buffer', buf, actual_precision, random_int_state_tensor)
@@ -306,9 +312,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 if nesterov:
                     nv_coef = momentum if nesterov_coef is None else nesterov_coef
                     if normed_mt:
-                        # Scale the normalized gradient down to match the buffer's variance
-                        ema_std = math.sqrt((1 - momentum) / (1 + momentum))
-                        update = (grad * ema_std).lerp_(buf, nv_coef)
+                        update = normed_grad.lerp_(buf, nv_coef)
                     else:
                         update = grad.lerp(buf, nv_coef)
                 else:
