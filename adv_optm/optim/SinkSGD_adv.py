@@ -89,8 +89,8 @@ class SinkSGD_adv(torch.optim.Optimizer):
             raise ValueError(f"Momentum should be >= 0.0. Got {momentum}")
         if not (weight_decay >= 0.0):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
-        if snr_cond and not normed_momentum:
-            raise NotImplementedError(f"snr_cond is intended to be used with normed_momentum")
+        if snr_cond and not normed_momentum and not momentum > 0:
+            raise NotImplementedError(f"snr_cond is intended to be used with normed_momentum.")
 
         state_precision = state_precision.lower()
         valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp16", "int8_sr"}
