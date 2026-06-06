@@ -209,7 +209,7 @@ def fix_loaded_state_dtype(state: dict, p: torch.Tensor, group: dict) -> None:
 
     # Pre-define sets for known exact-match keys
     uint8_keys = {'sign', 'sign_slow', 'sign_buf', 'shifter'}
-    fp32_keys = {'mu_m_nmf', 'mv_m_nmf', 'mu_v_nmf', 'mv_v_nmf', 'mu_m_slow_nmf', 'mv_m_slow_nmf'}
+    fp32_keys = {'mu_m_nmf', 'mv_m_nmf', 'mu_v_nmf', 'mv_v_nmf', 'mu_m_slow_nmf', 'mv_m_slow_nmf', "mu_mbuf_nmf", "mv_mbuf_nmf", "mu_b_nmf", "normuon_v"}
 
     for key, val in state.items():
         if not isinstance(val, torch.Tensor):
