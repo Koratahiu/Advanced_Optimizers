@@ -43,7 +43,8 @@ class Prodigy_adv(torch.optim.Optimizer):
         stochastic_rounding (bool): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
         use_atan2 (bool): whether to use the atan2 update rule. (default: False)
-        orthogonal_gradient (bool): whether to use OrthoGrad.  (default: False)
+        orthogonal_gradient (str): whether to use OrthoGrad variants. 'disabled': off.
+        'flattened': Standard vectorized OrthoGrad. 'iterative': Matrix-wise rank-2 OrthoGrad. (default: disabled)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
         factored_2nd (bool): whether to keep the first moment uncompressed (dense)
@@ -119,7 +120,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         # Adam_atan2 (scale invariant)
         use_atan2: bool = False,
         # OrthoGrad
-        orthogonal_gradient: bool = False,
+        orthogonal_gradient: str = 'disabled', # 'flattened', 'iterative'
         # Nesterov momentum
         nesterov: bool = False,
         nesterov_coef: float | None = None,
@@ -371,8 +372,7 @@ class Prodigy_adv(torch.optim.Optimizer):
     def _step_parameter(self, p, grad, state, group, beta2, d, dlr, random_int_tensor, random_int_state_tensor):
         grad = upcast_grad_for_precision(grad, state, group['state_precision'])
 
-        if group["orthogonal_gradient"]:
-            grad = _orthogonalize_gradient(p, grad)
+        grad = _orthogonalize_gradient(p, grad, group["orthogonal_gradient"])
 
         nesterov = group.get('nesterov', False)
         nesterov_coef = group.get('nesterov_coef', None)

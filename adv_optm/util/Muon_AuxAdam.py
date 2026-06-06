@@ -71,8 +71,7 @@ def _init_auxadam_state(self, p, group):
 def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sqrt_bias_correction2, step_size, random_int_tensor, random_int_state_tensor=None):
     grad = upcast_grad_for_precision(grad, state, group.get('adam_state_precision', 'auto'))
 
-    if group.get("adam_orthogonal_gradient"):
-        grad = _orthogonalize_gradient(p, grad)
+    grad = _orthogonalize_gradient(p, grad, group.get("adam_orthogonal_gradient"))
 
     if hasattr(self, 'kourkoutas_helper') and self.kourkoutas_helper:
         # Accumulate current grad's norm for the *next* step

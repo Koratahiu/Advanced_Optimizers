@@ -67,7 +67,7 @@ class Lion_adv(torch.optim.Optimizer):
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
         # OrthoGrad
-        orthogonal_gradient: bool = False,
+        orthogonal_gradient: str = 'disabled', # 'flattened', 'iterative'
         # Lion-k
         kappa_p: float = 1.0,
         auto_kappa_p: bool = False,
@@ -213,8 +213,7 @@ class Lion_adv(torch.optim.Optimizer):
     def _step_parameter(self, p, grad, state, group, lr, random_int_tensor, random_noise_tensor):
         if grad.dtype != torch.float32 and state['factored']:
             grad = grad.float()
-        if group["orthogonal_gradient"]:
-            grad = _orthogonalize_gradient(p, grad)
+        grad = _orthogonalize_gradient(p, grad, group["orthogonal_gradient"])
 
         # Lion-K Logic
         kappa_p = group.get("kappa_p", 1.0)

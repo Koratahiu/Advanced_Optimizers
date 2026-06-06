@@ -108,7 +108,7 @@ class Adopt_adv(torch.optim.Optimizer):
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
         # OrthoGrad
-        orthogonal_gradient: bool = False,
+        orthogonal_gradient: str = 'disabled', # 'flattened', 'iterative'
         # Nesterov momentum
         nesterov: bool = False,
         nesterov_coef: float | None = None,
@@ -158,7 +158,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
-            "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
+            "fisher_wd": fisher_wd, "cautious_wd": cautious_wd, "orthogonal_gradient": orthogonal_gradient,
             "nesterov": nesterov, "nesterov_coef": nesterov_coef,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
@@ -172,7 +172,6 @@ class Adopt_adv(torch.optim.Optimizer):
         self.clip_lambda = clip_lambda
         self.stochastic_rounding = stochastic_rounding
         self.use_atan2 = use_atan2
-        self.orthogonal_gradient = orthogonal_gradient
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
         self._init_lr = lr if lr > 0 else 1
@@ -329,8 +328,7 @@ class Adopt_adv(torch.optim.Optimizer):
     def _step_parameter(self, p, grad, state, group, lr, beta1, beta2, random_int_tensor, random_int_state_tensor):
         grad = upcast_grad_for_precision(grad, state, group['state_precision'])
 
-        if self.orthogonal_gradient:
-            grad = _orthogonalize_gradient(p, grad)
+        grad = _orthogonalize_gradient(p, grad, group["orthogonal_gradient"])
 
         nesterov = group.get('nesterov', False)
         nesterov_coef = group.get('nesterov_coef', None)

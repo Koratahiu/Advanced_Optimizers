@@ -62,7 +62,7 @@ class SignSGD_adv(torch.optim.Optimizer):
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
         # OrthoGrad
-        orthogonal_gradient: bool = False,
+        orthogonal_gradient: str = 'disabled', # 'flattened', 'iterative'
         # Stochastic Sign Operator
         stochastic_sign: bool = False,
         # Nesterov momentum
@@ -259,8 +259,7 @@ class SignSGD_adv(torch.optim.Optimizer):
         wd_target = None
         cwd_target = None
 
-        if group["orthogonal_gradient"]:
-            grad = _orthogonalize_gradient(p, grad)
+        grad = _orthogonalize_gradient(p, grad, group["orthogonal_gradient"])
 
         if normed_mt:
             if sso:

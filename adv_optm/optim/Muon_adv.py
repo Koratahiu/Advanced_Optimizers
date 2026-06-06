@@ -39,7 +39,8 @@ class Muon_adv(torch.optim.Optimizer):
             (default: (3.4445, -4.7750, 2.0315)).
         stochastic_rounding (bool): whether to use stochastic rounding for
             BF16 parameter updates (default: True).
-        orthogonal_gradient (bool): whether to use OrthoGrad.  (default: False)
+        orthogonal_gradient (str): whether to use OrthoGrad variants. 'disabled': off.
+        'flattened': Standard vectorized OrthoGrad. 'iterative': Matrix-wise rank-2 OrthoGrad. (default: disabled)
         vector_reshape (bool): whether to reshape 1D vectors into 2D
             matrices to apply low-rank compression (default: True).
         nnmf_factor (bool): whether to use the factorization or disable it to use
@@ -89,7 +90,7 @@ class Muon_adv(torch.optim.Optimizer):
         adam_fisher_wd (bool): Fisher Adam (FAdam) weight decay for the AdamW part. (default: False)
         adam_use_bias_correction (bool): Bias correction for AdamW.
         adam_use_atan2 (bool): Atan2 update rule for AdamW.
-        adam_orthogonal_gradient (bool): OrthoGrad for AdamW.
+        adam_orthogonal_gradient (str): OrthoGrad for AdamW.
         adam_nesterov (bool): Nesterov momentum for AdamW. (default: False)
         adam_nesterov_coef (float, optional): Nesterov coefficient for AdamW. (default: None)
         adam_kourkoutas_beta (bool): Kourkoutas-β for AdamW.
@@ -121,7 +122,7 @@ class Muon_adv(torch.optim.Optimizer):
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
         # OrthoGrad
-        orthogonal_gradient: bool = False,
+        orthogonal_gradient: str = 'disabled', # 'flattened', 'iterative'
         # RMS Rescaling
         rms_rescaling: bool = True,
         # SMMF factorization
@@ -159,7 +160,7 @@ class Muon_adv(torch.optim.Optimizer):
         adam_fisher_wd: bool = False,
         adam_use_bias_correction: bool = True,
         adam_use_atan2: bool = False,
-        adam_orthogonal_gradient: bool = False,
+        adam_orthogonal_gradient: str = 'disabled', # 'flattened', 'iterative'
         adam_nesterov: bool = False,
         adam_nesterov_coef: float | None = None,
         adam_kourkoutas_beta: bool = False,
@@ -457,8 +458,7 @@ class Muon_adv(torch.optim.Optimizer):
         if grad.dtype != torch.float32 and state.get('factored', False):
             grad = grad.float()
 
-        if group.get("orthogonal_gradient"):
-            grad = _orthogonalize_gradient(p, grad)
+        grad = _orthogonalize_gradient(p, grad, group.get("orthogonal_gradient"))
 
         if state['factored']: # Factored Muon
             d1, d2 = state['effective_shape']

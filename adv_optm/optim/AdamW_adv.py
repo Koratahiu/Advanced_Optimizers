@@ -45,7 +45,8 @@ class AdamW_adv(torch.optim.Optimizer):
         stochastic_rounding (bool): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
         use_atan2 (bool): whether to use the atan2 update rule. (default: False)
-        orthogonal_gradient (bool): whether to use OrthoGrad.  (default: False)
+        orthogonal_gradient (str): whether to use OrthoGrad variants. 'disabled': off.
+        'flattened': Standard vectorized OrthoGrad. 'iterative': Matrix-wise rank-2 OrthoGrad. (default: disabled)
         normed_momentum (bool): whether to compute the first moment on the normalized gradient. (default: False)
         kourkoutas_beta (bool): whether to enable the layer-wise dynamic β₂ logic.
             If `False`, the optimizer behaves as standard AdamW. (default: False)
@@ -104,7 +105,7 @@ class AdamW_adv(torch.optim.Optimizer):
         # Adam_atan2 (scale invariant)
         use_atan2: bool = False,
         # OrthoGrad
-        orthogonal_gradient: bool = False,
+        orthogonal_gradient: str = 'disabled', # 'flattened', 'iterative'
         # Nesterov momentum
         nesterov: bool = False,
         nesterov_coef: float | None = None,
@@ -326,8 +327,7 @@ class AdamW_adv(torch.optim.Optimizer):
     def _step_parameter(self, p, grad, state, group, step_size, beta1, beta2, sqrt_bias_correction2, random_int_tensor, random_int_state_tensor):
         grad = upcast_grad_for_precision(grad, state, group['state_precision'])
 
-        if group["orthogonal_gradient"]:
-            grad = _orthogonalize_gradient(p, grad)
+        grad = _orthogonalize_gradient(p, grad, group["orthogonal_gradient"])
 
         nesterov = group.get('nesterov', False)
         nesterov_coef = group.get('nesterov_coef', None)
