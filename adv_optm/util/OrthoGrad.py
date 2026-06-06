@@ -1,9 +1,21 @@
 import torch
 import math
 
-def _orthogonalize_gradient(p: torch.Tensor, grad: torch.Tensor) -> torch.Tensor:
+def _orthogonalize_gradient(p: torch.Tensor, grad: torch.Tensor, mode: str) -> torch.Tensor:
     """
     Projects the gradient `grad` to be orthogonal to the parameter `p`.
+    Supports two modes: 'flattened' (vectorized) and 'iterative' (matrix-wise).
+    """
+    if mode == 'disabled':
+        return grad
+    elif mode == 'flattened':
+        return flattened_ortho_project(p, grad)
+    elif mode == 'iterative':
+        return iterative_ortho_project(p, grad)
+
+def flattened_ortho_project(p: torch.Tensor, grad: torch.Tensor) -> torch.Tensor:
+    """
+    Projects the flattened gradient `grad` to be orthogonal to the flattened parameter `p`.
     Modified from:
     https://github.com/LucasPrietoAl/grokking-at-the-edge-of-numerical-stability/blob/720d2444df12b851d6cb417ab08cf125c822b2ae/orthograd.py
     """
@@ -20,26 +32,26 @@ def _orthogonalize_gradient(p: torch.Tensor, grad: torch.Tensor) -> torch.Tensor
     return g_orth_scaled.view(original_shape).to(original_dtype)
 
 
-def iterative_ortho_project(p: torch.Tensor, update: torch.Tensor, iters: int = 5) -> torch.Tensor:
+def iterative_ortho_project(p: torch.Tensor, grad: torch.Tensor, iters: int = 5) -> torch.Tensor:
     """
     Applies iterative alternating orthogonal projection to a 2D matrix.
-    Projects the update to be orthogonal to the parameter matrix along
+    Projects the grad to be orthogonal to the parameter matrix along
     rows and columns sequentially, alternating dimensions.
-    Inspired from Sinkhorn algorithm, 2 iterations is enough to converge
-    to cosine similarity of -1e4 to -1e-5 (semi orthogonal).
+    Inspired from Sinkhorn algorithm, 2-3 iterations is enough to converge
+    to cosine similarity of -1e4 to -1e-6 for every row/col (semi orthogonal).
     """
     # 1D Vector Case fallback to the standard OrthoGrad
     is_vector = p.ndim < 2 or getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False)
     if is_vector:
-        return _orthogonalize_gradient(p, update)
+        return _orthogonalize_gradient(p, grad)
 
-    original_shape = update.shape
+    original_shape = grad.shape
 
     # 2D+ Matrix Case
-    update_2d = update.view(update.shape[0], -1)
+    grad_2d = grad.view(grad.shape[0], -1)
     param_2d = p.view(p.shape[0], -1)
 
-    m, n = update_2d.shape
+    m, n = grad_2d.shape
 
     # Dynamically determine the order based on aspect ratio
     row_first = m > n
@@ -50,31 +62,31 @@ def iterative_ortho_project(p: torch.Tensor, update: torch.Tensor, iters: int = 
 
     for _ in range(iters):
         # First dimension
-        update_2d = _ortho_normed_dim(param_2d, update_2d, p_norm_sq_dim, dim)
+        grad_2d = _ortho_normed_dim(param_2d, grad_2d, p_norm_sq_dim, dim)
         # Second dimension
-        update_2d = _ortho_normed_dim(param_2d, update_2d, p_norm_sq_adim, 1 - dim)
+        grad_2d = _ortho_normed_dim(param_2d, grad_2d, p_norm_sq_adim, 1 - dim)
 
-    return update_2d.view(original_shape)
+    return grad_2d.view(original_shape)
 
 
-def _ortho_normed_dim(p_2d: torch.Tensor, update_2d: torch.Tensor, p_norm_sq: torch.Tensor, dim: int) -> torch.Tensor:
+def _ortho_normed_dim(p_2d: torch.Tensor, grad_2d: torch.Tensor, p_norm_sq: torch.Tensor, dim: int) -> torch.Tensor:
     """
-    Projects the update to be orthogonal to p along 'dim' and dynamically restores 
+    Projects the grad to be orthogonal to p along 'dim' and dynamically restores 
     the original magnitude of that dimension pre-projection.
     """
     # Record target magnitude before projection
-    norm_lb = 1 / math.sqrt(update_2d.shape[dim])
-    target_norm = update_2d.norm(p=2, dim=dim, keepdim=True).clamp_min_(norm_lb)
+    norm_lb = 1 / math.sqrt(grad_2d.shape[dim])
+    target_norm = grad_2d.norm(p=2, dim=dim, keepdim=True).clamp_min_(norm_lb)
 
     # Project: g_orth = g - (p * <p, g> / ||p||^2)
-    dot_prod = torch.sum(p_2d * update_2d, dim=dim, keepdim=True)
+    dot_prod = torch.sum(p_2d * grad_2d, dim=dim, keepdim=True)
     proj = dot_prod / p_norm_sq
 
-    # In-place subtraction: update_2d = update_2d - (proj * p_2d)
+    # In-place subtraction: grad_2d = grad_2d - (proj * p_2d)
     # Standard gamma is -1, but -1.01 proved to converge faster
-    update_2d.addcmul_(proj, p_2d, value=-1.01)
+    grad_2d.addcmul_(proj, p_2d, value=-1.01)
 
     # Magnitude Preservation
-    g_orth_norm = update_2d.norm(p=2, dim=dim, keepdim=True).clamp_min_(norm_lb)
+    g_orth_norm = grad_2d.norm(p=2, dim=dim, keepdim=True).clamp_min_(norm_lb)
     scale_factor = target_norm / g_orth_norm
-    return update_2d.mul_(scale_factor)
+    return grad_2d.mul_(scale_factor)
