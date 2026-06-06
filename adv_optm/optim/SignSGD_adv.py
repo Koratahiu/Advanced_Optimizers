@@ -282,7 +282,7 @@ class SignSGD_adv(torch.optim.Optimizer):
 
                 if nesterov and normed_mt:
                     # Scale the normalized gradient using empirical buffer magnitude (SNR recovery)
-                    normed_grad = grad_reshaped * exp_avg.abs()
+                    normed_grad = exp_avg.abs().mul_(grad_reshaped)
 
                 exp_avg.lerp_(grad_reshaped, 1 - momentum)
 
@@ -313,7 +313,7 @@ class SignSGD_adv(torch.optim.Optimizer):
 
                 if nesterov and normed_mt:
                     # Scale the normalized gradient using empirical buffer magnitude (SNR recovery)
-                    normed_grad = grad * exp_avg.abs()
+                    normed_grad = exp_avg.abs().mul_(grad)
 
                 exp_avg.lerp_(grad, 1 - momentum)
 

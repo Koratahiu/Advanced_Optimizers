@@ -266,7 +266,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
                 if nesterov and normed_mt:
                     # Scale the normalized gradient using empirical buffer magnitude (SNR recovery)
-                    normed_grad = grad_reshaped * buf.abs()
+                    normed_grad = buf.abs().mul_(grad_reshaped)
 
                 buf.lerp_(grad_reshaped, 1 - momentum)
 
@@ -303,7 +303,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
                 if nesterov and normed_mt:
                     # Scale the normalized gradient using empirical buffer magnitude (SNR recovery)
-                    normed_grad = grad * buf.abs()
+                    normed_grad = buf.abs().mul_(grad)
 
                 buf.lerp_(grad, 1 - momentum)
 
