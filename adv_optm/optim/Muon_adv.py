@@ -187,7 +187,7 @@ class Muon_adv(torch.optim.Optimizer):
             print("Warning: spectral_normalization is incompatible with rms_rescaling, Disabling rms_rescaling.")
             rms_rescaling = False
         if spectral_normalization and accelerated_ns:
-            ValueError("spectral_normalization violates accelerated Newton-Schulz assumptions. Pick one of them.")
+            raise ValueError("spectral_normalization violates accelerated Newton-Schulz assumptions. Pick one of them.")
 
         # Legacy backwards compatibility support for `nnmf_factor=True`
         if nnmf_factor:
