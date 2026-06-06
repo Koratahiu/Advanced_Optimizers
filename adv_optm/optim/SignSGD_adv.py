@@ -343,7 +343,7 @@ class SignSGD_adv(torch.optim.Optimizer):
         if group.get('geometric_wd', False) and group["weight_decay"] > 0 :
             wd_target = get_signsgd_wd_target(p, denom=denom, stochastic_sign=sso, noise=random_noise_tensor, is_vector=is_vector)
 
-            if group.get('centered_wd', 0.0) > 0 and 'anchor_type' in state:
+            if group.get('centered_wd', 0.0) > 0 and 'anchor_data' in state:
                 anchor = dequantize_anchor(p, state, group, p.dtype)
                 cwd_target = get_signsgd_wd_target(p.sub(anchor), denom=denom, stochastic_sign=sso, noise=random_noise_tensor, is_vector=is_vector)
                 del anchor

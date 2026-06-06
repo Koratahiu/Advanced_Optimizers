@@ -48,7 +48,7 @@ def _apply_weight_decay(
                 p_calc.add_(wd_target, alpha=-scaled_wd)
 
     # Centered Weight Decay (pulls toward anchor)
-    if scaled_cwd is not None and 'anchor_type' in state:
+    if scaled_cwd is not None and 'anchor_data' in state:
         if cwd_target is not None:
             decay_target = cwd_target
         else:

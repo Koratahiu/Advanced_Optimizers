@@ -345,7 +345,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
                     wd_scaler = get_sinkhorn_wd_scaler(p, row_denom=vt_row, col_denom=vt_col)
                 else:
                     wd_target = get_signsgd_wd_target(p, denom=denom)
-            if is_vector and group.get('centered_wd', 0.0) > 0 and 'anchor_type' in state:
+            if is_vector and group.get('centered_wd', 0.0) > 0 and 'anchor_data' in state:
                 anchor = dequantize_anchor(p, state, group, p.dtype)
                 cwd_target = get_signsgd_wd_target(p.sub(anchor), denom=denom)
                 del anchor
