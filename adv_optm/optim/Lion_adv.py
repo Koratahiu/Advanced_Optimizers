@@ -4,8 +4,11 @@ from typing import Tuple, Optional
 
 from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
-from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
+from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state, _pack_bools, _unpack_bools
 from ..util.lion_k import _get_lion_k_update
+from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
+from ..util.centered_decay import _init_anchor
+from ..util.signed_util import apply_stochastic_sign_
 
 
 class Lion_adv(torch.optim.Optimizer):
@@ -30,9 +33,6 @@ class Lion_adv(torch.optim.Optimizer):
         stochastic_rounding (bool, optional): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
         orthogonal_gradient (bool): whether to orthogonalize the gradient (default: False).
-        cautious_mask (bool): whether to use the cautious masking technique. (default: False).
-        clip_threshold (float, optional): whether to clip the gradients norm
-            per-parameter (default: 0.0).
         kappa_p (float, optional): The p-value for the Lp-norm in Lion-K (domain [1.0, 2.0]).
             - 1.0: Standard Lion (sign update).
             - 2.0: Spherical Lion (normalized L2 update).
@@ -42,6 +42,16 @@ class Lion_adv(torch.optim.Optimizer):
             parameter dimensionality. Sets p=2.0 for 4D tensors (Conv2D) (Biases/Norms) to
             use Spherical updates, and p=1.0 for others (Linear/Embeddings) to use Sign
             updates. Overrides explicit kappa_p value. (default: False).
+        stochastic_sign (bool): whether to use the Stochastic Sign operator. (default: False)
+        centered_wd (float): Centered Weight Decay coefficient. Instead of decaying weights
+            toward zero, they are decayed toward their initial values (anchors). This
+            can be used together with standard weight decay. (default: 0.0)
+        centered_wd_mode (str): The quantization format used to store the anchor
+            weights to save VRAM. Options include:
+            'full': Stores anchors in the original parameter's precision.
+            'float8': Uses torch.float8_e4m3fn for a balance of precision and memory.
+            'int8': Uses 8-bit block-wise quantization (block size 128).
+            'int4': Uses 4-bit block-wise quantization (block size 32).
         nnmf_factor (bool): whether to use the factorization or use the
             uncompressed optimizer. (default: True)
     """
@@ -57,13 +67,17 @@ class Lion_adv(torch.optim.Optimizer):
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
         # OrthoGrad
-        orthogonal_gradient: bool = False,
-        # Cautious variant
-        cautious_mask: bool = False,
-        clip_threshold: float = 0.0,
+        orthogonal_gradient: str = 'disabled', # 'flattened', 'iterative'
         # Lion-k
         kappa_p: float = 1.0,
         auto_kappa_p: bool = False,
+        # Stochastic Sign Operator
+        stochastic_sign: bool = False,
+        # Centered WD
+        centered_wd: float = 0.0,
+        centered_wd_mode: str = 'float8',
+        # Spectral Normed Optimizer
+        spectral_normalization: bool = False,
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
@@ -84,14 +98,19 @@ class Lion_adv(torch.optim.Optimizer):
             cautious_wd=cautious_wd,
             vector_reshape=vector_reshape,
             orthogonal_gradient=orthogonal_gradient,
-            clip_threshold=clip_threshold,
             kappa_p=kappa_p,
             auto_kappa_p=auto_kappa_p,
+            stochastic_sign=stochastic_sign,
+            spectral_normalization=spectral_normalization,
             nnmf_factor=nnmf_factor,
+            centered_wd= centered_wd,
+            centered_wd_mode= centered_wd_mode,
         )
         self.stochastic_rounding = stochastic_rounding
-        self.cautious_mask = cautious_mask
+        self._init_lr = lr if lr > 0 else 1
         super().__init__(params, defaults)
+
+        self.init_step()
 
         if self.stochastic_rounding:
             # For deterministic stochastic rounding, we need to seed the generator
@@ -105,6 +124,16 @@ class Lion_adv(torch.optim.Optimizer):
         if compiled_optimizer:
             self.compile(fullgraph=True)
 
+    def load_state_dict(self, state_dict: dict) -> None:
+        """
+        Overrides default load_state_dict to implement a workaround for PyTorch's
+        automatic dtype casting. It ensures factorized states remain float32 for
+        stability, preserves integer/float8 quantized anchor states, and forces
+        standard states onto the parameter's current dtype/device.
+        """
+        super().load_state_dict(state_dict)
+        param_update.post_process_loaded_state(self)
+
     @property
     def supports_fused_back_pass(self) -> bool:
         return True
@@ -117,15 +146,14 @@ class Lion_adv(torch.optim.Optimizer):
     def supports_flat_params(self) -> bool:
         return False
 
+    def init_step(self):
+        for group in self.param_groups:
+            for i, p in enumerate(group['params']):
+                self.__init_state(p, group)
+
     @torch.no_grad()
-    def step_parameter(self, p: torch.Tensor, group: dict, i: Optional[int] = None):
-        """Performs a single optimization step on a single parameter."""
-        if p.grad is None:
-            return
-
-        grad = p.grad
+    def __init_state(self, p, group):
         state = self.state[p]
-
         # State Initialization
         if 'step' not in state:
             state['step'] = 0
@@ -144,35 +172,50 @@ class Lion_adv(torch.optim.Optimizer):
                 state['mv_m_nmf'] = torch.zeros(d2, device=p.device, dtype=dtype)
                 packed_d2 = (d2 + 7) // 8
                 state['sign'] = torch.zeros((d1, packed_d2), dtype=torch.uint8, device=p.device)
+                state['shifter'] = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], device=p.device, dtype=torch.uint8)
             else: # Fallback to standard Lion
                 state['exp_avg'] = torch.zeros_like(p, device=p.device, dtype=dtype)
+
+            if group.get('spectral_normalization', False) and is_spectral(p):
+                init_spectral_norm(state, p)
+
+            _init_anchor(p, state, group)
+
+    @torch.no_grad()
+    def step_parameter(self, p: torch.Tensor, group: dict, i: Optional[int] = None):
+        """Performs a single optimization step on a single parameter."""
+        if p.grad is None:
+            return
+
+        grad = p.grad
+        state = self.state[p]
+        self.__init_state(p, group)
 
         state['step'] += 1
         lr = group["lr"]
 
         random_int_tensor = None
+        random_noise_tensor = None
 
         if group.get('compiled_optimizer', False):
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
-            lr = torch.as_tensor(lr, dtype=torch.float64)
+            if group.get('stochastic_sign', False):
+                random_noise_tensor = param_update._get_random_noise_for_sso(p)
+            lr = torch.as_tensor(lr)
             step_param_fn = self._compiled_step_parameter
         else:
             step_param_fn = self._step_parameter
 
-        step_param_fn(p, grad, state, group, lr, random_int_tensor)
+        step_param_fn(p, grad, state, group, lr, random_int_tensor, random_noise_tensor)
 
-    def _step_parameter(self, p, grad, state, group, lr, random_int_tensor):
+    def _step_parameter(self, p, grad, state, group, lr, random_int_tensor, random_noise_tensor):
         if grad.dtype != torch.float32 and state['factored']:
             grad = grad.float()
-        if group["clip_threshold"] > 0.0:
-            grad_norm = torch.norm(grad.detach())
-            if grad_norm > group["clip_threshold"]:
-                clip_coef = group["clip_threshold"] / grad_norm
-                grad.mul_(clip_coef)
-        if group["orthogonal_gradient"]:
-            grad = _orthogonalize_gradient(p, grad)
+        is_vector = p.ndim < 2 or getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False)
+
+        grad = _orthogonalize_gradient(p, grad, group["orthogonal_gradient"])
 
         # Lion-K Logic
         kappa_p = group.get("kappa_p", 1.0)
@@ -192,7 +235,7 @@ class Lion_adv(torch.optim.Optimizer):
             grad_reshaped = grad.view(d1, d2)
 
             # Reconstruct momentum m_{t-1}
-            exp_avg = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True)
+            exp_avg = _reconstruct_state((state['mu_m_nmf'], state['mv_m_nmf'], state['sign'], d2), signed=True, shifter=state['shifter'])
 
             # Compute update term c_t
             update = torch.lerp(grad_reshaped, exp_avg, beta1)
@@ -202,18 +245,15 @@ class Lion_adv(torch.optim.Optimizer):
             exp_avg.lerp_(grad_reshaped, 1 - beta2)
 
             # Compress new momentum m_t and store factors
-            state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True)
+            state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True, shifter=state['shifter'])
             del exp_avg
 
-            update = _get_lion_k_update(update, kappa_p)
+            update = update.view(p.shape)
 
-            if self.cautious_mask:
-                mask = (update * grad_reshaped > 0).to(grad_reshaped.dtype)
-                mask.div_(mask.mean().clamp_min_(1e-3))
-                update.mul_(mask)
-                del mask
-
-            update = update.view(p.shape).mul_(lr)
+            if group.get('stochastic_sign', False):
+                update = apply_stochastic_sign_(update, noise=random_noise_tensor, is_vector=is_vector)
+            else:
+                update = _get_lion_k_update(update, kappa_p)
 
         else:
             # Fallback to standard Lion logic
@@ -222,18 +262,18 @@ class Lion_adv(torch.optim.Optimizer):
             # Compute update term
             update = torch.lerp(grad, exp_avg, beta1)
 
-            update = _get_lion_k_update(update, kappa_p)
-
-            if self.cautious_mask:
-                mask = (update * grad > 0).to(grad.dtype)
-                mask.div_(mask.mean().clamp_min_(1e-3))
-                update.mul_(mask)
-                del mask
-
-            update.mul_(lr)
-
             # Standard Lion momentum update
             exp_avg.lerp_(grad, 1 - beta2)
+
+            if group.get('stochastic_sign', False):
+                update = apply_stochastic_sign_(update, noise=random_noise_tensor, is_vector=is_vector)
+            else:
+                update = _get_lion_k_update(update, kappa_p)
+
+        if group.get('spectral_normalization', False):
+            update = scale_update(p, update, lr, state=state)
+        else:
+            update.mul_(lr)
 
         param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
 

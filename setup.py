@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="adv_optm",
-    version="2.2.3",
+    version="2.5",
     author="Koratahiu",
     author_email="hiuhonor@gmail.com",
     license='Apache 2.0',
@@ -22,7 +22,7 @@ setup(
         "Topic :: Software Development :: Libraries :: Python Modules",
     ],
     install_requires=[
-        "torch>=2.0",
+        "torch>=2.1",
     ],
     python_requires=">=3.8",
     keywords=[
