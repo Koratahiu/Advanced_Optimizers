@@ -59,25 +59,32 @@ def iterative_ortho_project(p: torch.Tensor, grad: torch.Tensor, iters: int = 3)
 
     p_norm_sq_dim = torch.sum(param_2d * param_2d, dim=dim, keepdim=True).add_(1e-30)
     p_norm_sq_adim = torch.sum(param_2d * param_2d, dim=1-dim, keepdim=True).add_(1e-30)
+    norm_lb_dim = 1 / math.sqrt(grad_2d.shape[dim])
+    target_norm_dim = grad_2d.norm(p=2, dim=dim, keepdim=True).clamp_min_(norm_lb_dim)
+    norm_lb_adim = 1 / math.sqrt(grad_2d.shape[1-dim])
+    target_norm_adim = grad_2d.norm(p=2, dim=1-dim, keepdim=True).clamp_min_(norm_lb_adim)
 
     for _ in range(iters):
         # First dimension
-        grad_2d = _ortho_normed_dim(param_2d, grad_2d, p_norm_sq_dim, dim)
+        grad_2d = _ortho_normed_dim(param_2d, grad_2d, p_norm_sq_dim, dim,target_norm_dim, norm_lb_dim)
         # Second dimension
-        grad_2d = _ortho_normed_dim(param_2d, grad_2d, p_norm_sq_adim, 1 - dim)
+        grad_2d = _ortho_normed_dim(param_2d, grad_2d, p_norm_sq_adim, 1 - dim, target_norm_adim, norm_lb_adim)
 
     return grad_2d.view(original_shape)
 
 
-def _ortho_normed_dim(p_2d: torch.Tensor, grad_2d: torch.Tensor, p_norm_sq: torch.Tensor, dim: int) -> torch.Tensor:
+def _ortho_normed_dim(
+    p_2d: torch.Tensor, 
+    grad_2d: torch.Tensor, 
+    p_norm_sq: torch.Tensor, 
+    dim: int, 
+    target_norm: torch.Tensor, 
+    norm_lb: float
+) -> torch.Tensor:
     """
-    Projects the grad to be orthogonal to p along 'dim' and dynamically restores 
-    the original magnitude of that dimension pre-projection.
+    Projects the grad to be orthogonal to p along 'dim' and restores 
+    the original pre-computed magnitude of that dimension.
     """
-    # Record target magnitude before projection
-    norm_lb = 1 / math.sqrt(grad_2d.shape[dim])
-    target_norm = grad_2d.norm(p=2, dim=dim, keepdim=True).clamp_min_(norm_lb)
-
     # Project: g_orth = g - (p * <p, g> / ||p||^2)
     dot_prod = torch.sum(p_2d * grad_2d, dim=dim, keepdim=True)
     proj = dot_prod / p_norm_sq
