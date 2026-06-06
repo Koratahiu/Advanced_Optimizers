@@ -330,7 +330,7 @@ def _copy_int8_sym_blockwise_stochastic_core_(
     target: torch.Tensor,
     source: torch.Tensor,
     scales: torch.Tensor,
-    random_int_tensor: torch.Tensor | None,
+    random_int_tensor: torch.Tensor,
     block_size: int = 2048,
     val_blocks: torch.Tensor | None = None,
 ) -> None:
