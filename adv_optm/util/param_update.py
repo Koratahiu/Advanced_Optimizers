@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from typing import Dict, Any
 
-from .scaled_optm import adjust_wds, scale_wds
+from .scaled_optm import adjust_wds
 from .centered_decay import dequantize_anchor
 
 _generators: Dict[torch.device, torch.Generator] = {}

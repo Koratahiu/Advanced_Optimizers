@@ -61,7 +61,7 @@ def adjust_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
     """
     # DoRA Scale (Magnitude Vector)
     if getattr(p, '_is_dora_scale', False):
-        return 0.0, cwd
+        return wd, cwd
 
     if getattr(p, '_is_oft', False):
         return wd, 0.0
@@ -76,7 +76,7 @@ def adjust_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
     else:
         # 1D Biases or generic 1D parameters
         # Centered WD safely regularizes the delta without collapsing base feature variance.
-        return 0.0, cwd
+        return wd, cwd
 
 
 def scale_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
