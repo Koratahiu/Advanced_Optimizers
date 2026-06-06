@@ -310,7 +310,7 @@ class SignSGD_adv(torch.optim.Optimizer):
 
                 if snr_cond:
                     denom = (1.0 - exp_avg.square()).clamp_min_(1e-30).sqrt_()
-                
+
                 if nesterov and normed_mt:
                     # Scale the normalized gradient using empirical buffer magnitude (SNR recovery)
                     normed_grad = grad * exp_avg.abs()
