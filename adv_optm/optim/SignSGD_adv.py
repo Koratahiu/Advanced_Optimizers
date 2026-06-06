@@ -171,7 +171,7 @@ class SignSGD_adv(torch.optim.Optimizer):
     def __init_state(self, p, group):
         state = self.state[p]
         # State Initialization
-        if group["momentum"] > 0 and len(state) == 0:
+        if 'step' not in state:
             req_precision = group['state_precision']
             is_vector = len(p.shape) == 1 and not group['vector_reshape']
 
