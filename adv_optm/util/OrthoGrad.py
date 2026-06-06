@@ -11,7 +11,7 @@ def _orthogonalize_gradient(p: torch.Tensor, grad: torch.Tensor, mode: str) -> t
     elif mode == 'flattened':
         return flattened_ortho_project(p, grad)
     elif mode == 'iterative':
-        return iterative_ortho_project(p, grad)
+        return iterative_ortho_project(p, grad, iters=3)
 
 def flattened_ortho_project(p: torch.Tensor, grad: torch.Tensor) -> torch.Tensor:
     """
@@ -32,7 +32,7 @@ def flattened_ortho_project(p: torch.Tensor, grad: torch.Tensor) -> torch.Tensor
     return g_orth_scaled.view(original_shape).to(original_dtype)
 
 
-def iterative_ortho_project(p: torch.Tensor, grad: torch.Tensor, iters: int = 5) -> torch.Tensor:
+def iterative_ortho_project(p: torch.Tensor, grad: torch.Tensor, iters: int = 3) -> torch.Tensor:
     """
     Applies iterative alternating orthogonal projection to a 2D matrix.
     Projects the grad to be orthogonal to the parameter matrix along
