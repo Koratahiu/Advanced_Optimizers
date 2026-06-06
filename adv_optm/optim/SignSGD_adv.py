@@ -354,7 +354,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             update_scaling = lr * A if snr_cond else lr
             update.mul_(update_scaling)
 
-        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor, wd_target=wd_target, cwd_target=cwd_target, decoupled=True)
+        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor, wd_target=wd_target, cwd_target=cwd_target)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
