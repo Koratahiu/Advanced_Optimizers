@@ -29,7 +29,7 @@ def _apply_weight_decay(
     cautious = group.get('cautious_wd', False)
 
     # Standard Weight Decay (pulls toward zero)
-    if is_decay:
+    if scaled_wd is not None:
         if wd_target is None:
             wd_target = p_calc
         # Cautious Weight Decay: only decay if the update pushes in the same direction as the decay
@@ -103,14 +103,14 @@ def apply_parameter_update(
         decoupled: Whenever to use the true decoupled weight decay.
         wd_scaler: A multiplier/tensor to scale the calculated wd/cwd magnitude (e.g. for Fisher Adam WD).
     """
-    is_decay = wd != 0
     if group.get('spectral_normalization', False):
         step_size = lr
         if getattr(p, '_is_oft', False):
             oft_vars = get_oft_structural_invariants(p)
             step_size = step_size * get_oft_magnitude_correction(p, oft_vars=oft_vars)
-            g_decay_scaler = get_geodesic_decay_scaler(p, oft_vars=oft_vars) if is_decay else None
-            wd_scaler = wd_scaler * g_decay_scaler if wd_scaler is not None else g_decay_scaler
+            if wd != 0:
+                g_decay_scaler = get_geodesic_decay_scaler(p, oft_vars=oft_vars)
+                wd_scaler = wd_scaler * g_decay_scaler if wd_scaler is not None else g_decay_scaler
         update = scale_update(p, update, step_size, state=state)
     else:
         update.mul_(step_size)
@@ -122,11 +122,11 @@ def apply_parameter_update(
     # Calculate global decay factor for decoupled vs standard
     decay_factor = (lr / self._init_lr) if decoupled else lr
 
-    scaled_wd = (wd * decay_factor) if is_decay else None
-    scaled_cwd = (cwd * decay_factor) if cis_decay else None
+    scaled_wd = (wd * decay_factor) if wd != 0 else None
+    scaled_cwd = (cwd * decay_factor) if cwd != 0 else None
 
     if wd_scaler is not None:
-        if is_decay:
+        if scaled_wd is not None:
             scaled_wd = scaled_wd * wd_scaler
         if scaled_cwd is not None:
             scaled_cwd = scaled_cwd * wd_scaler
@@ -142,7 +142,7 @@ def apply_parameter_update(
         cwd_t = cwd_target.float() if cwd_target is not None else None
 
         # Apply weight decay if needed
-        if is_decay or scaled_cwd is not None:
+        if scaled_wd is not None or scaled_cwd is not None:
             _apply_weight_decay(p_fp32, update_fp32, p, state, group, scaled_wd, scaled_cwd, wd_t, cwd_t)
 
         # Apply main update
@@ -160,7 +160,7 @@ def apply_parameter_update(
 
     else:
         # Standard path for non-bfloat16 or without stochastic rounding
-        if is_decay or scaled_cwd is not None:
+        if scaled_wd is not None or scaled_cwd is not None:
             _apply_weight_decay(p, update, p, state, group, scaled_wd, scaled_cwd, wd_target, cwd_target)
 
         # Apply main update
