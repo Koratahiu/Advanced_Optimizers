@@ -9,7 +9,6 @@ def scale_update(
     update: torch.Tensor,
     lr: float,
     state: dict | None = None,
-    depth: int = 1,
 ) -> torch.Tensor:
     """
     Applies adaptive scaling to the parameter update based on the parameter's
@@ -78,6 +77,7 @@ def adjust_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
         # Centered WD safely regularizes the delta without collapsing base feature variance.
         return wd, cwd
 
+
 def is_spectral(p: torch.Tensor) -> bool:
     """Determines if a parameter should undergo spectral normalization updates."""
     if p.ndim < 2:
@@ -145,8 +145,11 @@ def max_row_norm_oft_normalization(
 
     Result: Var[Δyⱼ] ≤ (target_scale · lr)² = O(1) for every block configuration.
     """
-    # keeps the effective rotation step ‖ΔR_block‖_spec ≤ lr.
-    target_scale = 0.5 
+    scale_factor = getattr(p, '_oft_scale_factor', 1.0)
+
+    # Base target scale: 0.5 for Cayley (R ≈ I + 2Q)
+    # Compensate for the forward pass scaling so the effective rotation step is bounded by `lr`
+    target_scale = 0.5 * scale_factor 
 
     # Row norms: shape (k,) - one per block
     row_norms = torch.linalg.vector_norm(update, ord=2, dim=-1)
@@ -154,32 +157,96 @@ def max_row_norm_oft_normalization(
     norm_lb = 1.0 / math.sqrt(update.shape[1])
     max_norm = row_norms.max().clamp_min(norm_lb)
 
-    # Get the magnitude correction factor
-    cayley_correction = get_oft_magnitude_correction(p)
-
-    return update.mul_(lr * cayley_correction *  target_scale / max_norm)
+    return update.mul_(lr * target_scale / max_norm)
 
 @torch.no_grad()
-def get_oft_magnitude_correction(p: torch.Tensor) -> torch.Tensor:
+def get_oft_structural_invariants(p: torch.Tensor):
     """
-    Approximates the magnitude correction of exact Riemannian preconditioning (M @ G @ M).
-    Neutralizes the derivative shrinkage of the Cayley transform using a scalar multiplier.
+    Computes shared structural invariants and the Sparsity Index for OFT matrices.
+    Returns tuple:
+        n_el: Number of elements.
+        b: Size of the orthogonal matrix derived from the elements.
+        p_sq: Element-wise squared magnitude.
+        p_norm_sq: Squared L2 norm (1D sum reduction).
+        S: Sparsity Index / Inverse Participation Ratio.
     """
     n_el = p.shape[-1]
-    b = (1 + math.sqrt(1 + 8 * n_el)) / 2
+    b = (1.0 + math.sqrt(1.0 + 8.0 * n_el)) / 2.0
+    scale_factor = getattr(p, '_oft_scale_factor', 1.0)
 
-    # Calculate the squared L2 norm for each block independently.
-    p_norm_sq = torch.linalg.vector_norm(p, ord=2, dim=-1).square_()
+    # Element-wise squared magnitude
+    p_sq = p.div(scale_factor).square_()
 
-    # The expected shrinkage of the Cayley derivative is roughly (1 + lambda^2)^-1, 
-    # where lambda^2 is the average eigenvalue of -Q^2. 
-    # Since Tr(-Q^2) = 2 * ||p||_2^2, the average eigenvalue is 2 * ||p||_2^2 / b.
-    cayley_correction = 1.0 + (2.0 * p_norm_sq / b)
+    # Structural invariants (1D sum reductions)
+    p_norm_sq = p_sq.sum(dim=-1, keepdim=True)
+    p_quad = p_sq.square().sum(dim=-1, keepdim=True)
 
-    # Reshape correction to broadcast against the update tensor (shape (k, 1))
-    cayley_correction = cayley_correction.unsqueeze(-1)
+    # Sparsity Index / Inverse Participation Ratio
+    # S = 1.0 -> Single rank-2 rotation (Sparse)
+    # S <= 2/b -> Multiple disjoint rotations / Uniform (Dense)
+    S = p_quad.div_(p_norm_sq.square().clamp_min_(1e-12))
 
-    return cayley_correction
+    return (n_el, b, p_sq, p_norm_sq, S)
+
+@torch.no_grad()
+def get_oft_magnitude_correction(p: torch.Tensor, oft_vars: tuple) -> torch.Tensor:
+    """
+    Approximates the magnitude correction of exact Riemannian preconditioning (M @ G @ M).
+    Leverages the 4th moment invariant of skew-symmetric matrices to construct a Sparsity Index (S).
+    Dynamically routes the correction between purely isotropic (for dense distributed rotations)
+    and purely anisotropic (for sparse singular rotations).
+    """
+    n_el, b, p_sq, p_norm_sq, S = oft_vars
+
+    # Dynamic Blending Factor (w)
+    # Extracts the exact mixture of sparse vs dense topologies
+    S_dense = 2.0 / b
+    w = S.sub(S_dense).div_(max(1.0 - S_dense, 1e-6)).clamp_(min=0.0, max=1.0)
+
+    # Adaptive Coefficients
+    # A solves for the local optimal scale.
+    # B mathematically guarantees the metric volume trace is strictly preserved: sum(Correction) == (b - 1) * ||p||^2
+    A_max = (b - 1.0) / (b + 1.0)
+    A = w.mul_(A_max) 
+    B = A.neg().add_(b - 1.0).div_(n_el)
+
+    # Apply dynamic Riemannian Correction
+    # Evaluates: A * p_sq + B * ||p||^2 + 1.0
+    base_correction = p_sq.mul_(A).add_(p_norm_sq.mul(B)).add_(1.0)
+
+    return base_correction
+
+def get_geodesic_decay_scaler(p: torch.Tensor, oft_vars: tuple) -> torch.Tensor:
+    """
+    Computes the scalar multiplier for geodesic weight decay.
+    Near identity (‖Q‖ ≈ 0), this returns 1.0 (standard L2 decay). 
+    Far from identity, it decays towards 0, respecting the bounded 
+    geometry of SO(n) so large rotations aren't infinitely penalized.
+    Dynamically maps the 4th-moment Sparsity Index to interpolate between
+    dense distributed rotations and single sparse rotations.
+    """
+    n_el, b, _, p_norm_sq, S = oft_vars
+
+    # Map Sparsity to a normalized weight (w in [0, 1])
+    S_min = 1.0 / n_el
+    w = S.sub_(S_min).div_(max(1.0 - S_min, 1e-6)).clamp_(min=0.0, max=1.0)
+
+    # Estimate Effective Active Rotations (K_eff)
+    # If Dense (w=0) -> b/2 rotations (matches standard isotropic bounds)
+    # If Sparse (w=1) -> 1 dominant rotation plane
+    max_rotations = b / 2.0
+    K_eff = w.mul_(1.0 - max_rotations).add_(max_rotations)
+
+    # Isolate the Average Squared Eigenvalue of the active rotations
+    x_sq = p_norm_sq.div_(K_eff)
+    x = x_sq.sqrt().clamp_min_(1e-8)
+
+    # Calculate Riemannian penalty scaler
+    # Geodesic Gradient / Euclidean Gradient ratio: d(theta)/d(lambda) / d(L2)/d(lambda)
+    decay_scaler = torch.atan(x) / (x * (1.0 + x_sq))
+
+    return decay_scaler
+
 
 @torch.no_grad()
 def spectral_normalization(
