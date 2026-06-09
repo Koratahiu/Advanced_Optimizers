@@ -457,12 +457,8 @@ class AdamW_adv(torch.optim.Optimizer):
             del denom, random_int_state_tensor
 
         update_scaling = step_size * A if group['use_atan2'] else step_size
-        if group.get('spectral_normalization', False):
-            update = scale_update(p, update, update_scaling, state=state)
-        else:
-            update.mul_(update_scaling)
 
-        param_update.apply_parameter_update(self, p, group, update, group['lr'], random_int_tensor=random_int_tensor, wd_scaler=wd_scaler)
+        param_update.apply_parameter_update(self, p, group, update, group['lr'], step_size=update_scaling, random_int_tensor=random_int_tensor, wd_scaler=wd_scaler)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)

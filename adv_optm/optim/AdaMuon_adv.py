@@ -646,17 +646,11 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 del denom
 
         step_scale = lr * A if group['use_atan2'] and not group['normuon_variant'] else lr
-
-        if group.get('spectral_normalization', False):
-            # Spectral Normalization
-            spectral_normalization(update, state['spectral_u'], state['spectral_v'], step_scale)
-        else:
-            # RMS-aligned rescaling
-            rms_adjustment(update, group['rms_rescaling'], step_scale)
+        step_scale = step_scale * rms_adjustment(update, group['rms_rescaling']) if not group.get('spectral_normalization', False) else step_scale
 
         update = update.reshape(original_shape)
 
-        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
+        param_update.apply_parameter_update(self, p, group, update, lr, step_size=step_scale, random_int_tensor=random_int_tensor)
 
     @torch.no_grad()
     def step(self, closure=None):

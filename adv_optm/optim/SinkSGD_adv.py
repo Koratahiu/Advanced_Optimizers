@@ -195,13 +195,12 @@ class SinkSGD_adv(torch.optim.Optimizer):
         state = self.state[p]
         self.__init_state(p, group)
 
-        step_size = group['lr']
 
         random_int_tensor = None
         random_int_state_tensor = None
 
         if group.get('compiled_optimizer', False):
-            step_size = torch.as_tensor(step_size)
+            lr = torch.as_tensor(group['lr'])
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 random_int_tensor = param_update._get_random_int_for_sr(p)
                 random_int_state_tensor = random_int_tensor
@@ -211,13 +210,14 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 random_int_state_tensor = param_update._get_random_int_for_8bit_sr(p)
             step_param_fn = self._compiled_step_parameter
         else:
+            lr = group['lr']
             step_param_fn = self._step_parameter
 
-        step_param_fn(p, grad, state, group, step_size, random_int_tensor, random_int_state_tensor)
+        step_param_fn(p, grad, state, group, lr, random_int_tensor, random_int_state_tensor)
 
         state['step'] += 1
 
-    def _step_parameter(self, p, grad, state, group, step_size, random_int_tensor, random_int_state_tensor):
+    def _step_parameter(self, p, grad, state, group, lr, random_int_tensor, random_int_state_tensor):
         grad = upcast_grad_for_precision(grad, state, group['state_precision'])
         is_vector = grad.ndim < 2 or getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False)
         sinkhorn_iterations = group['sinkhorn_iterations']
@@ -350,15 +350,9 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 cwd_target = get_signsgd_wd_target(p.sub(anchor), denom=denom)
                 del anchor
 
-        update_scaling = step_size
-        if group.get('spectral_normalization', False):
-            update = scale_update(p, update, update_scaling, state=state)
-        else:
-            if snr_cond:
-                update_scaling = update_scaling * (4/math.pi)
-            update.mul_(update_scaling)
+        update_scaling = lr * (4/math.pi) if snr_cond else lr
 
-        param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor, wd_scaler=wd_scaler, wd_target=wd_target, cwd_target=cwd_target)
+        param_update.apply_parameter_update(self, p, group, update, lr, step_size=update_scaling, random_int_tensor=random_int_tensor, wd_scaler=wd_scaler, wd_target=wd_target, cwd_target=cwd_target)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)

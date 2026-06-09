@@ -270,12 +270,7 @@ class Lion_adv(torch.optim.Optimizer):
             else:
                 update = _get_lion_k_update(update, kappa_p)
 
-        if group.get('spectral_normalization', False):
-            update = scale_update(p, update, lr, state=state)
-        else:
-            update.mul_(lr)
-
-        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
+        param_update.apply_parameter_update(self, p, group, update, lr, step_size=lr, random_int_tensor=random_int_tensor)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)

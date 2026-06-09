@@ -543,16 +543,11 @@ class Muon_adv(torch.optim.Optimizer):
                 if group['normuon_variant']:
                     normuon_update(update, state['normuon_v'], group['beta2_normuon'], group['normuon_eps'])
 
-            if group.get('spectral_normalization', False):
-                # Spectral Normalization
-                spectral_normalization(update, state['spectral_u'], state['spectral_v'], lr)
-            else:
-                # RMS-aligned rescaling
-                rms_adjustment(update, group['rms_rescaling'], lr)
+        step_scale = lr * rms_adjustment(update, group['rms_rescaling']) if not group.get('spectral_normalization', False) else lr
 
-            update = update.reshape(original_shape)
+        update = update.reshape(original_shape)
 
-        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
+        param_update.apply_parameter_update(self, p, group, update, lr, step_size=step_scale, random_int_tensor=random_int_tensor)
 
     @torch.no_grad()
     def step(self, closure=None):

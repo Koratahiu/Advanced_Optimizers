@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from typing import Dict, Any
 
-from .scaled_optm import adjust_wds
+from .scaled_optm import adjust_wds, scale_update
 from .centered_decay import dequantize_anchor
 
 _generators: Dict[torch.device, torch.Generator] = {}
@@ -80,6 +80,7 @@ def apply_parameter_update(
     group: Dict[str, Any],
     update: Tensor,
     lr: float | Tensor,
+    step_size: float | Tensor,
     wd: float | None = None,
     random_int_tensor: Tensor | None = None,
     decoupled: bool = False,
@@ -102,6 +103,11 @@ def apply_parameter_update(
         decoupled: Whenever to use the true decoupled weight decay.
         wd_scaler: A multiplier/tensor to scale the calculated wd/cwd magnitude (e.g. for Fisher Adam WD).
     """
+    if group.get('spectral_normalization', False):
+        update = scale_update(p, update, lr, state=state)
+    else:
+        update.mul_(step_size)
+
     wd = group["weight_decay"] if wd is None else wd
     cwd = group.get("centered_wd", 0.0)
     wd, cwd = adjust_wds(wd, cwd, p)

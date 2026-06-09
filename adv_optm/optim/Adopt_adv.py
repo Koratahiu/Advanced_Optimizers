@@ -450,13 +450,8 @@ class Adopt_adv(torch.optim.Optimizer):
 
         update_scaling = lr * A if self.use_atan2 else lr
 
-        if group.get('spectral_normalization', False):
-            update = scale_update(p, update, update_scaling, state=state)
-        else:
-            update.mul_(update_scaling)
-
         # Parameter Update
-        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor, wd_scaler=wd_scaler)
+        param_update.apply_parameter_update(self, p, group, update, lr, update_scaling, random_int_tensor=random_int_tensor, wd_scaler=wd_scaler)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)

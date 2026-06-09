@@ -348,13 +348,9 @@ class SignSGD_adv(torch.optim.Optimizer):
                 cwd_target = get_signsgd_wd_target(p.sub(anchor), denom=denom, stochastic_sign=sso, noise=random_noise_tensor, is_vector=is_vector)
                 del anchor
 
-        if group.get('spectral_normalization', False):
-            update = scale_update(p, update, lr, state=state)
-        else:
-            update_scaling = lr * A if snr_cond else lr
-            update.mul_(update_scaling)
+        update_scaling = lr * A if snr_cond else lr
 
-        param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor, wd_target=wd_target, cwd_target=cwd_target)
+        param_update.apply_parameter_update(self, p, group, update, lr, step_size=update_scaling, random_int_tensor=random_int_tensor, wd_target=wd_target, cwd_target=cwd_target)
 
     def compile(self, *args, **kwargs):
         self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
