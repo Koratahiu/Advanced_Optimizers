@@ -78,24 +78,6 @@ def adjust_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
         # Centered WD safely regularizes the delta without collapsing base feature variance.
         return wd, cwd
 
-
-def scale_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
-    """
-    Scales standard weight decay and centered weight decay based on the parameter's
-    shape and type to maintain effective regularization strength.
-    """
-    is_lora = getattr(p, '_is_lora_A', False) or getattr(p, '_is_lora_B', False)
-    if is_lora:
-        return wd, cwd
-
-    if p.ndim >= 2:
-        fan_in = p.numel() // p.shape[0]
-        return wd / fan_in, cwd / fan_in
-
-    # 1D tensors (like DoRA scale and Biases)
-    return wd, cwd
-
-
 def is_spectral(p: torch.Tensor) -> bool:
     """Determines if a parameter should undergo spectral normalization updates."""
     if p.ndim < 2:
