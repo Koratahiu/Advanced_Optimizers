@@ -4,12 +4,39 @@ from . import param_update
 
 import math
 
+_OFT_INDICES_CACHE = {}
+_OFT_IDENTITY_CACHE = {}
+
+def get_cached_structural_tensors(b: int, dtype: torch.dtype, device: torch.device):
+    """
+    Retrieves or creates structural tensors (indices and Identity) for OFT exact geometry.
+    Caches them globally to prevent redundant memory allocation across thousands of layers.
+    """
+    global _OFT_INDICES_CACHE, _OFT_IDENTITY_CACHE
+
+    # Cache for Indices (Dtype independent, only depends on block size and device)
+    idx_key = (b, device)
+    if idx_key not in _OFT_INDICES_CACHE:
+        rows, cols = torch.triu_indices(b, b, 1, device=device)
+        _OFT_INDICES_CACHE[idx_key] = (rows, cols)
+    else:
+        rows, cols = _OFT_INDICES_CACHE[idx_key]
+
+    # Cache for Identity Matrix (Depends on block size, dtype, and device)
+    id_key = (b, dtype, device)
+    if id_key not in _OFT_IDENTITY_CACHE:
+        I = torch.eye(b, dtype=dtype, device=device).unsqueeze(0)
+        _OFT_IDENTITY_CACHE[id_key] = I
+    else:
+        I = _OFT_IDENTITY_CACHE[id_key]
+
+    return rows, cols, I
+
 def scale_update(
     p: torch.Tensor,
     update: torch.Tensor,
     lr: float,
     state: dict | None = None,
-    depth: int = 1,
 ) -> torch.Tensor:
     """
     Applies adaptive scaling to the parameter update based on the parameter's
@@ -35,7 +62,8 @@ def scale_update(
     # Normalise by max per-block row norm so that
     #   ‖ΔR_block‖_spec = max_i ‖ΔRᵢ‖_spec ≤ 2 · max_i ‖Δθᵢ‖₂ ≤ target_scale · lr
     if is_oft:
-        return max_row_norm_oft_normalization(p, update, lr)
+        update = max_row_norm_oft_normalization(p, update, lr)
+        return apply_riemannian_preconditioning(p, update)
 
     # LoRA Factors or Full Finetuning weights
     # Scales update to maintain consistent spectral norm across different layer sizes and ranks.
@@ -79,46 +107,31 @@ def adjust_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
         return wd, cwd
 
 
-def scale_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
-    """
-    Scales standard weight decay and centered weight decay based on the parameter's
-    shape and type to maintain effective regularization strength.
-    """
-    is_lora = getattr(p, '_is_lora_A', False) or getattr(p, '_is_lora_B', False)
-    if is_lora:
-        return wd, cwd
-
-    if p.ndim >= 2:
-        fan_in = p.numel() // p.shape[0]
-        return wd / fan_in, cwd / fan_in
-
-    # 1D tensors (like DoRA scale and Biases)
-    return wd, cwd
-
-
 def is_spectral(p: torch.Tensor) -> bool:
     """Determines if a parameter should undergo spectral normalization updates."""
     if p.ndim < 2:
         return False
-    if getattr(p, '_is_oft', False) or getattr(p, '_is_dora_scale', False)or getattr(p, 'is_vector', False):
+    if getattr(p, '_is_dora_scale', False)or getattr(p, 'is_vector', False):
         return False
     return getattr(p, 'is_hidden', True)
 
 @torch.no_grad()
 def init_spectral_norm(state: dict, p: torch.Tensor):
     """Initializes the singular vectors 'u' and 'v' for the Power Iteration method."""
-    gen = param_update.get_generator(p.device)
-
-    d_out = p.shape[0]
-    d_in = p.numel() // d_out
-
-    # Initialize v (Right singular vector)
-    v = torch.randn(d_in, device=p.device, dtype=p.dtype, generator=gen)
-    state['spectral_v'] = v.div_(v.norm().add_(1e-12))
-
-    # Initialize u (Left singular vector)
-    u = torch.randn(d_out, device=p.device, dtype=p.dtype, generator=gen)
-    state['spectral_u'] = u.div_(u.norm().add_(1e-12))
+    if getattr(p, '_is_oft', False):
+        n_el = p.shape[-1]
+        b = int((1.0 + math.sqrt(1.0 + 8.0 * n_el)) / 2.0)
+        _, _, _ = get_cached_structural_tensors(b, p.dtype, p.device)
+    else:
+        gen = param_update.get_generator(p.device)
+        d_out = p.shape[0]
+        d_in = p.numel() // d_out
+        # Initialize v (Right singular vector)
+        v = torch.randn(d_in, device=p.device, dtype=p.dtype, generator=gen)
+        state['spectral_v'] = v.div_(v.norm().add_(1e-12))
+        # Initialize u (Left singular vector)
+        u = torch.randn(d_out, device=p.device, dtype=p.dtype, generator=gen)
+        state['spectral_u'] = u.div_(u.norm().add_(1e-12))
 
 
 @torch.no_grad()
@@ -163,8 +176,11 @@ def max_row_norm_oft_normalization(
 
     Result: Var[Δyⱼ] ≤ (target_scale · lr)² = O(1) for every block configuration.
     """
-    # keeps the effective rotation step ‖ΔR_block‖_spec ≤ lr.
-    target_scale = 0.5 
+    scale_factor = getattr(p, '_oft_scale_factor', 1.0)
+
+    # Base target scale: 0.5 for Cayley (R ≈ I + 2Q)
+    # Compensate for the forward pass scaling so the effective rotation step is bounded by `lr`
+    target_scale = 0.5 * scale_factor 
 
     # Row norms: shape (k,) - one per block
     row_norms = torch.linalg.vector_norm(update, ord=2, dim=-1)
@@ -172,32 +188,57 @@ def max_row_norm_oft_normalization(
     norm_lb = 1.0 / math.sqrt(update.shape[1])
     max_norm = row_norms.max().clamp_min(norm_lb)
 
-    # Get the magnitude correction factor
-    cayley_correction = get_oft_magnitude_correction(p)
-
-    return update.mul_(lr * cayley_correction *  target_scale / max_norm)
+    return update.mul_(lr * target_scale / max_norm)
 
 @torch.no_grad()
-def get_oft_magnitude_correction(p: torch.Tensor) -> torch.Tensor:
+def apply_riemannian_preconditioning(
+    p: torch.Tensor,
+    update: torch.Tensor
+) -> torch.Tensor:
     """
-    Approximates the magnitude correction of exact Riemannian preconditioning (M @ G @ M).
-    Neutralizes the derivative shrinkage of the Cayley transform using a scalar multiplier.
+    Uses True Matrix Preconditioning: M @ G @ M where M = (I - Q^2),
+    and Q is the skew-symmetric matrix form of parameters p.
+    Neutralizes the derivative shrinkage of the Cayley transform.
     """
     n_el = p.shape[-1]
-    b = (1 + math.sqrt(1 + 8 * n_el)) / 2
+    block_size = int((1 + math.sqrt(1 + 8 * n_el)) / 2)
+    device, dtype = p.device, p.dtype
+    rows, cols, I = get_cached_structural_tensors(block_size, dtype, device)
 
-    # Calculate the squared L2 norm for each block independently.
-    p_norm_sq = torch.linalg.vector_norm(p, ord=2, dim=-1).square_()
+    # Flatten any prepended batch dimensions for processing
+    orig_shape = p.shape
 
-    # The expected shrinkage of the Cayley derivative is roughly (1 + lambda^2)^-1, 
-    # where lambda^2 is the average eigenvalue of -Q^2. 
-    # Since Tr(-Q^2) = 2 * ||p||_2^2, the average eigenvalue is 2 * ||p||_2^2 / b.
-    cayley_correction = 1.0 + (2.0 * p_norm_sq / b)
+    # Align the scale of p with the forward pass
+    scale_factor = getattr(p, '_oft_scale_factor', 1.0)
+    p_flat = p.view(-1, n_el) / scale_factor
 
-    # Reshape correction to broadcast against the update tensor (shape (k, 1))
-    cayley_correction = cayley_correction.unsqueeze(-1)
+    update_flat = update.view(-1, n_el)
+    batch_size = p_flat.shape[0]
 
-    return cayley_correction
+    # Initialize matrices
+    Q = torch.zeros(batch_size, block_size, block_size, device=device, dtype=dtype)
+    G = torch.zeros(batch_size, block_size, block_size, device=device, dtype=dtype)
+    batch_idx = torch.arange(batch_size, device=device)[:, None]
+
+    # Construct skew-symmetric parameter matrix Q
+    Q = Q.index_put((batch_idx, rows, cols), p_flat)
+    Q = Q - Q.transpose(-2, -1)
+
+    # Construct skew-symmetric gradient matrix G
+    G = G.index_put((batch_idx, rows, cols), update_flat)
+    G = G - G.transpose(-2, -1)
+
+    # Compute True Matrix Preconditioner M = I - Q^2
+    M = I - torch.bmm(Q, Q)
+
+    # Apply exact preconditioning: G_prec = M @ G @ M
+    G_prec = torch.bmm(torch.bmm(M, G), M)
+
+    # Extract the preconditioned upper-triangular elements
+    update_prec_flat = G_prec[batch_idx, rows, cols]
+
+    return update_prec_flat.view(orig_shape)
+
 
 @torch.no_grad()
 def spectral_normalization(
