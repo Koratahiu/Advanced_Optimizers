@@ -59,11 +59,9 @@ def scale_update(
         return max_abs_normalization(update, dim=None, lr=lr)
 
     # OFT Block Parameters: shape (k, C(b,2))
-    # Normalise by max per-block row norm so that
-    #   ‖ΔR_block‖_spec = max_i ‖ΔRᵢ‖_spec ≤ 2 · max_i ‖Δθᵢ‖₂ ≤ target_scale · lr
+    # Direct spectral normalization on the skew-symmetric blocks, followed by Riemannian preconditioning.
     if is_oft:
-        update = max_row_norm_oft_normalization(p, update, lr)
-        return apply_riemannian_preconditioning(p, update)
+        return apply_spectral_riemannian_oft(p, update, lr, state)
 
     # LoRA Factors or Full Finetuning weights
     # Scales update to maintain consistent spectral norm across different layer sizes and ranks.
@@ -109,9 +107,11 @@ def adjust_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
 
 def is_spectral(p: torch.Tensor) -> bool:
     """Determines if a parameter should undergo spectral normalization updates."""
+    if getattr(p, '_is_oft', False):
+        return True
     if p.ndim < 2:
         return False
-    if getattr(p, '_is_dora_scale', False)or getattr(p, 'is_vector', False):
+    if getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False):
         return False
     return getattr(p, 'is_hidden', True)
 
@@ -122,6 +122,14 @@ def init_spectral_norm(state: dict, p: torch.Tensor):
         n_el = p.shape[-1]
         b = int((1.0 + math.sqrt(1.0 + 8.0 * n_el)) / 2.0)
         _, _, _ = get_cached_structural_tensors(b, p.dtype, p.device)
+        gen = param_update.get_generator(p.device)
+        batch_size = p.numel() // n_el
+        # Initialize v (Right singular vector)
+        v = torch.randn(batch_size, b, device=p.device, dtype=p.dtype, generator=gen)
+        state['spectral_v'] = v.div_(v.norm(dim=1, keepdim=True).add_(1e-12))
+        # Initialize u (Left singular vector)
+        u = torch.randn(batch_size, b, device=p.device, dtype=p.dtype, generator=gen)
+        state['spectral_u'] = u.div_(u.norm(dim=1, keepdim=True).add_(1e-12))
     else:
         gen = param_update.get_generator(p.device)
         d_out = p.shape[0]
@@ -159,45 +167,17 @@ def max_abs_normalization(update: torch.Tensor, dim: int | None, lr: float) -> t
     norm = torch.linalg.vector_norm(update, ord=float('inf'), dim=dim, keepdim=True).clamp_min(1e-12)
     return update.mul_(lr / norm)
 
+
 @torch.no_grad()
-def max_row_norm_oft_normalization(
+def apply_spectral_riemannian_oft(
     p: torch.Tensor,
     update: torch.Tensor,
     lr: float,
+    state: dict
 ) -> torch.Tensor:
     """
-    Normalizes OFT parameter updates by the maximum per-block (row) L2 norm.
-
-    For OFT params of shape (k, C(b,2)), each row Δθᵢ maps to a skew-symmetric
-    matrix ΔQᵢ with ‖ΔQᵢ‖_spec ≤ ‖Δθᵢ‖₂. Via the Cayley linearization
-    ΔRᵢ ≈ 2ΔQᵢ, bounding max_i ‖Δθᵢ‖₂ directly controls:
-
-        ‖ΔR_block‖_spec = max_i ‖ΔRᵢ‖_spec ≤ 2 · max_i ‖Δθᵢ‖₂
-
-    Result: Var[Δyⱼ] ≤ (target_scale · lr)² = O(1) for every block configuration.
-    """
-    scale_factor = getattr(p, '_oft_scale_factor', 1.0)
-
-    # Base target scale: 0.5 for Cayley (R ≈ I + 2Q)
-    # Compensate for the forward pass scaling so the effective rotation step is bounded by `lr`
-    target_scale = 0.5 * scale_factor 
-
-    # Row norms: shape (k,) - one per block
-    row_norms = torch.linalg.vector_norm(update, ord=2, dim=-1)
-    # Stability floor: equivalent to a single-element vector norm lower bound
-    norm_lb = 1.0 / math.sqrt(update.shape[1])
-    max_norm = row_norms.max().clamp_min(norm_lb)
-
-    return update.mul_(lr * target_scale / max_norm)
-
-@torch.no_grad()
-def apply_riemannian_preconditioning(
-    p: torch.Tensor,
-    update: torch.Tensor
-) -> torch.Tensor:
-    """
-    Uses True Matrix Preconditioning: M @ G @ M where M = (I - Q^2),
-    and Q is the skew-symmetric matrix form of parameters p.
+    Applies Spectral Normalization directly on the skew-symmetric gradient,
+    then uses True Matrix Preconditioning: M @ G @ M where M = (I - Q^2).
     Neutralizes the derivative shrinkage of the Cayley transform.
     """
     n_el = p.shape[-1]
@@ -228,6 +208,38 @@ def apply_riemannian_preconditioning(
     G = G.index_put((batch_idx, rows, cols), update_flat)
     G = G - G.transpose(-2, -1)
 
+    # Spectral Normalization on G
+    u_state = state['spectral_u'].unsqueeze(-1).to(dtype)
+    v_state = state['spectral_v'].unsqueeze(-1).to(dtype)
+    # Power Iteration step to estimate the largest singular value (sigma)
+    # Update v (Right Singular Vector)
+    v_raw = torch.bmm(G.mT, u_state)
+    v_norm = torch.linalg.vector_norm(v_raw, dim=1, keepdim=True)
+    candidate_v = v_raw / v_norm.clamp_min(1e-8)
+    next_v = torch.where(v_norm >= 1e-6, candidate_v, v_state)
+    # Update u (Left Singular Vector)
+    u_raw = torch.bmm(G, next_v)
+    u_norm = torch.linalg.vector_norm(u_raw, dim=1, keepdim=True)
+    candidate_u = u_raw / u_norm.clamp_min(1e-8)
+    next_u = torch.where(u_norm >= 1e-6, candidate_u, u_state)
+    state['spectral_v'].copy_(next_v.squeeze(-1))
+    state['spectral_u'].copy_(next_u.squeeze(-1))
+
+    # Estimate sigma (The spectral norm) for each block
+    sigma = torch.sum(next_u * u_raw, dim=1, keepdim=True)
+
+    # We constrain the spectral norm of the entire block-diagonal update matrix
+    # which is the maximum of the spectral norms of its blocks.
+    max_sigma = sigma.max()
+
+    target_scale = 0.5 * scale_factor
+    spectral_eps = 1.0 / (2.0 * math.sqrt(block_size))
+
+    # Rescale G
+    scale = lr * (target_scale / max_sigma.clamp_min(spectral_eps))
+    G = G * scale
+
+    # Apply Riemannian Preconditioning
     # Compute True Matrix Preconditioner M = I - Q^2
     M = I - torch.bmm(Q, Q)
 
