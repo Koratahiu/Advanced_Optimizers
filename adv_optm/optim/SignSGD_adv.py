@@ -121,6 +121,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             centered_wd_mode= centered_wd_mode,
             state_precision=state_precision,
             nnmf_factor=nnmf_factor,
+            compiled_optimizer=compiled_optimizer,
         )
         self.stochastic_rounding = stochastic_rounding
         self._init_lr = lr if lr > 0 else 1

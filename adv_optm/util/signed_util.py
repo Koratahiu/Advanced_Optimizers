@@ -37,6 +37,10 @@ def get_signsgd_wd_target(
     Computes a signed weight decay target.
     """
     if stochastic_sign:
+        # Uncorrelated "new" uniform noise in [-1, 1) without calling RNG again.
+        # This uses the chaotic Tent Map: f(x) = 2|x| - 1.
+        if noise is not None:
+            noise.abs_().mul_(2.0).sub_(1.0)
         wd_target = apply_stochastic_sign_(p.clone(), noise, is_vector)
     else:
         wd_target = torch.sign(p)
