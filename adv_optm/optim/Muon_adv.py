@@ -81,7 +81,6 @@ class Muon_adv(torch.optim.Optimizer):
             'float8': Uses torch.float8_e4m3fn for a balance of precision and memory.
             'int8': Uses 8-bit block-wise quantization (block size 128).
             'int4': Uses 4-bit block-wise quantization (block size 32).
-        n_layers (int): The depth of the network (L). Required for optimal epsilon scaling. (default: 1)
         spectral_normalization (bool): Enable explicit spectral normalization using power iteration. (default: False)
         --- Auxiliary AdamW_adv Parameters (used for 'adam' groups) ---
         adam_betas (tuple[float, float]): Betas for the AdamW optimizer part.
@@ -146,7 +145,6 @@ class Muon_adv(torch.optim.Optimizer):
         approx_mars: bool = False,
         mars_gamma: float = 0.025,
         # Spectral Normalization
-        n_layers: int = 1,
         spectral_normalization: bool = False,
         # Centered WD
         centered_wd: float = 0.0,
@@ -220,7 +218,7 @@ class Muon_adv(torch.optim.Optimizer):
             # MARS-M
             "approx_mars": approx_mars, "mars_gamma": mars_gamma,
             # Spectral Normalization
-            "n_layers": n_layers, "spectral_normalization": spectral_normalization,
+            "spectral_normalization": spectral_normalization,
             # Centered WD
             "centered_wd": centered_wd,
             "centered_wd_mode": centered_wd_mode,
