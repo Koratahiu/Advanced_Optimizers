@@ -146,6 +146,8 @@ class Muon_adv(torch.optim.Optimizer):
         mars_gamma: float = 0.025,
         # Spectral Normalization
         spectral_normalization: bool = False,
+        # Orthogonalize the weights (Matrix Sign - MSign) every x steps
+        MSign_interval: int | None = None,
         # Centered WD
         centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
@@ -218,7 +220,7 @@ class Muon_adv(torch.optim.Optimizer):
             # MARS-M
             "approx_mars": approx_mars, "mars_gamma": mars_gamma,
             # Spectral Normalization
-            "spectral_normalization": spectral_normalization,
+            "spectral_normalization": spectral_normalization, "MSign_interval": MSign_interval,
             # Centered WD
             "centered_wd": centered_wd,
             "centered_wd_mode": centered_wd_mode,

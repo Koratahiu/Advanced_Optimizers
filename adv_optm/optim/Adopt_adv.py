@@ -122,6 +122,8 @@ class Adopt_adv(torch.optim.Optimizer):
         layer_key_fn: Optional[Callable] = None,
         # Spectral Normed Optimizer
         spectral_normalization: bool = False,
+        # Orthogonalize the weights (Matrix Sign - MSign) every x steps
+        MSign_interval: int | None = None,
         # Centered WD
         centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
@@ -162,7 +164,7 @@ class Adopt_adv(torch.optim.Optimizer):
             "nesterov": nesterov, "nesterov_coef": nesterov_coef,
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
-            "spectral_normalization": spectral_normalization,
+            "spectral_normalization": spectral_normalization, "MSign_interval": MSign_interval,
             "centered_wd": centered_wd,
             "centered_wd_mode": centered_wd_mode,
             "state_precision": state_precision,

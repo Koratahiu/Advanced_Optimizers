@@ -66,6 +66,7 @@ def _init_auxadam_state(self, p, group):
     _init_anchor(p, state, group)
     _init_fisher_wd_scaler(group, state, p)
 
+    group["MSign_interval"] = None
 
 @torch.no_grad()
 def _adam_step_parameter(self, p, grad, state, group, beta1_adam, beta2_adam, sqrt_bias_correction2, step_size, random_int_tensor, random_int_state_tensor=None):

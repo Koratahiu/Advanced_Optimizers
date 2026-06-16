@@ -4,6 +4,8 @@ from torch.optim import Optimizer
 
 import torch.nn.functional as F
 
+import math
+
 from typing import Dict, Any
 
 from .scaled_optm import adjust_wds
@@ -120,6 +122,11 @@ def apply_parameter_update(
 
     state = self.state[p]
 
+    ortho_interval = group.get('MSign_interval', None)
+    if ortho_interval is not None:
+        is_vector = p.ndim < 2 or getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False)
+        is_ortho_step = (state['step'] % ortho_interval == 0) and not is_vector
+
     # Compute full update in float32 if using bfloat16 with stochastic rounding
     if p.dtype == torch.bfloat16 and self.stochastic_rounding:
         p_fp32 = p.float()
@@ -134,6 +141,9 @@ def apply_parameter_update(
 
         # Apply main update
         p_fp32.add_(-update_fp32)
+
+        if is_ortho_step:
+            msign_ortho_precond_(p_fp32)
 
         # Single stochastic rounding at the end
         if random_int_tensor is not None:
@@ -152,6 +162,9 @@ def apply_parameter_update(
 
         # Apply main update
         p.add_(-update)
+
+        if is_ortho_step:
+            msign_ortho_precond_(p)
 
     del update
 
@@ -451,3 +464,77 @@ def _get_random_noise_for_low_rank_ortho(source: torch.Tensor, ortho_rank: int) 
         dtype=source_flat.dtype,
         generator=generator
         )
+
+@torch.no_grad()
+def _cans_newton_schulz_iteration(
+    G: torch.Tensor,
+    steps: int = 15,
+    eps: float = 1e-7,
+    cns_a_bound: float | None = None,
+) -> torch.Tensor:
+    """
+    Chebyshev-Optimized Newton-Schulz (CANS).
+    """
+    X = G
+
+    # Transpose if needed
+    transposed = X.size(-2) > X.size(-1)
+    if transposed:
+        X = X.mT
+
+    # Normalize spectral norm to at most 1
+    X.div_(X.norm(dim=(-2, -1), keepdim=True).clamp_min_(eps))
+
+    if cns_a_bound is None:
+        M = G.shape[-2]
+        N = G.shape[-1]
+        # baseline L2 norm bound (for square matrices)
+        baseline_bound = 1.0 / math.sqrt(M * N)
+        # Marchenko-Pastur theoretical minimum (for rectangular matrices)
+        mp_bound = abs(1.0 / math.sqrt(N) - 1.0 / math.sqrt(M))
+        # The optimal bound is safely the maximum of the two
+        cns_a_bound = max(baseline_bound, mp_bound)
+
+    lower_bound = cns_a_bound
+    upper_bound = 1.0
+    for _ in range(steps):
+        lb, ub = lower_bound, upper_bound
+        lb_ub = lb * ub
+        # Calculate Mean Square Error term
+        e_sq = (lb**2 + lb_ub + ub**2) / 3.0
+        # Calculate components for alpha and bounds update
+        K = 2.0 * e_sq**1.5
+        L = lb_ub * (lb + ub)
+        denom = K + L
+        alpha = 6.0 / denom
+        c1 = alpha * e_sq
+        c3 = -alpha / 3.0
+        # Apply the 3rd-order Newton-Schulz update
+        A = X @ X.mT
+        X = c1 * X + c3 * (A @ X)
+        # Update the singular value bounds for the next iteration based on the error
+        eps_val = (K - L) / denom
+        lower_bound, upper_bound = 1.0 - eps_val, 1.0 + eps_val
+
+    # Transpose back if necessary
+    if transposed:
+        X = X.mT
+
+    return X
+
+def msign_ortho_precond_(p):
+    # Record the original Frobenius norm of the weight matrix
+    orig_norm = torch.linalg.vector_norm(p, ord=2).clamp_min_(1e-12)
+    # Reshape parameter to 2D for the matrix operation
+    p_2d = p.view(p.shape[0], -1)
+    # Approximate the matrix sign UV^T using CA Newton-Schulz
+    p_sign = _cans_newton_schulz_iteration(
+        p_2d,
+        steps=15,
+        eps=1e-7,
+        cns_a_bound=None, # auto
+    )
+    # Calculate the Frobenius norm of the sign-projected matrix
+    sign_norm = torch.linalg.vector_norm(p_sign, ord=2).clamp_min_(1e-12)
+    # Restore original Frobenius norm scale and write back in-place
+    p.copy_(p_sign.mul_(orig_norm / sign_norm).view_as(p))

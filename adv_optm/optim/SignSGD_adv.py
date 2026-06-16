@@ -79,6 +79,8 @@ class SignSGD_adv(torch.optim.Optimizer):
         state_precision: str = "auto", # 'fp32', 'factored', 'bf16_sr', 'int8_sr'.
         # Spectral Normed Optimizer
         spectral_normalization: bool = False,
+        # Orthogonalize the weights (Matrix Sign - MSign) every x steps
+        MSign_interval: int | None = None,
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
@@ -117,6 +119,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             normed_momentum=normed_momentum,
             snr_cond=snr_cond,
             spectral_normalization=spectral_normalization,
+            MSign_interval=MSign_interval,
             centered_wd= centered_wd,
             centered_wd_mode= centered_wd_mode,
             state_precision=state_precision,

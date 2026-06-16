@@ -78,6 +78,8 @@ class Lion_adv(torch.optim.Optimizer):
         centered_wd_mode: str = 'float8',
         # Spectral Normed Optimizer
         spectral_normalization: bool = False,
+        # Orthogonalize the weights (Matrix Sign - MSign) every x steps
+        MSign_interval: int | None = None,
         # SMMF factorization
         nnmf_factor: bool = False,
         vector_reshape: bool = False,
@@ -102,6 +104,7 @@ class Lion_adv(torch.optim.Optimizer):
             auto_kappa_p=auto_kappa_p,
             stochastic_sign=stochastic_sign,
             spectral_normalization=spectral_normalization,
+            MSign_interval=MSign_interval,
             nnmf_factor=nnmf_factor,
             centered_wd= centered_wd,
             centered_wd_mode= centered_wd_mode,
