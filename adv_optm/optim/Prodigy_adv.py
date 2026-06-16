@@ -154,6 +154,8 @@ class Prodigy_adv(torch.optim.Optimizer):
         # Centered WD
         centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
+        # Spectral Normalization
+        spectral_normalization: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -190,7 +192,8 @@ class Prodigy_adv(torch.optim.Optimizer):
             "kourkoutas_beta": kourkoutas_beta, "beta2_min": beta2_min, "ema_alpha": ema_alpha,
             "tiny_spike": tiny_spike, "k_warmup_steps": k_warmup_steps, "k_logging": k_logging,
             "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
-            "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape, "factored_2nd": factored_2nd
+            "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape, "factored_2nd": factored_2nd,
+            "spectral_normalization": spectral_normalization,
         }
         self.stochastic_rounding = stochastic_rounding
         self.fsdp_in_use = fsdp_in_use
