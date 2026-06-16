@@ -168,8 +168,6 @@ class KourkoutasHelper:
             # Update the persistent EMA tensor in-place.
             r_ema_tensor.mul_(ema_alpha).add_(pooled_grad_norm, alpha=1.0 - ema_alpha)
 
-            tiny_spike = scale_tiny_spike(group, info['params'], tiny_spike)
-
             # Calculate Beta2
             raw = pooled_grad_norm / (r_ema_tensor + tiny_spike)
             sun = raw / (1.0 + raw)
@@ -255,29 +253,3 @@ class KourkoutasHelper:
         # The default is the max value, which is correct for unmapped params or edge cases
         beta2_default = group.get('betas', group.get('adam_betas'))[1] if group.get('betas', group.get('adam_betas')) else 0.999
         return self.layer_state.get(layer_key, {}).get('dynamic_beta2', beta2_default)
-
-
-def scale_tiny_spike(group: dict, layer_params: list, tiny_spike: float) -> float:
-    """
-    Derives scale-invariant tiny_spike from the EMA tensor's effective numel.
-    """
-    if not group.get('spectral_normalization', False):
-        return tiny_spike
-
-    p0 = layer_params[0]
-    if getattr(p0, '_is_lora_A', False) or p0.ndim < 2:
-        # No depth scaling for:
-        # - lora_A: non-zero init, different gradient dynamics than B
-        # - 1D params (biases, norms, DoRA scales): additive, don't compound through depth.
-        L = 1
-    else:
-        L = group['n_layers']
-
-    if getattr(p0, '_is_lora_A', False) or getattr(p0, '_is_oft', False):
-        ema_numel = p0.shape[1] # (1, in_features)
-    elif getattr(p0, '_is_lora_B', False):
-        ema_numel = p0.shape[0] # (out_features, 1)
-    else:
-        ema_numel = sum(p.numel() for p in layer_params) # scalar EMA
-
-    return 1.0 / (L * math.sqrt(ema_numel))
