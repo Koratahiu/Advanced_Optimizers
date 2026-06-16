@@ -473,7 +473,26 @@ def _cans_newton_schulz_iteration(
     cns_a_bound: float | None = None,
 ) -> torch.Tensor:
     """
-    Chebyshev-Optimized Newton-Schulz (CANS).
+    Computes the matrix sign function using Chebyshev-Optimized Newton-Schulz (CANS) iterations.
+
+    This function iteratively approximates the orthogonalized version of a matrix (i.e., UV^T from SVD) 
+    using purely matrix multiplications. This is highly optimized for Tensor Cores on modern GPUs 
+    and is significantly faster than computing an exact SVD.
+
+    Args:
+        G (torch.Tensor): The input matrix/tensor to be orthogonalized. Must be at least 2D.
+        steps (int, optional): Number of Newton-Schulz iterations. Deep learning models 
+            usually only require 5 or 6 steps for sufficient orthogonal preconditioner 
+            precision due to quadratic convergence. Defaults to 6.
+        eps (float, optional): A small epsilon value used to prevent division by zero 
+            during the initial spectral normalization. Defaults to 1e-7.
+        cns_a_bound (float | None, optional): The lower bound for singular values after 
+            normalization. If None, it is automatically calculated based on the Marchenko-Pastur 
+            theoretical minimum and baseline L2 bounds. Defaults to None.
+
+    Returns:
+        torch.Tensor: The approximate matrix sign of G (orthogonalized matrix), preserving 
+        the original shape and device of G.
     """
     X = G
 
@@ -524,6 +543,23 @@ def _cans_newton_schulz_iteration(
 
 @torch.no_grad()
 def msign_ortho_precond_(p):
+    """
+    Applies an orthogonal preconditioner to a parameter tensor in-place using Matrix Sign.
+
+    Originally proposed in the paper:
+    "MSign: An Optimizer Preventing Training Instability in Large Language Models via Stable Rank Restoration"(arxiv:2602.01734)
+    Modified to use CANS instead of SVD.
+
+    Args:
+        p (torch.Tensor): The parameter tensor to be preconditioned. Must be a dense 
+            tensor. Vectors and biases should generally be excluded before calling this. 
+            The operation modifies `p` in-place.
+
+    Note:
+        - The Frobenius norm of the matrix is strictly preserved.
+        - High-dimensional tensors (e.g., Conv2D weights) are reshaped into 
+          `(out_channels, in_channels * ...)` automatically before computation.
+    """
     # Record the original Frobenius norm of the weight matrix
     orig_norm = torch.linalg.vector_norm(p, ord=2).clamp_min_(1e-12)
     # Reshape parameter to 2D for the matrix operation
