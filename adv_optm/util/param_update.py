@@ -522,6 +522,7 @@ def _cans_newton_schulz_iteration(
 
     return X
 
+@torch.no_grad()
 def msign_ortho_precond_(p):
     # Record the original Frobenius norm of the weight matrix
     orig_norm = torch.linalg.vector_norm(p, ord=2).clamp_min_(1e-12)
