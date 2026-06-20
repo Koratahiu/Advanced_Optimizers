@@ -277,9 +277,6 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
                 buf.lerp_(grad_reshaped, 1 - momentum)
 
-                # Factorize updated buffer
-                state['mu_b_nmf'], state['mv_b_nmf'], state['sign'] = _factorize_state(buf.clone(), signed=True, shifter=state['shifter'])
-
                 if nesterov:
                     nv_coef = momentum if nesterov_coef is None else nesterov_coef
                     if normed_mt:
@@ -288,6 +285,11 @@ class SinkSGD_adv(torch.optim.Optimizer):
                         update = grad_reshaped.lerp(buf, nv_coef)
                 else:
                     update = buf.clone()
+
+                # Factorize updated buffer
+                for key, val in zip(('mu_b_nmf', 'mv_b_nmf', 'sign'), _factorize_state(buf, signed=True, shifter=state['shifter'])):
+                    state[key].copy_(val)
+
             else:
                 update = grad_reshaped.clone()
 

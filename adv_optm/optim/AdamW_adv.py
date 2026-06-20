@@ -363,7 +363,8 @@ class AdamW_adv(torch.optim.Optimizer):
                 vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
 
             # Factorize
-            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False, shifter=state['shifter'])
+            for key, val in zip(('mu_v_nmf', 'mv_v_nmf'), _factorize_state(vt, signed=False, shifter=state['shifter'])):
+                state[key].copy_(val)
 
             if group['use_atan2']:
                 denom = vt.sqrt_()
@@ -384,7 +385,8 @@ class AdamW_adv(torch.optim.Optimizer):
                 mt.lerp_(grad_reshaped, 1.0 - beta1)
 
                 # Factorize
-                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True, shifter=state['shifter'])
+                for key, val in zip(('mu_m_nmf', 'mv_m_nmf', 'sign'), _factorize_state(mt.clone(), signed=True, shifter=state['shifter'])):
+                    state[key].copy_(val)
 
                 update_mt = mt
 
@@ -428,7 +430,8 @@ class AdamW_adv(torch.optim.Optimizer):
                 exp_avg_sq.mul_(beta2).addcmul_(grad_vt, grad_vt, value=1.0 - beta2)
 
             if factored_2nd:
-                state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(exp_avg_sq.view(d1, d2), signed=False, shifter=state['shifter'])
+                for key, val in zip(('mu_v_nmf', 'mv_v_nmf'), _factorize_state(exp_avg_sq.view(d1, d2), signed=False, shifter=state['shifter'])):
+                    state[key].copy_(val)
             else:
                 set_state(state, 'exp_avg_sq', exp_avg_sq, actual_precision, random_int_state_tensor, non_neg=True)
 

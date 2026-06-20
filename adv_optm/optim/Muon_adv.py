@@ -485,8 +485,9 @@ class Muon_adv(torch.optim.Optimizer):
                 # Standard momentum
                 update = mt_buf.clone()
 
-            # Factorize
-            state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True, shifter=state['shifter'])
+            # Compress new momentum and store factors
+            for key, val in zip(('mu_mbuf_nmf', 'mv_mbuf_nmf', 'sign_buf'), _factorize_state(mt_buf, signed=True, shifter=state['shifter'])):
+                state[key].copy_(val)
             del mt_buf
 
             # Orthogonalization step

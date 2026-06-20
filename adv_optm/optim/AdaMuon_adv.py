@@ -541,8 +541,9 @@ class AdaMuon_adv(torch.optim.Optimizer):
             else:
                 update = mt_buf.clone()
 
-            # Factorize
-            state['mu_mbuf_nmf'], state['mv_mbuf_nmf'], state['sign_buf'] = _factorize_state(mt_buf, signed=True, shifter=state['shifter'])
+            # Compress new momentum and store factors
+            for key, val in zip(('mu_mbuf_nmf', 'mv_mbuf_nmf', 'sign_buf'), _factorize_state(mt_buf, signed=True, shifter=state['shifter'])):
+                state[key].copy_(val)
             del mt_buf
 
             # Apply update projection
@@ -569,7 +570,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 vt_buf = _reconstruct_state((state['mu_vbuf_nmf'], state['mv_vbuf_nmf']), signed=False, shifter=state['shifter'])
                 # Update second momentum in full-size
                 vt_buf.mul_(beta2).addcmul_(update, update, value=1 - beta2)
-                state['mu_vbuf_nmf'], state['mv_vbuf_nmf'] = _factorize_state(vt_buf, signed=False, shifter=state['shifter'])
+                for key, val in zip(('mu_vbuf_nmf', 'mv_vbuf_nmf'), _factorize_state(vt_buf, signed=False, shifter=state['shifter'])):
+                    state[key].copy_(val)
                 # Apply second momentum update (adaptive scaling)
                 if group['use_atan2']:
                     denom = vt_buf.sqrt_()
@@ -628,7 +630,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 update_f32 = update.float()
                 vt_buf = _reconstruct_state((state['mu_vbuf_nmf'], state['mv_vbuf_nmf']), signed=False, shifter=state['shifter'])
                 vt_buf.mul_(beta2).addcmul_(update_f32.view(d1, d2), update_f32.view(d1, d2), value=1 - beta2)
-                state['mu_vbuf_nmf'], state['mv_vbuf_nmf'] = _factorize_state(vt_buf, signed=False, shifter=state['shifter'])
+                for key, val in zip(('mu_vbuf_nmf', 'mv_vbuf_nmf'), _factorize_state(vt_buf, signed=False, shifter=state['shifter'])):
+                    state[key].copy_(val)
                 # Apply second moment scaling
                 if group['use_atan2']:
                     denom = vt_buf.sqrt_().view(original_shape)

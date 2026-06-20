@@ -304,7 +304,8 @@ class SignSGD_adv(torch.optim.Optimizer):
                     raw_update = exp_avg.clone()
 
                 # Compress new momentum m_t and store factors
-                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(exp_avg, signed=True, shifter=state['shifter'])
+                for key, val in zip(('mu_m_nmf', 'mv_m_nmf', 'sign'), _factorize_state(exp_avg, signed=True, shifter=state['shifter'])):
+                    state[key].copy_(val)
             else:
                 raw_update = grad_reshaped.clone()
 
