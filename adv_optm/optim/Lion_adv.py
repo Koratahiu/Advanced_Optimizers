@@ -119,10 +119,8 @@ class Lion_adv(torch.optim.Optimizer):
             for device in devices:
                 param_update.set_seed(device)
 
-        # Initialize compiled function
-        self._compiled_step_parameter = None
-        if compiled_optimizer:
-            self.compile(fullgraph=True)
+        # Initialize compiled function (by parameter shape)
+        self._compiled_step_fns = {}
 
     def load_state_dict(self, state_dict: dict) -> None:
         """
@@ -205,7 +203,15 @@ class Lion_adv(torch.optim.Optimizer):
             if group.get('stochastic_sign', False):
                 random_noise_tensor = param_update._get_random_noise_for_sso(p)
             lr = torch.as_tensor(lr)
-            step_param_fn = self._compiled_step_parameter
+            # Cache compiled function per-shape
+            cache_key = (p.shape, state.get('factored', False))
+            if cache_key not in self._compiled_step_fns:
+                self._compiled_step_fns[cache_key] = torch.compile(
+                    self._step_parameter,
+                    fullgraph=True,
+                    dynamic=False
+                )
+            step_param_fn = self._compiled_step_fns[cache_key]
         else:
             step_param_fn = self._step_parameter
 
@@ -277,9 +283,6 @@ class Lion_adv(torch.optim.Optimizer):
             update.mul_(lr)
 
         param_update.apply_parameter_update(self, p, group, update, lr, random_int_tensor=random_int_tensor)
-
-    def compile(self, *args, **kwargs):
-        self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def step(self, closure: Optional[callable] = None):

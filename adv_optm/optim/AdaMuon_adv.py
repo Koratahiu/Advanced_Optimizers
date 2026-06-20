@@ -282,11 +282,9 @@ class AdaMuon_adv(torch.optim.Optimizer):
             for device in devices:
                 param_update.set_seed(device)
 
-        # Initialize compiled function
-        self._compiled_muon_step_parameter = None
-        self._compiled_adam_step_parameter = None
-        if compiled_optimizer:
-            self.compile(fullgraph=True)
+        # Initialize compiled functions (by parameter shape)
+        self._compiled_muon_step_fns = {}
+        self._compiled_adam_step_fns = {}
 
     def load_state_dict(self, state_dict: dict) -> None:
         """
@@ -444,8 +442,16 @@ class AdaMuon_adv(torch.optim.Optimizer):
             random_int_state_tensor = None
             if is_compiled:
                 step_size = torch.as_tensor(step_size)
-                adam_step_param = self._compiled_adam_step_parameter
-                
+                # Cache compiled function per-shape
+                cache_key = (p.shape, state.get('factored', False))
+                if cache_key not in self._compiled_adam_step_fns:
+                    self._compiled_adam_step_fns[cache_key] = torch.compile(
+                        Muon_AuxAdam._adam_step_parameter,
+                        fullgraph=True,
+                        dynamic=False
+                    )
+                adam_step_param = self._compiled_adam_step_fns[cache_key]
+
                 # Generate state SR random tensor when compiled
                 actual_precision = group.get('adam_actual_state_precision', 'auto')
                 random_int_state_tensor = random_int_tensor
@@ -464,7 +470,15 @@ class AdaMuon_adv(torch.optim.Optimizer):
             random_G_sketch = None
             if is_compiled:
                 lr = torch.as_tensor(group['lr'])
-                muon_step_param = self._compiled_muon_step_parameter
+                # Cache compiled function per-shape
+                cache_key = (p.shape, state.get('factored', False))
+                if cache_key not in self._compiled_muon_step_fns:
+                    self._compiled_muon_step_fns[cache_key] = torch.compile(
+                        self._muon_step_parameter,
+                        fullgraph=True,
+                        dynamic=False
+                    )
+                muon_step_param = self._compiled_muon_step_fns[cache_key]
 
                 # Generate state SR random tensor when compiled
                 actual_precision = group['actual_state_precision']
@@ -481,10 +495,6 @@ class AdaMuon_adv(torch.optim.Optimizer):
                 muon_step_param = self._muon_step_parameter
 
             muon_step_param(p, grad, state, group, lr, random_int_tensor, random_int_state_tensor, random_G_sketch)
-
-    def compile(self, *args, **kwargs):
-        self._compiled_muon_step_parameter = torch.compile(self._muon_step_parameter, *args, **kwargs)
-        self._compiled_adam_step_parameter = torch.compile(Muon_AuxAdam._adam_step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def _muon_step_parameter(self, p, grad, state, group, lr, random_int_tensor, random_int_state_tensor, random_G_sketch):
