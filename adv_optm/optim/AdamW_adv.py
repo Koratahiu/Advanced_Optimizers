@@ -188,10 +188,8 @@ class AdamW_adv(torch.optim.Optimizer):
             for device in devices:
                 param_update.set_seed(device)
 
-        # Initialize compiled function
-        self._compiled_step_parameter = None
-        if compiled_optimizer:
-            self.compile(fullgraph=True)
+        # Initialize compiled function (by parameter shape)
+        self._compiled_step_fns = {}
 
     def load_state_dict(self, state_dict: dict) -> None:
         """
@@ -323,7 +321,15 @@ class AdamW_adv(torch.optim.Optimizer):
                 random_int_state_tensor = param_update._get_random_int_for_sr(p)
             elif group['actual_state_precision'] == 'int8_sr':
                 random_int_state_tensor = param_update._get_random_int_for_8bit_sr(p)
-            step_param_fn = self._compiled_step_parameter
+            # Cache compiled function per-shape
+            cache_key = (p.shape, state.get('factored', False))
+            if cache_key not in self._compiled_step_fns:
+                self._compiled_step_fns[cache_key] = torch.compile(
+                    self._step_parameter,
+                    fullgraph=True,
+                    dynamic=False
+                )
+            step_param_fn = self._compiled_step_fns[cache_key]
         else:
             step_param_fn = self._step_parameter
 
@@ -359,7 +365,8 @@ class AdamW_adv(torch.optim.Optimizer):
                 vt.mul_(beta2).addcmul_(grad_reshaped, grad_reshaped, value=1.0 - beta2)
 
             # Factorize
-            state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(vt, signed=False, shifter=state['shifter'])
+            for key, val in zip(('mu_v_nmf', 'mv_v_nmf'), _factorize_state(vt, signed=False, shifter=state['shifter'])):
+                state[key].copy_(val)
 
             if group['use_atan2']:
                 denom = vt.sqrt_()
@@ -380,7 +387,8 @@ class AdamW_adv(torch.optim.Optimizer):
                 mt.lerp_(grad_reshaped, 1.0 - beta1)
 
                 # Factorize
-                state['mu_m_nmf'], state['mv_m_nmf'], state['sign'] = _factorize_state(mt.clone(), signed=True, shifter=state['shifter'])
+                for key, val in zip(('mu_m_nmf', 'mv_m_nmf', 'sign'), _factorize_state(mt.clone(), signed=True, shifter=state['shifter'])):
+                    state[key].copy_(val)
 
                 update_mt = mt
 
@@ -424,7 +432,8 @@ class AdamW_adv(torch.optim.Optimizer):
                 exp_avg_sq.mul_(beta2).addcmul_(grad_vt, grad_vt, value=1.0 - beta2)
 
             if factored_2nd:
-                state['mu_v_nmf'], state['mv_v_nmf'] = _factorize_state(exp_avg_sq.view(d1, d2), signed=False, shifter=state['shifter'])
+                for key, val in zip(('mu_v_nmf', 'mv_v_nmf'), _factorize_state(exp_avg_sq.view(d1, d2), signed=False, shifter=state['shifter'])):
+                    state[key].copy_(val)
             else:
                 set_state(state, 'exp_avg_sq', exp_avg_sq, actual_precision, random_int_state_tensor, non_neg=True)
 
@@ -470,9 +479,6 @@ class AdamW_adv(torch.optim.Optimizer):
             update.mul_(update_scaling)
 
         param_update.apply_parameter_update(self, p, group, update, group['lr'], random_int_tensor=random_int_tensor, wd_scaler=wd_scaler)
-
-    def compile(self, *args, **kwargs):
-        self._compiled_step_parameter = torch.compile(self._step_parameter, *args, **kwargs)
 
     @torch.no_grad()
     def step(self, closure=None):
