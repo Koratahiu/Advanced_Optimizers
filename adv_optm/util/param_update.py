@@ -121,6 +121,7 @@ def apply_parameter_update(
 
     state = self.state[p]
 
+    is_ortho_step = False
     ortho_interval = group.get('MSign_interval', None)
     if ortho_interval is not None:
         is_vector = p.ndim < 2 or getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False)
