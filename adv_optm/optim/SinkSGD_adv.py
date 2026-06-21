@@ -72,6 +72,8 @@ class SinkSGD_adv(torch.optim.Optimizer):
         orthogonal_gradient: str = 'disabled', # 'flattened', 'iterative'
         # Spectral Normed Optimizer
         spectral_normalization: bool = False,
+        # Orthogonalize the weights (Matrix Sign - MSign) every x steps
+        MSign_interval: int | None = None,
         # Centered WD
         centered_wd: float = 0.0,
         centered_wd_mode: str = 'float8',
@@ -108,7 +110,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
             "compiled_optimizer": compiled_optimizer,
             "sinkhorn_iterations": sinkhorn_iterations,
             "orthogonal_sinkhorn": orthogonal_sinkhorn,
-            "spectral_normalization": spectral_normalization,
+            "spectral_normalization": spectral_normalization, "MSign_interval": MSign_interval,
             "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
             "state_precision": state_precision,
             "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape

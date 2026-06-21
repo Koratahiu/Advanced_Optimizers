@@ -8,6 +8,7 @@ from typing import Dict, Any
 
 from .scaled_optm import adjust_wds
 from .centered_decay import dequantize_anchor
+from .msign import msign_ortho_precond_
 
 _generators: Dict[torch.device, torch.Generator] = {}
 
@@ -120,6 +121,12 @@ def apply_parameter_update(
 
     state = self.state[p]
 
+    is_ortho_step = False
+    ortho_interval = group.get('MSign_interval', None)
+    if ortho_interval is not None:
+        is_vector = p.ndim < 2 or getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False)
+        is_ortho_step = (state['step'] % ortho_interval == 0) and not is_vector
+
     # Compute full update in float32 if using bfloat16 with stochastic rounding
     if p.dtype == torch.bfloat16 and self.stochastic_rounding:
         p_fp32 = p.float()
@@ -134,6 +141,9 @@ def apply_parameter_update(
 
         # Apply main update
         p_fp32.add_(-update_fp32)
+
+        if is_ortho_step:
+            msign_ortho_precond_(p_fp32)
 
         # Single stochastic rounding at the end
         if random_int_tensor is not None:
@@ -152,6 +162,9 @@ def apply_parameter_update(
 
         # Apply main update
         p.add_(-update)
+
+        if is_ortho_step:
+            msign_ortho_precond_(p)
 
     del update
 
