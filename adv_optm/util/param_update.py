@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from typing import Dict, Any
 
-from .scaled_optm import adjust_wds
+from .scaled_optm import adjust_wds, scale_wd
 from .centered_decay import dequantize_anchor
 
 _generators: Dict[torch.device, torch.Generator] = {}
@@ -105,6 +105,7 @@ def apply_parameter_update(
     wd = group["weight_decay"] if wd is None else wd
     cwd = group.get("centered_wd", 0.0)
     wd, cwd = adjust_wds(wd, cwd, p)
+    scaled_wd = group.get("scaled_wd", False)
 
     # Calculate global decay factor for decoupled vs standard
     decay_factor = (lr / self._init_lr) if decoupled else lr
@@ -114,8 +115,12 @@ def apply_parameter_update(
 
     if wd_scaler is not None:
         if eff_wd is not None:
+            if scaled_wd:
+                eff_wd = scale_wd(eff_wd, p)
             eff_wd = eff_wd * wd_scaler
         if eff_cwd is not None:
+            if scaled_wd:
+                eff_cwd = scale_wd(eff_cwd, p)
             eff_cwd = eff_cwd * wd_scaler
 
     state = self.state[p]
