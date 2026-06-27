@@ -115,6 +115,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         weight_decay: float = 0.0,
         fisher_wd: bool = False,
         cautious_wd: bool = False,
+        scaled_wd: bool = False,
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
         # Adam_atan2 (scale invariant)
@@ -181,7 +182,7 @@ class Prodigy_adv(torch.optim.Optimizer):
 
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
-            "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
+            "fisher_wd": fisher_wd, "cautious_wd": cautious_wd, "scaled_wd": scaled_wd,
             "use_atan2": use_atan2,
             "orthogonal_gradient": orthogonal_gradient,
             "compiled_optimizer": compiled_optimizer,

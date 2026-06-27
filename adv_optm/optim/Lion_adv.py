@@ -64,6 +64,7 @@ class Lion_adv(torch.optim.Optimizer):
         # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
         cautious_wd: bool = False,
+        scaled_wd: bool = False,
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
         # OrthoGrad
@@ -96,6 +97,7 @@ class Lion_adv(torch.optim.Optimizer):
             betas=betas,
             weight_decay=weight_decay,
             cautious_wd=cautious_wd,
+            scaled_wd=scaled_wd,
             vector_reshape=vector_reshape,
             orthogonal_gradient=orthogonal_gradient,
             kappa_p=kappa_p,
