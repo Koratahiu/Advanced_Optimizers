@@ -106,6 +106,7 @@ def apply_parameter_update(
     cwd = group.get("centered_wd", 0.0)
     wd, cwd = adjust_wds(wd, cwd, p)
     scaled_wd = group.get("scaled_wd", False)
+    decoupled = scaled_wd
 
     # Calculate global decay factor for decoupled vs standard
     decay_factor = (lr / self._init_lr) if decoupled else lr
