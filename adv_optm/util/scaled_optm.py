@@ -97,7 +97,7 @@ def adjust_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
         # Centered WD safely regularizes the delta without collapsing base feature variance.
         return wd, cwd
 
-def scale_wd(wd: float, p: torch.Tensor) -> float:
+def scale_wd(wd: float, p: torch.Tensor, skip_vectors: bool = False) -> float:
     """
     Scale-invariant, dimension-scaled weight decay.
     """
@@ -107,10 +107,13 @@ def scale_wd(wd: float, p: torch.Tensor) -> float:
         wd = (2 * wd) / (b - 1)
         return wd
 
+    is_vector = p.ndim < 2 or getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False) 
+    if is_vector:
+        return 0.0 if skip_vectors else wd
+
     if p.ndim >= 2:
         width = p.numel() // p.shape[0]
         return wd / width
-
 
 def is_spectral(p: torch.Tensor) -> bool:
     """Determines if a parameter should undergo spectral normalization updates."""

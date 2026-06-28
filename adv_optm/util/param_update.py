@@ -117,11 +117,11 @@ def apply_parameter_update(
     if wd_scaler is not None:
         if eff_wd is not None:
             if scaled_wd:
-                eff_wd = scale_wd(eff_wd, p)
+                eff_wd = scale_wd(eff_wd, p, skip_vectors=True)
             eff_wd = eff_wd * wd_scaler
         if eff_cwd is not None:
             if scaled_wd:
-                eff_cwd = scale_wd(eff_cwd, p)
+                eff_cwd = scale_wd(eff_cwd, p, skip_vectors=False)
             eff_cwd = eff_cwd * wd_scaler
 
     state = self.state[p]
