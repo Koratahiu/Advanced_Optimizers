@@ -227,14 +227,14 @@ def apply_spectral_riemannian_oft(
     # Estimate sigma (The spectral norm) for each block
     sigma = torch.sum(next_u * u_raw, dim=1, keepdim=True)
 
-    # We constrain the spectral norm of the entire block-diagonal update matrix
-    # which is the maximum of the spectral norms of its blocks.
-    max_sigma = sigma.max()
+    # Squeeze out the last dimension so shape becomes (batch_size, 1)
+    sigma = sigma.squeeze(-1) 
 
     target_scale = 0.5 * scale_factor
     spectral_eps = 1.0 / (2.0 * math.sqrt(block_size))
 
-    scale = lr * (target_scale / max_sigma.clamp_min(spectral_eps))
+    # Apply the clamp and scaling block-wise
+    scale = lr * (target_scale / sigma.clamp_min(spectral_eps))
 
     return update_flat.mul_(scale).view(orig_shape)
 
