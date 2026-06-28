@@ -111,6 +111,7 @@ class Muon_adv(torch.optim.Optimizer):
         # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
         cautious_wd: bool = False,
+        scaled_wd: bool = False,
         # Nesterov momentum
         nesterov: bool = True,
         nesterov_coef: float | None = None,
@@ -201,7 +202,7 @@ class Muon_adv(torch.optim.Optimizer):
         defaults = {
             "lr": lr, "beta1": beta1, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
             "nesterov": nesterov, "nesterov_coef": nesterov_coef, "ns_steps": ns_steps, "ns_eps": ns_eps,
-            "ns_coeffs": ns_coeffs, "nnmf_factor": nnmf_factor,
+            "ns_coeffs": ns_coeffs, "nnmf_factor": nnmf_factor, "scaled_wd": scaled_wd,
             "vector_reshape": vector_reshape,  "rms_rescaling": rms_rescaling,
             "orthogonal_gradient": orthogonal_gradient,
             'compiled_optimizer': compiled_optimizer,

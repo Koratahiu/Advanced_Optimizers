@@ -137,6 +137,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         # Decoupled/cautious weight decay
         weight_decay: float = 0,
         cautious_wd: bool = False,
+        scaled_wd: bool = False,
         # Nesterov momentum
         nesterov: bool = True,
         nesterov_coef: float | None = None,
@@ -227,7 +228,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
         defaults = {
             "lr": lr, "betas": betas, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
-            "eps": eps, "rms_rescaling": rms_rescaling, "ns_steps": ns_steps,
+            "eps": eps, "rms_rescaling": rms_rescaling, "ns_steps": ns_steps, "scaled_wd": scaled_wd,
             "ns_eps": ns_eps, "ns_coeffs": ns_coeffs, "nnmf_factor": nnmf_factor,
             "vector_reshape": vector_reshape,
             "nesterov":nesterov, "nesterov_coef": nesterov_coef, "use_atan2":use_atan2,

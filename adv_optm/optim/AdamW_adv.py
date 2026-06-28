@@ -98,6 +98,7 @@ class AdamW_adv(torch.optim.Optimizer):
         weight_decay: float = 0.0,
         fisher_wd: bool = False,
         cautious_wd: bool = False,
+        scaled_wd: bool = False,
         # Adam's Bias Correction
         use_bias_correction: bool = True,
         # Stochastic Rounding for BF16
@@ -156,7 +157,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
-            "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
+            "fisher_wd": fisher_wd, "cautious_wd": cautious_wd, "scaled_wd": scaled_wd,
             "use_atan2": use_atan2, "nesterov": nesterov, "nesterov_coef": nesterov_coef,
             "normed_momentum": normed_momentum,
             "orthogonal_gradient": orthogonal_gradient, "use_bias_correction": use_bias_correction,

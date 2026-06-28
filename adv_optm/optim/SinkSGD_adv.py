@@ -66,6 +66,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         # weight decay features
         geometric_wd: bool = False,
         cautious_wd: bool = False,
+        scaled_wd: bool = False,
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
         # OrthoGrad
@@ -103,7 +104,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         defaults = {
             "lr": lr, "momentum": momentum,
             "weight_decay": weight_decay, "nesterov": nesterov, "nesterov_coef": nesterov_coef, "normed_momentum": normed_momentum, "snr_cond": snr_cond,
-            "geometric_wd": geometric_wd, "cautious_wd": cautious_wd,
+            "geometric_wd": geometric_wd, "cautious_wd": cautious_wd, "scaled_wd": scaled_wd,
             "orthogonal_gradient": orthogonal_gradient, 
             "compiled_optimizer": compiled_optimizer,
             "sinkhorn_iterations": sinkhorn_iterations,
