@@ -97,10 +97,12 @@ def adjust_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
         # Centered WD safely regularizes the delta without collapsing base feature variance.
         return wd, cwd
 
-def scale_wd(wd: float, p: torch.Tensor, skip_vectors: bool = False) -> float:
+def scale_wd(wd: float | None, p: torch.Tensor, skip_vectors: bool = False) -> float:
     """
     Scale-invariant, dimension-scaled weight decay.
     """
+    if wd is None:
+        return wd
     if getattr(p, '_is_oft', False):
         n_el = p.shape[-1]
         b = (1.0 + math.sqrt(1.0 + 8.0 * n_el)) / 2.0

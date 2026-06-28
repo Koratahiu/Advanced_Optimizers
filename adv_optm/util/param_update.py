@@ -114,14 +114,14 @@ def apply_parameter_update(
     eff_wd = (wd * decay_factor) if wd != 0 else None
     eff_cwd = (cwd * decay_factor) if cwd != 0 else None
 
+    if scaled_wd:
+        eff_wd = scale_wd(eff_wd, p, skip_vectors=True)
+        eff_cwd = scale_wd(eff_cwd, p, skip_vectors=False)
+
     if wd_scaler is not None:
         if eff_wd is not None:
-            if scaled_wd:
-                eff_wd = scale_wd(eff_wd, p, skip_vectors=True)
             eff_wd = eff_wd * wd_scaler
         if eff_cwd is not None:
-            if scaled_wd:
-                eff_cwd = scale_wd(eff_cwd, p, skip_vectors=False)
             eff_cwd = eff_cwd * wd_scaler
 
     state = self.state[p]
