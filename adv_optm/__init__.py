@@ -20,4 +20,4 @@ __all__ = [
     "SinkSGD_adv",
 ]
 
-__version__ = "2.6.1.dev2"
+__version__ = "2.6.1.dev3"
