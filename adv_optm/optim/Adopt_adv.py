@@ -314,7 +314,8 @@ class Adopt_adv(torch.optim.Optimizer):
         # The first step is for initialization only (skip when use_atan2 as it's scale invariant).
         if state['step'] == 0 and not (self.use_atan2 or group.get('spectral_normalization', False)):
             state['step'] += 1
-            self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
+            if group.get('kourkoutas_beta', False):
+                self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
             return
 
         random_int_tensor = None
