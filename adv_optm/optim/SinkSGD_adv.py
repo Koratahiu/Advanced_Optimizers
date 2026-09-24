@@ -373,9 +373,13 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 del anchor
 
         update_scaling = step_size
-        if group.get('spectral_normalization', False) and not (oft_sym and not normed_mt):
+
+        # If spectral normalization was already applied natively in the OFT sinkhorn, skip the scaling block
+        spectral_sinkhorn_applied = oft_sym and not normed_mt and group.get('spectral_normalization', False)
+
+        if group.get('spectral_normalization', False) and not spectral_sinkhorn_applied:
             update = scale_update(p, update, update_scaling, state=state)
-        else:
+        elif not spectral_sinkhorn_applied:
             if snr_cond:
                 update_scaling = update_scaling * (4/math.pi)
             update.mul_(update_scaling)

@@ -174,13 +174,12 @@ def apply_oft_sinkhorn(
             g_orth_norm = torch.linalg.vector_norm(G, ord=2, dim=(1, 2), keepdim=True).clamp_min_(1e-12)
             G.mul_(target_norm / g_orth_norm)
 
-    # Global normalization
-    norm = torch.linalg.vector_norm(G).clamp_min_(1e-12)
-    target_norm_global = math.sqrt(G.numel())
-    G.mul_(target_norm_global / norm)
-
-    # Extract upper triangular elements back into the flat format
     update.copy_(G[batch_idx, rows, cols])
+
+    # Global normalization
+    norm = torch.linalg.vector_norm(update).clamp_min_(1e-12)
+    target_norm_global = math.sqrt(update.numel())
+    update.mul_(target_norm_global / norm)
 
     return update
 
@@ -201,7 +200,6 @@ def apply_spectral_oft_sinkhorn(
     device, dtype = p.device, p.dtype
     rows, cols = scaled_optm.get_cached_structural_tensors(block_size, device)
 
-    # Flatten any prepended batch dimensions for processing
     orig_shape = p.shape
 
     # Align the scale of p with the forward pass
