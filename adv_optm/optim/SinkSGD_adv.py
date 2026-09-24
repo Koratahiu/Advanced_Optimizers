@@ -8,7 +8,7 @@ from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 from ..util.centered_decay import _init_anchor, dequantize_anchor
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
-from ..util.sinkhorn import apply_sr_sinkhorn, get_sinkhorn_wd_scaler
+from ..util.sinkhorn import apply_sr_sinkhorn, get_sinkhorn_wd_scaler, apply_oft_sinkhorn, apply_spectral_oft_sinkhorn
 from ..util.signed_util import get_signsgd_wd_target
 
 class SinkSGD_adv(torch.optim.Optimizer):
@@ -56,6 +56,8 @@ class SinkSGD_adv(torch.optim.Optimizer):
         # Sinkhorn Iterative Normalization
         sinkhorn_iterations: int = 5,
         orthogonal_sinkhorn: bool = False,
+        # OFT-specific Sinkhorn (symmetric)
+        skew_sinkoft: bool = False,
         # Normalization then Momentum
         normed_momentum: bool = False,
         # SNR Precondition (requires normed_momentum)
@@ -107,7 +109,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
             "orthogonal_gradient": orthogonal_gradient, 
             "compiled_optimizer": compiled_optimizer,
             "sinkhorn_iterations": sinkhorn_iterations,
-            "orthogonal_sinkhorn": orthogonal_sinkhorn,
+            "orthogonal_sinkhorn": orthogonal_sinkhorn, "skew_sinkoft": skew_sinkoft,
             "spectral_normalization": spectral_normalization,
             "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
             "state_precision": state_precision,
@@ -236,6 +238,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         nesterov = group['nesterov']
         nesterov_coef = group.get('nesterov_coef', None)
         snr_cond = group.get('snr_cond', False)
+        oft_sym = group.get('skew_sinkoft', False) and getattr(p, '_is_oft', False)
 
         vt_row = None
         vt_col = None
@@ -248,9 +251,12 @@ class SinkSGD_adv(torch.optim.Optimizer):
         grad = _orthogonalize_gradient(p, grad, group["orthogonal_gradient"])
 
         if normed_mt:
+            # Sinkhorn iterative normalization
             if not is_vector:
-                # Sinkhorn iterative normalization
-                grad = apply_sr_sinkhorn(grad, iters=sinkhorn_iterations, p=p, ortho_project=orthogonal_sinkhorn)
+                if not oft_sym:
+                    grad = apply_sr_sinkhorn(grad, iters=sinkhorn_iterations, p=p, ortho_project=orthogonal_sinkhorn)
+                else:
+                    grad = apply_oft_sinkhorn(grad, iters=sinkhorn_iterations, p=p, ortho_project=orthogonal_sinkhorn)
             else:
                 # For vectors, apply sign operation
                 grad = grad.sign_()
@@ -342,9 +348,15 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 update.atan2_(denom)
 
         if not group.get('normed_momentum', False):
+            # Sinkhorn iterative normalization
             if not is_vector:
-                # Sinkhorn iterative normalization
-                update = apply_sr_sinkhorn(update, iters=sinkhorn_iterations, p=p, ortho_project=orthogonal_sinkhorn)
+                if not oft_sym:
+                    update = apply_sr_sinkhorn(update, iters=sinkhorn_iterations, p=p, ortho_project=orthogonal_sinkhorn)
+                else:
+                    if group.get('spectral_normalization', False):
+                        update = apply_spectral_oft_sinkhorn(p, update, iters=sinkhorn_iterations, lr=step_size, state=state, ortho_project=orthogonal_sinkhorn)
+                    else:
+                        update = apply_oft_sinkhorn(update, iters=sinkhorn_iterations, p=p, ortho_project=orthogonal_sinkhorn)
             else:
                 # For vectors, apply sign operation
                 update = update.sign_()
@@ -361,9 +373,13 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 del anchor
 
         update_scaling = step_size
-        if group.get('spectral_normalization', False):
+
+        # If spectral normalization was already applied natively in the OFT sinkhorn, skip the scaling block
+        spectral_sinkhorn_applied = oft_sym and not normed_mt and group.get('spectral_normalization', False)
+
+        if group.get('spectral_normalization', False) and not spectral_sinkhorn_applied:
             update = scale_update(p, update, update_scaling, state=state)
-        else:
+        elif not spectral_sinkhorn_applied:
             if snr_cond:
                 update_scaling = update_scaling * (4/math.pi)
             update.mul_(update_scaling)
