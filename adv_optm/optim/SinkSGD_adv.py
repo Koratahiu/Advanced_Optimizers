@@ -57,7 +57,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         sinkhorn_iterations: int = 5,
         orthogonal_sinkhorn: bool = False,
         # OFT-specific Sinkhorn (symmetric)
-        oft_sym_sinkhorn: bool = False,
+        skew_sinkoft: bool = False,
         # Normalization then Momentum
         normed_momentum: bool = False,
         # SNR Precondition (requires normed_momentum)
@@ -109,7 +109,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
             "orthogonal_gradient": orthogonal_gradient, 
             "compiled_optimizer": compiled_optimizer,
             "sinkhorn_iterations": sinkhorn_iterations,
-            "orthogonal_sinkhorn": orthogonal_sinkhorn, "oft_sym_sinkhorn": oft_sym_sinkhorn,
+            "orthogonal_sinkhorn": orthogonal_sinkhorn, "skew_sinkoft": skew_sinkoft,
             "spectral_normalization": spectral_normalization,
             "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
             "state_precision": state_precision,
@@ -238,7 +238,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         nesterov = group['nesterov']
         nesterov_coef = group.get('nesterov_coef', None)
         snr_cond = group.get('snr_cond', False)
-        oft_sym = group.get('oft_sym_sinkhorn', False)
+        oft_sym = group.get('skew_sinkoft', False) and getattr(p, '_is_oft', False)
 
         vt_row = None
         vt_col = None
