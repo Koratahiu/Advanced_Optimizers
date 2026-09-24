@@ -1,6 +1,8 @@
 import math
 import torch
 
+from . import scaled_optm
+
 def apply_sr_sinkhorn(update: torch.Tensor, iters: int = 5, p: torch.Tensor | None = None, ortho_project: bool = False) -> torch.Tensor:
     """
     Applies Square-Root Sinkhorn (SR-Sinkhorn) multi-normalization.
@@ -124,3 +126,152 @@ def get_sinkhorn_wd_scaler(
     wd_scaler.div_(wd_scaler.mean().clamp_min_(1e-12))
 
     return wd_scaler.view_as(p)
+
+def apply_oft_sinkhorn(
+    update: torch.Tensor, 
+    iters: int = 5, 
+    p: torch.Tensor | None = None, 
+    ortho_project: bool = False
+):
+    n_el = update.shape[-1]
+    block_size = int((1 + math.sqrt(1 + 8 * n_el)) / 2)
+    device, dtype = update.device, update.dtype
+    rows, cols = scaled_optm.get_cached_structural_tensors(block_size, device)
+    batch_size = update.shape[0]
+
+    # Initialize matrices
+    G = torch.zeros(batch_size, block_size, block_size, device=device, dtype=dtype)
+    batch_idx = torch.arange(batch_size, device=device)[:, None]
+
+    # Construct skew-symmetric gradient matrix G
+    G = G.index_put((batch_idx, rows, cols), update)
+    G = G - G.transpose(-2, -1)
+
+    # If OrthoGrad is enabled, construct the skew-symmetric parameter matrix Q
+    if ortho_project and p is not None:
+        Q = torch.zeros_like(G)
+        p_flat = p.view(batch_size, -1)
+        Q = Q.index_put((batch_idx, rows, cols), p_flat)
+        Q = Q - Q.transpose(-2, -1)
+        # Compute the squared Frobenius norm for each block (batch-wise)
+        Q_norm_sq = torch.sum(Q * Q, dim=(1, 2), keepdim=True).add_(1e-30)
+        # Theoretical norm of a Sinkhorn-normalized matrix to restore magnitude
+        target_norm = math.sqrt(block_size) 
+
+    for _ in range(iters):
+        norms = torch.linalg.vector_norm(G, ord=2, dim=2, keepdim=True).clamp_min_(1e-12)
+        S = norms.sqrt_()
+        G.div_(S * S.mT)
+
+        # OrthoGrad step
+        if ortho_project and p is not None:
+            # Batch-wise Frobenius inner product
+            dot_prod = torch.sum(Q * G, dim=(1, 2), keepdim=True)
+            proj = dot_prod / Q_norm_sq
+            # Subtract projection
+            G.addcmul_(proj, Q, value=-1.0)
+            # Restore magnitude
+            g_orth_norm = torch.linalg.vector_norm(G, ord=2, dim=(1, 2), keepdim=True).clamp_min_(1e-12)
+            G.mul_(target_norm / g_orth_norm)
+
+    # Global normalization
+    norm = torch.linalg.vector_norm(G).clamp_min_(1e-12)
+    target_norm_global = math.sqrt(G.numel())
+    G.mul_(target_norm_global / norm)
+
+    # Extract upper triangular elements back into the flat format
+    update.copy_(G[batch_idx, rows, cols])
+
+    return update
+
+@torch.no_grad()
+def apply_spectral_oft_sinkhorn(
+    p: torch.Tensor,
+    update: torch.Tensor,
+    lr: float,
+    state: dict,
+    iters: int = 5,
+    ortho_project: bool = True
+) -> torch.Tensor:
+    """
+    Applies Spectral Normalization directly on the skew-symmetric gradient.
+    """
+    n_el = p.shape[-1]
+    block_size = int((1 + math.sqrt(1 + 8 * n_el)) / 2)
+    device, dtype = p.device, p.dtype
+    rows, cols = scaled_optm.get_cached_structural_tensors(block_size, device)
+
+    # Flatten any prepended batch dimensions for processing
+    orig_shape = p.shape
+
+    # Align the scale of p with the forward pass
+    scale_factor = getattr(p, '_oft_scale_factor', 1.0)
+    batch_size = update.shape[0]
+
+    # Initialize matrices
+    G = torch.zeros(batch_size, block_size, block_size, device=device, dtype=dtype)
+    batch_idx = torch.arange(batch_size, device=device)[:, None]
+
+    # Construct skew-symmetric gradient matrix G
+    G = G.index_put((batch_idx, rows, cols), update)
+    G = G - G.transpose(-2, -1)
+
+    # If OrthoGrad is enabled, construct the skew-symmetric parameter matrix Q
+    if ortho_project and p is not None:
+        Q = torch.zeros_like(G)
+        p_flat = p.view(batch_size, -1)
+        Q = Q.index_put((batch_idx, rows, cols), p_flat)
+        Q = Q - Q.transpose(-2, -1)
+        # Compute the squared Frobenius norm for each block (batch-wise)
+        Q_norm_sq = torch.sum(Q * Q, dim=(1, 2), keepdim=True).add_(1e-30)
+        # Theoretical norm of a Sinkhorn-normalized matrix to restore magnitude
+        target_norm = math.sqrt(block_size) 
+
+    for _ in range(iters):
+        norms = torch.linalg.vector_norm(G, ord=2, dim=2, keepdim=True).clamp_min_(1e-12)
+        S = norms.sqrt_()
+        G.div_(S * S.mT)
+
+        # OrthoGrad step
+        if ortho_project and p is not None:
+            # Batch-wise Frobenius inner product
+            dot_prod = torch.sum(Q * G, dim=(1, 2), keepdim=True)
+            proj = dot_prod / Q_norm_sq
+            # Subtract projection
+            G.addcmul_(proj, Q, value=-1.0)
+            # Restore magnitude
+            g_orth_norm = torch.linalg.vector_norm(G, ord=2, dim=(1, 2), keepdim=True).clamp_min_(1e-12)
+            G.mul_(target_norm / g_orth_norm)
+
+    update.copy_(G[batch_idx, rows, cols])
+
+    # Spectral Normalization on G
+    u_state = state['spectral_u'].unsqueeze(-1).to(dtype)
+    v_state = state['spectral_v'].unsqueeze(-1).to(dtype)
+    # Power Iteration step to estimate the largest singular value (sigma)
+    # Update v (Right Singular Vector)
+    v_raw = torch.bmm(G.mT, u_state)
+    v_norm = torch.linalg.vector_norm(v_raw, dim=1, keepdim=True)
+    candidate_v = v_raw / v_norm.clamp_min(1e-8)
+    next_v = torch.where(v_norm >= 1e-6, candidate_v, v_state)
+    # Update u (Left Singular Vector)
+    u_raw = torch.bmm(G, next_v)
+    u_norm = torch.linalg.vector_norm(u_raw, dim=1, keepdim=True)
+    candidate_u = u_raw / u_norm.clamp_min(1e-8)
+    next_u = torch.where(u_norm >= 1e-6, candidate_u, u_state)
+    state['spectral_v'].copy_(next_v.squeeze(-1))
+    state['spectral_u'].copy_(next_u.squeeze(-1))
+
+    # Estimate sigma (The spectral norm) for each block
+    sigma = torch.sum(next_u * u_raw, dim=1, keepdim=True)
+
+    # Squeeze out the last dimension so shape becomes (batch_size, 1)
+    sigma = sigma.squeeze(-1) 
+
+    target_scale = 0.5 * scale_factor
+    spectral_eps = 1.0 / (2.0 * math.sqrt(block_size))
+
+    # Apply the clamp and scaling block-wise
+    scale = lr * (target_scale / sigma.clamp_min(spectral_eps))
+
+    return update.mul_(scale).view(orig_shape)
