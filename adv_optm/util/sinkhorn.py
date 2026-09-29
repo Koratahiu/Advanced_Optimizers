@@ -190,7 +190,7 @@ def apply_spectral_oft_sinkhorn(
     lr: float,
     state: dict,
     iters: int = 5,
-    ortho_project: bool = True
+    ortho_project: bool = False
 ) -> torch.Tensor:
     """
     Applies Spectral Normalization directly on the skew-symmetric gradient.
