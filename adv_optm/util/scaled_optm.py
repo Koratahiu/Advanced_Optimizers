@@ -170,7 +170,7 @@ def apply_spectral_riemannian_oft(
     block_size = int((1 + math.sqrt(1 + 8 * n_el)) / 2)
     device, dtype = p.device, p.dtype
     batch_size = update.shape[0]
-    rows, cols, batch_idx = get_cached_structural_tensors(block_size, device)
+    rows, cols, batch_idx = get_cached_structural_tensors(block_size, batch_size, device)
 
     # Flatten any prepended batch dimensions for processing
     orig_shape = p.shape
