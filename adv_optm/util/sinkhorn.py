@@ -144,14 +144,14 @@ def apply_oft_sinkhorn(
     batch_idx = torch.arange(batch_size, device=device)[:, None]
 
     # Construct skew-symmetric gradient matrix G
-    G = G.index_put((batch_idx, rows, cols), update)
+    G.index_put_((batch_idx, rows, cols), update)
     G = G - G.transpose(-2, -1)
 
     # If OrthoGrad is enabled, construct the skew-symmetric parameter matrix Q
     if ortho_project and p is not None:
         Q = torch.zeros_like(G)
         p_flat = p.view(batch_size, -1)
-        Q = Q.index_put((batch_idx, rows, cols), p_flat)
+        Q.index_put_((batch_idx, rows, cols), p_flat)
         Q = Q - Q.transpose(-2, -1)
         # Compute the squared Frobenius norm for each block (batch-wise)
         Q_norm_sq = torch.sum(Q * Q, dim=(1, 2), keepdim=True).add_(1e-30)
@@ -211,14 +211,14 @@ def apply_spectral_oft_sinkhorn(
     batch_idx = torch.arange(batch_size, device=device)[:, None]
 
     # Construct skew-symmetric gradient matrix G
-    G = G.index_put((batch_idx, rows, cols), update)
+    G.index_put_((batch_idx, rows, cols), update)
     G = G - G.transpose(-2, -1)
 
     # If OrthoGrad is enabled, construct the skew-symmetric parameter matrix Q
     if ortho_project and p is not None:
         Q = torch.zeros_like(G)
         p_flat = p.view(batch_size, -1)
-        Q = Q.index_put((batch_idx, rows, cols), p_flat)
+        Q.index_put_((batch_idx, rows, cols), p_flat)
         Q = Q - Q.transpose(-2, -1)
         # Compute the squared Frobenius norm for each block (batch-wise)
         Q_norm_sq = torch.sum(Q * Q, dim=(1, 2), keepdim=True).add_(1e-30)
