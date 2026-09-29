@@ -136,12 +136,11 @@ def apply_oft_sinkhorn(
     n_el = update.shape[-1]
     block_size = int((1 + math.sqrt(1 + 8 * n_el)) / 2)
     device, dtype = update.device, update.dtype
-    rows, cols = scaled_optm.get_cached_structural_tensors(block_size, device)
     batch_size = update.shape[0]
+    rows, cols, batch_idx = scaled_optm.get_cached_structural_tensors(block_size, batch_size, device)
 
     # Initialize matrices
     G = torch.zeros(batch_size, block_size, block_size, device=device, dtype=dtype)
-    batch_idx = torch.arange(batch_size, device=device)[:, None]
 
     # Construct skew-symmetric gradient matrix G
     G.index_put_((batch_idx, rows, cols), update)
@@ -198,17 +197,16 @@ def apply_spectral_oft_sinkhorn(
     n_el = p.shape[-1]
     block_size = int((1 + math.sqrt(1 + 8 * n_el)) / 2)
     device, dtype = p.device, p.dtype
-    rows, cols = scaled_optm.get_cached_structural_tensors(block_size, device)
+    batch_size = update.shape[0]
+    rows, cols, batch_idx = scaled_optm.get_cached_structural_tensors(block_size, batch_size, device)
 
     orig_shape = p.shape
 
     # Align the scale of p with the forward pass
     scale_factor = getattr(p, '_oft_scale_factor', 1.0)
-    batch_size = update.shape[0]
 
     # Initialize matrices
     G = torch.zeros(batch_size, block_size, block_size, device=device, dtype=dtype)
-    batch_idx = torch.arange(batch_size, device=device)[:, None]
 
     # Construct skew-symmetric gradient matrix G
     G.index_put_((batch_idx, rows, cols), update)
