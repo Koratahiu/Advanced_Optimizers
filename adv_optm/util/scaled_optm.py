@@ -40,7 +40,6 @@ def scale_update(
     """
     is_dora_scale = getattr(p, '_is_dora_scale', False)
     is_oft = getattr(p, '_is_oft', False)
-    lr = lr / 6 if is_dora_scale else lr
 
     # DoRA Magnitude Scales (1D) or 1D Bias/Norm layers
     if p.ndim < 2 or is_dora_scale:
