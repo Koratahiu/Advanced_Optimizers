@@ -66,10 +66,12 @@ def geodesic_decay(
     a_2d: torch.Tensor,
     p_norm_sq: torch.Tensor,
     wd: float,
+    active_mask: torch.Tensor,
     eps: float = 1e-8
 ) -> torch.Tensor:
     """
     Riemannian anchor pull along geodesic: grad(1/2 * dist^2(p, a)) = -log_p(a).
+    Bypassed for inactive or zero tokens.
     """
     p_norm = torch.linalg.vector_norm(p_2d, dim=-1, keepdim=True).clamp_min(eps)
     a_norm = torch.linalg.vector_norm(a_2d, dim=-1, keepdim=True).clamp_min(eps)
@@ -84,8 +86,10 @@ def geodesic_decay(
     cos_dist = (torch.sum(p_2d * a_2d, dim=-1, keepdim=True) / (p_norm * a_norm)).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
     geo_angle = torch.acos(cos_dist)
 
-    # Add restoring force towards anchor (subtract from descent direction)
-    return u_tangent - (wd * geo_angle * anchor_dir)
+    # zero out restoring force for any inactive/zero token
+    decay_force = (wd * geo_angle * anchor_dir) * active_mask.float()
+
+    return u_tangent - decay_force
 
 
 def parallel_transport(
