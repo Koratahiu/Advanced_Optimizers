@@ -10,6 +10,7 @@ from ..util.GeoEmbed_util import (
     parallel_transport,
 )
 
+
 class GeoEmbed_adv(Optimizer):
     """
     Hyperspherical Geodesic Optimizer (GeoEmbed) for Token Embeddings with Riemannian Parallel-Transported Momentum.
@@ -90,32 +91,31 @@ class GeoEmbed_adv(Optimizer):
 
                 orig_shape = p.shape
                 p_2d, g_2d, a_2d, r_2d = reshape_2d(p, grad, anchor, radius)
-                K, D = p_2d.shape
 
                 # Mask active tokens
-                g_norm = torch.linalg.vector_norm(g_2d.float(), ord=2, dim=-1, keepdim=True)
+                g_norm = torch.linalg.vector_norm(g_2d, ord=2, dim=-1, keepdim=True)
                 active_mask = (g_norm > eps)
                 if not active_mask.any():
                     continue
 
                 p_norm_sq = torch.sum(p_2d * p_2d, dim=-1, keepdim=True).clamp_min(eps)
 
-                # Project Gradient onto Tangent Bundle T_p S^{D-1}
+                # Project Gradient onto Tangent Space T_p S^{D-1}
                 g_tangent = radial_projection(p_2d, g_2d, p_norm_sq)
 
-                # Multi-Token Polar Decoupling with re-projection
-                u_tangent = gram_condition(K, g_tangent, p_2d, eps=eps)
+                # Multi-Token Polar Decoupling
+                u_tangent = gram_condition(g_tangent, p_2d, eps=eps)
 
                 # Riemannian Momentum Integration
                 if mu > 0.0:
+                    # Only update momentum for active tokens; leave inactive tokens frozen
+                    act_idx = active_mask.squeeze(-1)
                     if "momentum_buffer" not in state:
                         buf = torch.zeros_like(u_tangent)
-                        buf[active_mask.squeeze(-1)] = u_tangent[active_mask.squeeze(-1)]
+                        buf[act_idx] = u_tangent[act_idx]
                         state["momentum_buffer"] = buf
                     else:
                         buf = state["momentum_buffer"]
-                        # Only update momentum for active tokens; leave inactive tokens frozen
-                        act_idx = active_mask.squeeze(-1)
                         buf[act_idx] = buf[act_idx] * mu + u_tangent[act_idx] * (1.0 - mu)
 
                     if nesterov:
@@ -126,6 +126,7 @@ class GeoEmbed_adv(Optimizer):
                 else:
                     update_vec = u_tangent
 
+                # Decoupled Geodesic Anchor Pull
                 if wd > 0.0:
                     update = geodesic_decay(
                         update_vec, p_2d, a_2d, p_norm_sq, wd, 
@@ -145,13 +146,13 @@ class GeoEmbed_adv(Optimizer):
                     u_hat = torch.zeros_like(update)
                     u_hat[act_v.squeeze(-1)] = update[act_v.squeeze(-1)] / v_norm[act_v.squeeze(-1)]
 
-                    # Angular step: smoothly scale with norm, saturating at lr radians
+                    # Angular step smoothly scaling with v_norm and saturating at lr
                     theta = lr * torch.tanh(v_norm) * act_v.float()
 
                     cos_theta = torch.cos(theta)
                     sin_theta = torch.sin(theta)
 
-                    # Geodesic flow formula preserving exact sphere radius ||p_next|| == ||p|| == R
+                    # Geodesic flow preserving sphere radius ||p_next|| == ||p|| == R
                     p_next = p_2d * cos_theta - r_2d * u_hat * sin_theta
 
                 # Parallel Transport Momentum Buffer to T_{p_next} for the Next Step
