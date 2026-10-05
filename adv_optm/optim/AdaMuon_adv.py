@@ -59,7 +59,8 @@ class AdaMuon_adv(torch.optim.Optimizer):
             BF16 parameter updates (default: True).
         orthogonal_gradient (str): whether to use OrthoGrad variants. 'disabled': off.
         'flattened': Standard vectorized OrthoGrad. 'iterative': Matrix-wise rank-2 OrthoGrad. (default: disabled)
-        nesterov (bool): enables Nesterov momentum (default: False).
+        nesterov (bool): enables Nesterov momentum (default: True).
+        nesterov_coef (float, optional): Nesterov coefficient (default: None).
         use_atan2 (bool): whether to use the atan2 update rule. (default: False)
         vector_reshape (bool): whether to reshape 1D vectors into 2D
             matrices to apply low-rank compression (default: True).
@@ -106,7 +107,11 @@ class AdaMuon_adv(torch.optim.Optimizer):
             low-rank compression while keeping the first moment (momentum_buffer)
             dense. Ignored when `nnmf_factor=True` (full SMMF) or `normuon_variant=True`.
             Combines well with `state_precision` on the first moment. (default: False)
+        normuon_variant (bool): If True, enables the NorMuon update rule, which adds
+            neuron-wise normalization. (default: False)
         spectral_normalization (bool): Enable explicit spectral normalization using power iteration. (default: False)
+        compiled_optimizer (bool): Compiles the core step function using torch.compile
+            for faster execution. (default: False)
         --- Auxiliary AdamW_adv Parameters (used for 'adam' groups) ---
         adam_betas (tuple[float, float]): Betas for the AdamW optimizer part.
         adam_eps (float): Epsilon for the AdamW optimizer part.
@@ -299,17 +304,21 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
     @property
     def supports_fused_back_pass(self):
+        """Returns whether the optimizer supports fused backward pass."""
         return True
 
     @property
     def supports_memory_efficient_fp16(self):
+        """Returns whether the optimizer supports memory-efficient FP16."""
         return True
 
     @property
     def supports_flat_params(self):
+        """Returns whether the optimizer supports flat parameters."""
         return False
 
     def init_step(self):
+        """Initializes optimizer state for all parameters across all parameter groups."""
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
                 self.__init_state(p, group)
@@ -402,6 +411,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        """Performs a single optimization step on a single parameter."""
         grad = p.grad
         if grad is None:
             return

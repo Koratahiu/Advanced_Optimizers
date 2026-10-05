@@ -31,6 +31,7 @@ class Muon_adv(torch.optim.Optimizer):
             applied only to parameter coordinates where the sign of the parameter
             and the sign of the optimizer update align (default: False).
         nesterov (bool): enables Nesterov momentum (default: True).
+        nesterov_coef (float, optional): Nesterov coefficient (default: None).
         ns_steps (int): number of Newton-Schulz iterations to perform (default: 5).
         ns_eps (float): epsilon for Newton-Schulz normalization stability. When None
             it's derived from scale invariant rule (default: 1e-7).
@@ -82,6 +83,8 @@ class Muon_adv(torch.optim.Optimizer):
             'int8': Uses 8-bit block-wise quantization (block size 128).
             'int4': Uses 4-bit block-wise quantization (block size 32).
         spectral_normalization (bool): Enable explicit spectral normalization using power iteration. (default: False)
+        compiled_optimizer (bool): Compiles the core step function using torch.compile
+            for faster execution. (default: False)
         --- Auxiliary AdamW_adv Parameters (used for 'adam' groups) ---
         adam_betas (tuple[float, float]): Betas for the AdamW optimizer part.
         adam_eps (float): Epsilon for the AdamW optimizer part.
@@ -271,17 +274,21 @@ class Muon_adv(torch.optim.Optimizer):
 
     @property
     def supports_fused_back_pass(self):
+        """Returns whether the optimizer supports fused backward pass."""
         return True
 
     @property
     def supports_memory_efficient_fp16(self):
+        """Returns whether the optimizer supports memory-efficient FP16."""
         return True
 
     @property
     def supports_flat_params(self):
+        """Returns whether the optimizer supports flat parameters."""
         return False
 
     def init_step(self):
+        """Initializes optimizer state for all parameters across all parameter groups."""
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
                 self.__init_state(p, group)
@@ -354,6 +361,7 @@ class Muon_adv(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        """Performs a single optimization step on a single parameter."""
         grad = p.grad
         if grad is None:
             return

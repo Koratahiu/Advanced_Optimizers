@@ -43,10 +43,15 @@ class Prodigy_adv(torch.optim.Optimizer):
         stochastic_rounding (bool): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
         use_atan2 (bool): whether to use the atan2 update rule. (default: False)
+        nesterov (bool): enables Nesterov momentum (default: False).
+        nesterov_coef (float, optional): Nesterov coefficient (default: None).
         orthogonal_gradient (str): whether to use OrthoGrad variants. 'disabled': off.
         'flattened': Standard vectorized OrthoGrad. 'iterative': Matrix-wise rank-2 OrthoGrad. (default: disabled)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
+        state_precision (str): Precision method for states. Options: 'auto'
+            (parameter precision), 'fp32', 'factored' (SMMF low-rank FP32), 'bf16_sr',
+            'int8_sr'. (default: 'auto')
         factored_2nd (bool): whether to keep the first moment uncompressed (dense)
             while only factorizing the second moment. (default: True)
         d0 (float):
@@ -103,6 +108,13 @@ class Prodigy_adv(torch.optim.Optimizer):
             'float8': Uses torch.float8_e4m3fn for a balance of precision and memory.
             'int8': Uses 8-bit block-wise quantization (block size 128).
             'int4': Uses 4-bit block-wise quantization (block size 32).
+        compiled_optimizer (bool): Compiles the core step function using torch.compile
+            for faster execution. (default: False)
+        beta3 (float, optional): Beta3 for Prodigy's D-adaptation. When None,
+            derived from betas[1]. (default: None)
+        safeguard_warmup (bool): If True, enables a warmup period for the D-adaptation
+            learning rate to prevent early instability. (default: False)
+        spectral_normalization (bool): Enable explicit spectral normalization using power iteration. (default: False)
     """
 
     def __init__(
@@ -234,14 +246,17 @@ class Prodigy_adv(torch.optim.Optimizer):
 
     @property
     def supports_fused_back_pass(self):
+        """Returns whether the optimizer supports fused backward pass."""
         return True
 
     @property
     def supports_memory_efficient_fp16(self):
+        """Returns whether the optimizer supports memory-efficient FP16."""
         return True
 
     @property
     def supports_flat_params(self):
+        """Returns whether the optimizer supports flat parameters."""
         return False
 
     def init_step(self):
@@ -259,6 +274,7 @@ class Prodigy_adv(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        """Performs a single optimization step on a single parameter."""
         if p.grad is None:
             return
 

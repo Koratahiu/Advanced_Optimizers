@@ -24,6 +24,7 @@ class SignSGD_adv(torch.optim.Optimizer):
         momentum (float, optional): coefficients for computing
             running average of the gradients (default: 0.9).
         weight_decay (float, optional): weight decay (L2 penalty) (default: 0.0).
+        geometric_wd (bool): Enables geometric weight decay. (default: False).
         cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
             applied only to parameter coordinates where the sign of the parameter
             and the sign of the optimizer update align (default: False).
@@ -33,6 +34,10 @@ class SignSGD_adv(torch.optim.Optimizer):
             rounding for BF16 parameter updates (default: True).
         orthogonal_gradient (bool): whether to orthogonalize the gradient (default: False).
         stochastic_sign (bool): whether to use the Stochastic Sign operator. (default: False)
+        nesterov (bool): enables Nesterov momentum (default: False).
+        nesterov_coef (float, optional): Nesterov coefficient (default: None).
+        normed_momentum (bool): whether to compute the first moment on the normalized gradient. (default: False)
+        snr_cond (bool): whether to apply SNR conditioning. (default: False).
         centered_wd (float): Centered Weight Decay coefficient. Instead of decaying weights
             toward zero, they are decayed toward their initial values (anchors). This
             can be used together with standard weight decay. (default: 0.0)
@@ -42,11 +47,14 @@ class SignSGD_adv(torch.optim.Optimizer):
             'float8': Uses torch.float8_e4m3fn for a balance of precision and memory.
             'int8': Uses 8-bit block-wise quantization (block size 128).
             'int4': Uses 4-bit block-wise quantization (block size 32).
+        spectral_normalization (bool): Enable explicit spectral normalization using power iteration. (default: False)
         state_precision (str): Precision method for Adopt states. Options: 'auto'
             (parameter precision), 'fp32', 'factored' (SMMF low-rank FP32), 'bf16_sr' (with
             stochastic rounding), 'fp16' , 'int8_sr'. (default: 'auto')
         nnmf_factor (bool): whether to use the factorization or use the
             uncompressed optimizer. (default: True)
+        compiled_optimizer (bool): Compiles the core step function using torch.compile
+            for faster execution. (default: False)
     """
 
     def __init__(
@@ -152,17 +160,21 @@ class SignSGD_adv(torch.optim.Optimizer):
 
     @property
     def supports_fused_back_pass(self) -> bool:
+        """Returns whether the optimizer supports fused backward pass."""
         return True
 
     @property
     def supports_memory_efficient_fp16(self) -> bool:
+        """Returns whether the optimizer supports memory-efficient FP16."""
         return True
 
     @property
     def supports_flat_params(self) -> bool:
+        """Returns whether the optimizer supports flat parameters."""
         return False
 
     def init_step(self):
+        """Initializes optimizer state for all parameters across all parameter groups."""
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
                 self.__init_state(p, group)
