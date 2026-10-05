@@ -20,7 +20,7 @@ pip install adv_optm
 ## What's New
 
 <details>
-<summary><b>🌟 Version 2.5.x: The Massive Refactor — Click to expand</b></summary>
+<summary><b>🌟 Version 2.5.x: The Massive Refactor - Click to expand</b></summary>
 
 This major update introduces a complete architectural refactor of the library:
 
