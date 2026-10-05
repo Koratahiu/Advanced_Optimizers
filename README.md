@@ -77,6 +77,21 @@ This major update introduces a complete architectural refactor of the library:
 
 ---
 
+## Quick Start
+
+```python
+from adv_optm import AdamW_adv
+# AdamW with spectral normalization and centered weight decay
+optimizer = AdamW_adv(
+    model.parameters(),
+    lr=1e-3,
+)
+```
+
+* For PEFT/LoRA models, tag parameters before passing them to the optimizer so spectral scaling and other features work correctly (refer to parameter tagging in docs)
+
+---
+
 ## 🔗 Quick Links
 
 | Section | Description |
@@ -84,7 +99,9 @@ This major update introduces a complete architectural refactor of the library:
 | [Optimizers](docs/optimizers.md) | Full list of available optimizers with descriptions |
 | [Settings & Features](docs/settings.md) | Common settings shared across all optimizers |
 | [Momentum Settings](docs/momentum.md) | Momentum-related configurations (Nesterov, normed momentum, etc.) |
+| [Adam-Related Settings](docs/adam_settings.md) | AdamW, Adopt, and Prodigy specific settings (Kourkoutas-β, FAdam, Atan2, etc.) |
+| [Muon-Related Settings](docs/muon_settings.md) | Muon and AdaMuon specific settings (Newton-Schulz, CANS, NorMuon, MARS-M, etc.) |
 | [Memory & Precision](docs/memory.md) | State precision, factored modes, and memory-saving techniques |
 | [Weight Decay](docs/weight_decay.md) | Weight decay variants (centered, Fisher, cautious, geometric) |
-| [Advanced Features](docs/advanced_features.md) | OrthoGrad, spectral normalization, stochastic sign, Kourkoutas-β, and more |
+| [Advanced Features](docs/advanced_features.md) | OrthoGrad, spectral normalization, stochastic sign, and more |
 

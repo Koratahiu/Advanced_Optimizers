@@ -8,7 +8,9 @@ This page covers the settings and features that are shared across most (or all) 
 
 | Parameter | Default | Description |
 |---|---|---|
-| `lr` | varies by optimizer | Base learning rate. Prodigy uses 1.0 as default since it self-adapts. |
+| `lr` | varies by optimizer | Base learning rate. |
+
+*  Prodigy uses 1.0 as default since it self-adapts.
 
 ---
 
@@ -36,4 +38,23 @@ This page covers the settings and features that are shared across most (or all) 
 | Parameter | Default | Description |
 |---|---|---|
 | `compiled_optimizer` | `False` | Compiles the core step function with `torch.compile` for fused, optimized execution. Requires PyTorch 2.3+. |
+
+---
+
+## Fused Back Pass
+
+All optimizers support Fused back pass hooks.
+Fused back pass hooks each parameter individually after its gradient is computed. As soon as a parameter's gradient is ready, the hook calls `optimizer.step_parameter()`, then immediately sets `tensor.grad = None`, freeing that parameter's gradient memory right away.
+
+This means you never hold the full set of model gradients in memory simultaneously. Each parameter's gradient is consumed and freed one at a time during backward, saving roughly one full model size of VRAM.
+
+**Example (inside a trainer):**
+
+The trainer registers a `post_accumulate_grad_hook` on each parameter. The hook flow is:
+1. Gradient for that parameter has finished accumulating.
+2. (Multi-GPU) Reduce the gradient across devices if enabled.
+3. Apply gradient clipping.
+4. Call `optimizer.step_parameter(tensor, param_group, index)`: stepping *this* parameter only.
+5. Set `tensor.grad = None`: freeing the gradient immediately.
+
 

@@ -38,6 +38,24 @@ Applies explicit spectral normalization using power iteration to the update matr
 
 * Available on all optimizers.
 
+**Parameter tagging for PEFT/LoRA:**
+Spectral normalization reads special attributes from parameter tensors to apply the correct scaling. For LoRA, DoRA, and OFT layers, you must tag parameters before creating the optimizer:
+
+```python
+p._is_lora_B = True
+```
+
+Set the following attributes based on parameter names:
+
+| Attribute | Set On | Purpose |
+|---|---|---|
+| `_is_lora_A` | `lora_down.weight`, `lokr_w1_b`, `lokr_w2_b` | Down projection: spectral target of `1` |
+| `_is_lora_B` | `lora_up.weight`, `lokr_w1_a`, `lokr_w2_a` | Up projection: spectral target of `sqrt(d_out / d_in)` |
+| `_is_dora_scale` | `dora_scale`, `dora_log_multiplier` | DoRA scale vector: max-abs normalized |
+| `_is_oft` | `oft_R.weight` | OFT rotation matrix: Decomposition to skew-symmetric matrix and spectral target of `0.5` |
+
+* This ensures scale-invariant effective LR O(1) across all parameters.
+
 **Example:**
 ```python
 optimizer = AdamW_adv(
@@ -95,93 +113,6 @@ optimizer = SignSGD_adv(
 
 ---
 
-## Newton-Schulz Iteration (Muon variants)
-
-Controls the orthogonalization process in Muon and AdaMuon optimizers.
-
-| Parameter | Default | Description |
-|---|---|---|
-| `ns_steps` | 5 | Number of Newton-Schulz iterations. |
-| `ns_eps` | 1e-7 | Epsilon for normalization stability. `None` uses scale-invariant rule. |
-| `ns_coeffs` | `(3.4445, -4.7750, 2.0315)` | (a, b, c) coefficients for the quintic polynomial. |
-
-**Example:**
-```python
-optimizer = Muon_adv(
-    model.parameters(),
-    ns_steps=5,
-    ns_eps=None,  # scale-invariant
-)
-```
-
----
-
-## Chebyshev-Accelerated NS (`accelerated_ns`)
-
-Dynamically calculates optimal 3rd-order polynomial coefficients for the Newton-Schulz iteration using Chebyshev polynomials. Faster convergence than fixed coefficients.
-
-| Parameter | Default | Description |
-|---|---|---|
-| `accelerated_ns` | `False` | Enables CANS. |
-| `cns_a_bound` | `None` | Initial lower bound for singular values. `None` uses scale-invariant rule. |
-
-* Available on: `Muon_adv`, `AdaMuon_adv`.
-
----
-
-## NorMuon (`normuon_variant`)
-
-Adds neuron-wise normalization to Muon, computing per-neuron second moments and normalizing accordingly.
-
-| Parameter | Default | Description |
-|---|---|---|
-| `normuon_variant` | `False` | Enables NorMuon. |
-| `beta2_normuon` | 0.95 | Decay rate for NorMuon second moments. |
-| `normuon_eps` | 1e-8 | Stability epsilon for NorMuon. |
-
-Available on: `Muon_adv`.
-
----
-
-## Low-Rank Orthogonalization (`low_rank_ortho`)
-
-Projects the update to a lower rank before orthogonalization, reducing computational cost for large matrices.
-
-| Parameter | Default | Description |
-|---|---|---|
-| `low_rank_ortho` | `False` | Enables low-rank orthogonalization. |
-| `ortho_rank` | 128 | Rank for the projection. |
-
-Available on: `Muon_adv`, `AdaMuon_adv`.
-
----
-
-## Approx MARS-M (`approx_mars`)
-
-Variance reduction based on the MARS-M paper ("MARS-M: When Variance Reduction Meets Matrices"). Reduces gradient noise in Muon-style updates.
-
-| Parameter | Default | Description |
-|---|---|---|
-| `approx_mars` | `False` | Enables MARS-M variance reduction. |
-| `mars_gamma` | 0.025 | Scaling coefficient for gradient correction. |
-
-Available on: `Muon_adv`, `AdaMuon_adv`.
-
----
-
-## RMS Rescaling (`rms_rescaling`)
-
-Uses Root-Mean-Square for the final update vector, aligning update magnitudes with Adam-style optimizers. This allows reuse of existing LR schedules.
-
-| Parameter | Default | Description |
-|---|---|---|
-| `rms_rescaling` | `True` | Enables RMS-aligned rescaling. |
-
-* Available on: `Muon_adv`, `AdaMuon_adv`.
-* Not compatible with `spectral_normalization`
-
----
-
 ## Sinkhorn Settings (SinkSGD)
 
 | Parameter | Default | Description |
@@ -189,21 +120,8 @@ Uses Root-Mean-Square for the final update vector, aligning update magnitudes wi
 | `sinkhorn_iterations` | 5 | Number of Sinkhorn iterations. |
 | `orthogonal_sinkhorn` | `False` | Uses orthogonal Sinkhorn variant. This reaches a state where all rows and cols are orthogonal to the weights (rank-2 Orthogonal projection) |
 
----
-
-## Prodigy-Specific Settings
-
-| Parameter | Default | Description |
-|---|---|---|
-| `d0` | 1e-6 | Initial D estimate. Rarely needs changing. |
-| `d_coef` | 1.0 | Coefficient in the d-estimate expression. Tune to adjust adaptation speed. |
-| `growth_rate` | inf | Max multiplicative rate for D estimate growth. ~1.02 gives warmup effect. |
-| `slice_p` | 11 | Calculate adaptation stats on every pth entry to save memory. |
-| `prodigy_steps` | 0 | Disable adaptation after this many steps; release state memory. |
-| `d_limiter` | `False` | Clamp d_hat to prevent volatile step-size increases. |
-| `fsdp_in_use` | `False` | Set True when using FSDP sharded parameters. |
-
----
+* For Muon-specific settings (Newton-Schulz, CANS, NorMuon, MARS-M), see [Muon-Related Settings](muon_settings.md).
+* For Adam/Prodigy-specific settings (Kourkoutas-β, FAdam, Atan2, Prodigy adaptation), see [Adam-Related Settings](adam_settings.md).
 
 ## Feature Availability Matrix
 
