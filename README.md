@@ -77,6 +77,14 @@ This major update introduces a complete architectural refactor of the library:
 
 ---
 
-## 💡 Core Innovations
+## 🔗 Quick Links
 
-*(Documentation expanding on the theory and usage of these features is coming soon!)*
+| Section | Description |
+|---|---|
+| [Optimizers](docs/optimizers.md) | Full list of available optimizers with descriptions |
+| [Settings & Features](docs/settings.md) | Common settings shared across all optimizers |
+| [Momentum Settings](docs/momentum.md) | Momentum-related configurations (Nesterov, normed momentum, etc.) |
+| [Memory & Precision](docs/memory.md) | State precision, factored modes, and memory-saving techniques |
+| [Weight Decay](docs/weight_decay.md) | Weight decay variants (centered, Fisher, cautious, geometric) |
+| [Advanced Features](docs/advanced_features.md) | OrthoGrad, spectral normalization, stochastic sign, Kourkoutas-β, and more |
+
