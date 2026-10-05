@@ -54,6 +54,9 @@ class Lion_adv(torch.optim.Optimizer):
             'int4': Uses 4-bit block-wise quantization (block size 32).
         nnmf_factor (bool): whether to use the factorization or use the
             uncompressed optimizer. (default: True)
+        spectral_normalization (bool): Enable explicit spectral normalization using power iteration. (default: False)
+        compiled_optimizer (bool): Compiles the core step function using torch.compile
+            for faster execution. (default: False)
     """
 
     def __init__(
@@ -135,17 +138,21 @@ class Lion_adv(torch.optim.Optimizer):
 
     @property
     def supports_fused_back_pass(self) -> bool:
+        """Returns whether the optimizer supports fused backward pass."""
         return True
 
     @property
     def supports_memory_efficient_fp16(self) -> bool:
+        """Returns whether the optimizer supports memory-efficient FP16."""
         return True
 
     @property
     def supports_flat_params(self) -> bool:
+        """Returns whether the optimizer supports flat parameters."""
         return False
 
     def init_step(self):
+        """Initializes optimizer state for all parameters across all parameter groups."""
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
                 self.__init_state(p, group)

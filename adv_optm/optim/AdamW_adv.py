@@ -45,6 +45,8 @@ class AdamW_adv(torch.optim.Optimizer):
         stochastic_rounding (bool): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
         use_atan2 (bool): whether to use the atan2 update rule. (default: False)
+        nesterov (bool): enables Nesterov momentum (default: False).
+        nesterov_coef (float, optional): Nesterov coefficient (default: None).
         orthogonal_gradient (str): whether to use OrthoGrad variants. 'disabled': off.
         'flattened': Standard vectorized OrthoGrad. 'iterative': Matrix-wise rank-2 OrthoGrad. (default: disabled)
         normed_momentum (bool): whether to compute the first moment on the normalized gradient. (default: False)
@@ -79,8 +81,11 @@ class AdamW_adv(torch.optim.Optimizer):
             'float8': Uses torch.float8_e4m3fn for a balance of precision and memory.
             'int8': Uses 8-bit block-wise quantization (block size 128).
             'int4': Uses 4-bit block-wise quantization (block size 32).
+        spectral_normalization (bool): Enable explicit spectral normalization using power iteration. (default: False)
         nnmf_factor (bool): whether to use the factorization or disable it to use
             the uncompressed optimizer. (default: False)
+        compiled_optimizer (bool): Compiles the core step function using torch.compile
+            for faster execution. (default: False)
         factored_2nd (bool): whether to keep the first moment uncompressed (dense)
             while only factorizing the second moment. (default: False)
         state_precision (str): Precision method for Adopt states. Options: 'auto'
@@ -206,17 +211,21 @@ class AdamW_adv(torch.optim.Optimizer):
 
     @property
     def supports_fused_back_pass(self):
+        """Returns whether the optimizer supports fused backward pass."""
         return True
 
     @property
     def supports_memory_efficient_fp16(self):
+        """Returns whether the optimizer supports memory-efficient FP16."""
         return True
 
     @property
     def supports_flat_params(self):
+        """Returns whether the optimizer supports flat parameters."""
         return False
 
     def init_step(self):
+        """Initializes optimizer state for all parameters across all parameter groups."""
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
                 self.__init_state(p, group)
@@ -281,6 +290,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        """Performs a single optimization step on a single parameter."""
         if p.grad is None:
             return
 

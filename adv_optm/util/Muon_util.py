@@ -360,6 +360,21 @@ def normuon_update(update: torch.Tensor, v_t: torch.Tensor, beta2, eps):
     return update.div_(v_t.sqrt().unsqueeze_(1).add_(eps))
 
 def rms_adjustment(update: torch.Tensor, rms_rescaling: bool, lr):
+    """
+    Applies RMS-based scaling to the update tensor.
+
+    When ``rms_rescaling`` is True, the update is scaled so that its RMS norm
+    matches a target value (0.2). Otherwise, for 2D updates the scaling factor
+    is :math:`\\sqrt{\\max(1, r/c)}` where *r* and *c* are the last two dimensions.
+
+    Args:
+        update: The update tensor to scale.
+        rms_rescaling: Whether to apply RMS normalization.
+        lr: Learning rate used in scaling.
+
+    Returns:
+        The scaled update tensor.
+    """
     if rms_rescaling: # RMS-aligned rescaling
         # This is slower due to norm calculations but it worked the best for t2i models.
         rms_target = 0.2 # default (Adam) value for RMS

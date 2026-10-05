@@ -25,6 +25,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         weight_decay (float): weight decay (L2 penalty or decoupled) (default: 0).
         nesterov (bool): enables Nesterov momentum. Only applicable when momentum
             is non-zero. (default: False)
+        nesterov_coef (float, optional): Nesterov coefficient (default: None).
         cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
             applied only to parameter coordinates where the sign of the parameter
             and the sign of the optimizer update align (default: False).
@@ -32,6 +33,11 @@ class SinkSGD_adv(torch.optim.Optimizer):
             matrices to apply low-rank compression (default: True).
         stochastic_rounding (bool): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
+        sinkhorn_iterations (int): Number of Sinkhorn iterations for normalization. (default: 5)
+        orthogonal_sinkhorn (bool): Whether to use orthogonal Sinkhorn normalization. (default: False)
+        normed_momentum (bool): whether to compute the first moment on the normalized gradient. (default: False)
+        snr_cond (bool): whether to apply SNR conditioning. (default: False).
+        geometric_wd (bool): Enables geometric weight decay. (default: False).
         orthogonal_gradient (bool): whether to use OrthoGrad. (default: False)
         centered_wd (float): Centered Weight Decay coefficient. Instead of decaying weights
             toward zero, they are decayed toward their initial values (anchors). This
@@ -39,6 +45,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         centered_wd_mode (str): The quantization format used to store the anchor
             weights to save VRAM. Options include:
             'full', 'float8', 'int8', 'int4'. (default: 'float8')
+        spectral_normalization (bool): Enable explicit spectral normalization using power iteration. (default: False)
         nnmf_factor (bool): whether to use factorization or disable it. (default: False)
         state_precision (str): Precision method for states. Options: 'auto'
             (parameter precision), 'fp32', 'factored' (SMMF low-rank FP32), 'bf16_sr',
@@ -128,23 +135,33 @@ class SinkSGD_adv(torch.optim.Optimizer):
         self._compiled_step_fns = {}
 
     def load_state_dict(self, state_dict: dict) -> None:
+        """
+        Overrides default load_state_dict to implement a workaround for PyTorch's
+        automatic dtype casting. It ensures factorized states remain float32 for
+        stability, preserves integer/float8 quantized anchor states, and forces
+        standard states onto the parameter's current dtype/device.
+        """
         super().load_state_dict(state_dict)
         param_update.post_process_loaded_state(self)
         self.init_step()
 
     @property
     def supports_fused_back_pass(self):
+        """Returns whether the optimizer supports fused backward pass."""
         return True
 
     @property
     def supports_memory_efficient_fp16(self):
+        """Returns whether the optimizer supports memory-efficient FP16."""
         return True
 
     @property
     def supports_flat_params(self):
+        """Returns whether the optimizer supports flat parameters."""
         return False
 
     def init_step(self):
+        """Initializes optimizer state for all parameters across all parameter groups."""
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
                 self.__init_state(p, group)
@@ -188,6 +205,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step_parameter(self, p: torch.Tensor, group: dict, i: int | None = None):
+        """Performs a single optimization step on a single parameter."""
         if p.grad is None:
             return
 
