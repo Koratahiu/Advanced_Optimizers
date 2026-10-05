@@ -19,7 +19,9 @@ pip install adv_optm
 
 ## What's New
 
-### 🌟 Version 2.5.x: The Massive Refactor
+<details>
+<summary><b>🌟 Version 2.5.x: The Massive Refactor — Click to expand</b></summary>
+
 This major update introduces a complete architectural refactor of the library:
 
 **🆕 New Optimizers & Scaling**
@@ -48,6 +50,8 @@ This major update introduces a complete architectural refactor of the library:
 * **Geometric Weight Decay:** Added specifically for `SinkSGD_adv` and `SignSGD_adv`.
 
 *(Note: `Lion_Prodigy_adv`, `Simplified_AdEMAMix`, and heuristic cautious/grams modes have been deprecated in favor of these superior, theoretically-grounded features).*
+
+</details>
 
 <details>
 <summary><b>Click to see older release notes (v1.2.x - v2.1.x)</b></summary>
