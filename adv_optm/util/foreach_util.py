@@ -1,14 +1,11 @@
 import torch
 
-import torch
-from typing import Sequence, Union, overload
-
 
 def foreach_flattened_ortho_project(
     params: list[torch.Tensor],
     grads: list[torch.Tensor],
     inplace: bool = False,
-) -> Union[torch.Tensor, list[torch.Tensor]]:
+) -> list[torch.Tensor]:
     """
     Orthogonally projects gradient(s) onto the tangent space of parameter(s)
     and rescales to preserve the original gradient norm using torch._foreach ops.
