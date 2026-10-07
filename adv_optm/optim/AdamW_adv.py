@@ -92,9 +92,8 @@ class AdamW_adv(torch.optim.Optimizer):
             (parameter precision), 'fp32', 'factored' (SMMF low-rank FP32), 'bf16_sr' (with
             stochastic rounding), 'fp16' , 'int8_sr'. (default: 'auto')
         foreach (bool | None): If True, uses foreach/multi-tensor operations for
-            improved throughput on small matrices. When None, auto-detects based on
-            parameter count. Only supports a subset of features.
-            (default: None)
+            improved throughput on small matrices. Only supports a subset of features.
+            (default: False)
     """
 
     def __init__(
@@ -143,7 +142,7 @@ class AdamW_adv(torch.optim.Optimizer):
         # torch.compile
         compiled_optimizer: bool = False,
         # Foreach / multi-tensor
-        foreach: bool | None = None,
+        foreach: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -164,11 +163,6 @@ class AdamW_adv(torch.optim.Optimizer):
         # Legacy backwards compatibility support for `nnmf_factor=True`
         if nnmf_factor:
             state_precision = "factored"
-
-        # Resolve foreach: None -> auto-detect, True/False -> explicit
-        if foreach is None:
-            # Auto-detect: use foreach when there are multiple params
-            foreach = False
 
         # Foreach mode only supports a subset of features (designed for small matrices)
         if foreach:
