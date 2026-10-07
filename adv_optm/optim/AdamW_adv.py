@@ -91,6 +91,11 @@ class AdamW_adv(torch.optim.Optimizer):
         state_precision (str): Precision method for Adopt states. Options: 'auto'
             (parameter precision), 'fp32', 'factored' (SMMF low-rank FP32), 'bf16_sr' (with
             stochastic rounding), 'fp16' , 'int8_sr'. (default: 'auto')
+        foreach (bool | None): If True, uses foreach/multi-tensor operations for
+            improved throughput on small matrices. When None, auto-detects based on
+            parameter count. Only supports a subset of features (no factored states,
+            low-precision states, centered_wd, fisher_wd, spectral normalization, etc.).
+            (default: None)
     """
 
     def __init__(
@@ -138,6 +143,8 @@ class AdamW_adv(torch.optim.Optimizer):
         vector_reshape: bool = False,
         # torch.compile
         compiled_optimizer: bool = False,
+        # Foreach / multi-tensor
+        foreach: bool | None = None,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -159,6 +166,43 @@ class AdamW_adv(torch.optim.Optimizer):
         if nnmf_factor:
             state_precision = "factored"
 
+        # Resolve foreach: None -> auto-detect, True/False -> explicit
+        if foreach is None:
+            # Auto-detect: use foreach when there are multiple params
+            foreach = False
+
+        # Foreach mode only supports a subset of features (designed for small matrices)
+        if foreach:
+            _foreach_unsupported = []
+            if state_precision not in ("auto", "fp32"):
+                _foreach_unsupported.append(f"state_precision='{state_precision}'")
+            if factored_2nd:
+                _foreach_unsupported.append("factored_2nd")
+            if nnmf_factor or state_precision == "factored":
+                _foreach_unsupported.append("nnmf_factor / factored state")
+            if centered_wd != 0.0:
+                _foreach_unsupported.append("centered_wd")
+            if fisher_wd:
+                _foreach_unsupported.append("fisher_wd")
+            if spectral_normalization:
+                _foreach_unsupported.append("spectral_normalization")
+            if vector_reshape:
+                _foreach_unsupported.append("vector_reshape")
+            if compiled_optimizer:
+                _foreach_unsupported.append("compiled_optimizer")
+            if orthogonal_gradient != 'disabled':
+                _foreach_unsupported.append(f"orthogonal_gradient='{orthogonal_gradient}'")
+            if kourkoutas_beta:
+                _foreach_unsupported.append("kourkoutas_beta")
+            if cautious_wd:
+                _foreach_unsupported.append("cautious_wd")
+            if _foreach_unsupported:
+                raise ValueError(
+                    f"foreach=True does not support the following features: {', '.join(_foreach_unsupported)}. "
+                    "Foreach is intended for small-matrix training and does not implement "
+                    "memory-saving or advanced features."
+                )
+
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
@@ -171,7 +215,8 @@ class AdamW_adv(torch.optim.Optimizer):
             "spectral_normalization": spectral_normalization,
             "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
             "state_precision": state_precision,
-            "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape, "factored_2nd": factored_2nd
+            "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape, "factored_2nd": factored_2nd,
+            "foreach": foreach,
         }
         self.stochastic_rounding = stochastic_rounding
         self.kourkoutas_beta = kourkoutas_beta
@@ -497,7 +542,135 @@ class AdamW_adv(torch.optim.Optimizer):
                 loss = closure()
 
         for group in self.param_groups:
-            for i, p in enumerate(group['params']):
-                self.step_parameter(p, group, i)
+            if group.get('foreach', False):
+                self._foreach_step(group)
+            else:
+                for i, p in enumerate(group['params']):
+                    self.step_parameter(p, group, i)
 
         return loss
+
+    @torch.no_grad()
+    def _foreach_step(self, group: dict) -> None:
+        """
+        Foreach/multi-tensor optimization step.
+        Uses torch._foreach_* ops where available; falls back to iterative
+        list-comprehension style for ops without foreach support (e.g. atan2).
+        """
+        params = [p for p in group['params'] if p.grad is not None]
+        if not params:
+            return
+
+        grads = [p.grad for p in params]
+        exp_avgs = []
+        exp_avg_sqs = []
+        state_steps = []
+        for p in params:
+            state = self.state[p]
+            self.__init_state(p, group)
+            exp_avgs.append(state['exp_avg'])
+            exp_avg_sqs.append(state['exp_avg_sq'])
+            state_steps.append(torch.tensor(state['step'], dtype=torch.float32, device=p.device))
+
+        beta1, beta2 = group['betas']
+        lr = group['lr']
+        eps = group['eps']
+        weight_decay = group['weight_decay']
+        use_atan2 = group['use_atan2']
+        nesterov = group.get('nesterov', False)
+        nesterov_coef = group.get('nesterov_coef', None)
+        use_mt = beta1 > 0
+        use_bias_correction = group.get('use_bias_correction', True)
+        adaptive_eps = eps  # foreach path: eps is already a scalar
+
+        # Group tensors by (device, dtype) for foreach ops
+        grouped = self._group_by_device_dtype(params, grads, exp_avgs, exp_avg_sqs, state_steps)
+
+        for (g_params, g_grads, g_exp_avgs, g_exp_avg_sqs, g_steps) in grouped.values():
+            if len(g_params) == 0:
+                continue
+
+            # --- Update steps ---
+            torch._foreach_add_(g_steps, 1.0)
+
+            # --- Bias correction ---
+            # All params in a group share the same step, so compute a single scalar
+            # (one device sync per group instead of per parameter)
+            if use_bias_correction:
+                step_tensor = g_steps[0]
+                bias_correction1 = 1.0 - beta1 ** step_tensor
+                sqrt_bias_correction2 = (1.0 - beta2 ** step_tensor) ** 0.5
+                bc1_scalar = float(bias_correction1)
+                sbc2_scalar = float(sqrt_bias_correction2)
+            else:
+                bc1_scalar = 1.0
+                sbc2_scalar = 1.0
+
+            step_size = lr / bc1_scalar if use_bias_correction else lr
+
+            # --- Weight decay (decoupled, applied after update to match iterative path) ---
+            wd_scalar = weight_decay * lr if weight_decay != 0 else None
+
+            # --- Second moment update: exp_avg_sq = beta2 * exp_avg_sq + (1-beta2) * grad^2 ---
+            torch._foreach_mul_(g_exp_avg_sqs, beta2)
+            torch._foreach_addcmul_(g_exp_avg_sqs, g_grads, g_grads, value=1.0 - beta2)
+
+            # --- First moment update: exp_avg = beta1 * exp_avg + (1-beta1) * grad ---
+            if use_mt:
+                torch._foreach_lerp_(g_exp_avgs, g_grads, 1.0 - beta1)
+
+            # --- Compute denom: sqrt(exp_avg_sq) / sbc2 + eps ---
+            denom = torch._foreach_sqrt(g_exp_avg_sqs)
+            torch._foreach_div_(denom, sbc2_scalar)
+            torch._foreach_add_(denom, adaptive_eps)
+
+            if use_atan2:
+                # atan2 is not available as foreach op — fallback to iterative
+                for i, p in enumerate(g_params):
+                    if use_mt:
+                        update = g_exp_avgs[i].clone()
+                        if nesterov:
+                            nv_coef = beta1 if nesterov_coef is None else nesterov_coef
+                            update = update.lerp_(g_grads[i], 1.0 - nv_coef)
+                        update.atan2_(denom[i])
+                    else:
+                        update = g_grads[i].clone()
+                        update.atan2_(denom[i])
+                    g_params[i].add_(update.mul_(-step_size))
+            else:
+                if use_mt:
+                    updates = torch._foreach_clone(g_exp_avgs)
+                    if nesterov:
+                        nv_coef = beta1 if nesterov_coef is None else nesterov_coef
+                        torch._foreach_lerp_(updates, g_grads, 1.0 - nv_coef)
+                    torch._foreach_div_(updates, denom)
+                    torch._foreach_mul_(updates, -step_size)
+                    torch._foreach_add_(g_params, updates)
+                else:
+                    updates = torch._foreach_clone(g_grads)
+                    torch._foreach_div_(updates, denom)
+                    torch._foreach_mul_(updates, -step_size)
+                    torch._foreach_add_(g_params, updates)
+
+            # --- Apply decoupled weight decay (matches apply_parameter_update) ---
+            if wd_scalar is not None:
+                torch._foreach_mul_(g_params, 1.0 - wd_scalar)
+
+            # --- Update state steps in self.state ---
+            for p, s in zip(g_params, g_steps):
+                self.state[p]['step'] = int(s)
+
+    @staticmethod
+    def _group_by_device_dtype(params, grads, exp_avgs, exp_avg_sqs, state_steps):
+        """Groups tensors by (device, dtype) for foreach operations."""
+        groups: dict = {}
+        for i in range(len(params)):
+            key = (params[i].device, params[i].dtype)
+            if key not in groups:
+                groups[key] = [[], [], [], [], []]
+            groups[key][0].append(params[i])
+            groups[key][1].append(grads[i])
+            groups[key][2].append(exp_avgs[i])
+            groups[key][3].append(exp_avg_sqs[i])
+            groups[key][4].append(state_steps[i])
+        return groups
