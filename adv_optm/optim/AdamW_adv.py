@@ -8,6 +8,7 @@ from ..util import param_update
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.update_util import _init_fisher_wd_scaler, _get_fisher_wd_scaler
 from ..util.OrthoGrad import _orthogonalize_gradient
+from ..util.foreach_util import _foreach_orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm, scale_eps
 from ..util.centered_decay import _init_anchor
@@ -550,8 +551,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
         # Orthogonalize gradients if needed
         ortho_mode = group.get('orthogonal_gradient', 'disabled')
-        if ortho_mode != 'disabled':
-            grads = [_orthogonalize_gradient(p, g, ortho_mode) for p, g in zip(params, grads)]
+        grads = _foreach_orthogonalize_gradient(params, grads, ortho_mode)
 
         exp_avgs = []
         exp_avg_sqs = []

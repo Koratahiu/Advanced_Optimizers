@@ -1,6 +1,18 @@
 import torch
 import math
 
+def _foreach_orthogonalize_gradient(p: torch.Tensor, grad: torch.Tensor, mode: str) -> torch.Tensor:
+    """
+    Projects the gradient `grad` to be orthogonal to the parameter `p`.
+    Supports two modes: 'flattened' (vectorized) and 'iterative' (matrix-wise).
+    use torch._foreach ops.
+    """
+    if mode == 'disabled':
+        return grad
+    elif mode == 'flattened':
+        return foreach_flattened_ortho_project(p, grad)
+    elif mode == 'iterative':
+        return foreach_iterative_ortho_project(p, grad, iters=3)
 
 def foreach_iterative_ortho_project(
     params: list[torch.Tensor],
