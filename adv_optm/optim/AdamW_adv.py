@@ -93,8 +93,7 @@ class AdamW_adv(torch.optim.Optimizer):
             stochastic rounding), 'fp16' , 'int8_sr'. (default: 'auto')
         foreach (bool | None): If True, uses foreach/multi-tensor operations for
             improved throughput on small matrices. When None, auto-detects based on
-            parameter count. Only supports a subset of features (no factored states,
-            low-precision states, centered_wd, fisher_wd, spectral normalization, etc.).
+            parameter count. Only supports a subset of features.
             (default: None)
     """
 
@@ -180,22 +179,14 @@ class AdamW_adv(torch.optim.Optimizer):
                 _foreach_unsupported.append("factored_2nd")
             if nnmf_factor or state_precision == "factored":
                 _foreach_unsupported.append("nnmf_factor / factored state")
-            if centered_wd != 0.0:
-                _foreach_unsupported.append("centered_wd")
-            if fisher_wd:
-                _foreach_unsupported.append("fisher_wd")
-            if spectral_normalization:
-                _foreach_unsupported.append("spectral_normalization")
             if vector_reshape:
                 _foreach_unsupported.append("vector_reshape")
             if compiled_optimizer:
                 _foreach_unsupported.append("compiled_optimizer")
-            if orthogonal_gradient != 'disabled':
-                _foreach_unsupported.append(f"orthogonal_gradient='{orthogonal_gradient}'")
             if kourkoutas_beta:
                 _foreach_unsupported.append("kourkoutas_beta")
-            if cautious_wd:
-                _foreach_unsupported.append("cautious_wd")
+            if centered_wd != 0.0 and centered_wd_mode != 'full':
+                _foreach_unsupported.append(f"centered_wd (mode='{centered_wd_mode}')")
             if _foreach_unsupported:
                 raise ValueError(
                     f"foreach=True does not support the following features: {', '.join(_foreach_unsupported)}. "
@@ -562,15 +553,34 @@ class AdamW_adv(torch.optim.Optimizer):
             return
 
         grads = [p.grad for p in params]
+
+        # Orthogonalize gradients if needed
+        ortho_mode = group.get('orthogonal_gradient', 'disabled')
+        if ortho_mode != 'disabled':
+            grads = [_orthogonalize_gradient(p, g, ortho_mode) for p, g in zip(params, grads)]
+
         exp_avgs = []
         exp_avg_sqs = []
         state_steps = []
+        anchors = []
+        wd_scalers_init = []
+
         for p in params:
             state = self.state[p]
             self.__init_state(p, group)
             exp_avgs.append(state['exp_avg'])
             exp_avg_sqs.append(state['exp_avg_sq'])
             state_steps.append(torch.tensor(state['step'], dtype=torch.float32, device=p.device))
+
+            # Collect anchor for centered_wd (full mode only in foreach)
+            cwd = group.get('centered_wd', 0.0)
+            if cwd != 0.0 and 'anchor_data' in state:
+                anchors.append(state['anchor_data'])
+            else:
+                anchors.append(None)
+
+            # Collect initial wd_scaler for fisher_wd
+            wd_scalers_init.append(state.get("wd_scaler", torch.tensor(1.0, device=p.device)))
 
         beta1, beta2 = group['betas']
         lr = group['lr']
@@ -581,7 +591,12 @@ class AdamW_adv(torch.optim.Optimizer):
         nesterov_coef = group.get('nesterov_coef', None)
         use_mt = beta1 > 0
         use_bias_correction = group.get('use_bias_correction', True)
-        adaptive_eps = eps  # foreach path: eps is already a scalar
+        cautious = group.get('cautious_wd', False)
+        fisher_wd = group.get('fisher_wd', False)
+        spectral_norm = group.get('spectral_normalization', False)
+        cwd = group.get('centered_wd', 0.0)
+        decay_factor = lr / self._init_lr
+        adaptive_eps = eps
 
         # Group tensors by (device, dtype) for foreach ops
         grouped = self._group_by_device_dtype(params, grads, exp_avgs, exp_avg_sqs, state_steps)
@@ -590,12 +605,10 @@ class AdamW_adv(torch.optim.Optimizer):
             if len(g_params) == 0:
                 continue
 
-            # --- Update steps ---
+            # Update steps
             torch._foreach_add_(g_steps, 1.0)
 
-            # --- Bias correction ---
-            # All params in a group share the same step, so compute a single scalar
-            # (one device sync per group instead of per parameter)
+            # Bias correction
             if use_bias_correction:
                 step_tensor = g_steps[0]
                 bias_correction1 = 1.0 - beta1 ** step_tensor
@@ -608,24 +621,23 @@ class AdamW_adv(torch.optim.Optimizer):
 
             step_size = lr / bc1_scalar if use_bias_correction else lr
 
-            # --- Weight decay (decoupled, applied after update to match iterative path) ---
-            wd_scalar = weight_decay * lr if weight_decay != 0 else None
-
-            # --- Second moment update: exp_avg_sq = beta2 * exp_avg_sq + (1-beta2) * grad^2 ---
+            # Second moment update
             torch._foreach_mul_(g_exp_avg_sqs, beta2)
             torch._foreach_addcmul_(g_exp_avg_sqs, g_grads, g_grads, value=1.0 - beta2)
 
-            # --- First moment update: exp_avg = beta1 * exp_avg + (1-beta1) * grad ---
+            # First moment update
             if use_mt:
                 torch._foreach_lerp_(g_exp_avgs, g_grads, 1.0 - beta1)
 
-            # --- Compute denom: sqrt(exp_avg_sq) / sbc2 + eps ---
+            # Compute denom: sqrt(exp_avg_sq) / sbc2 + eps
             denom = torch._foreach_sqrt(g_exp_avg_sqs)
             torch._foreach_div_(denom, sbc2_scalar)
             torch._foreach_add_(denom, adaptive_eps)
 
+            # Compute updates (unscaled)
             if use_atan2:
-                # atan2 is not available as foreach op — fallback to iterative
+                # atan2 is not available as foreach op - fallback to iterative
+                updates = []
                 for i, p in enumerate(g_params):
                     if use_mt:
                         update = g_exp_avgs[i].clone()
@@ -636,7 +648,7 @@ class AdamW_adv(torch.optim.Optimizer):
                     else:
                         update = g_grads[i].clone()
                         update.atan2_(denom[i])
-                    g_params[i].add_(update.mul_(-step_size))
+                    updates.append(update)
             else:
                 if use_mt:
                     updates = torch._foreach_clone(g_exp_avgs)
@@ -644,19 +656,74 @@ class AdamW_adv(torch.optim.Optimizer):
                         nv_coef = beta1 if nesterov_coef is None else nesterov_coef
                         torch._foreach_lerp_(updates, g_grads, 1.0 - nv_coef)
                     torch._foreach_div_(updates, denom)
-                    torch._foreach_mul_(updates, -step_size)
-                    torch._foreach_add_(g_params, updates)
                 else:
                     updates = torch._foreach_clone(g_grads)
                     torch._foreach_div_(updates, denom)
-                    torch._foreach_mul_(updates, -step_size)
-                    torch._foreach_add_(g_params, updates)
 
-            # --- Apply decoupled weight decay (matches apply_parameter_update) ---
-            if wd_scalar is not None:
-                torch._foreach_mul_(g_params, 1.0 - wd_scalar)
+            # Spectral normalization (per-parameter, applied to update)
+            if spectral_norm:
+                for i, p in enumerate(g_params):
+                    updates[i] = scale_update(p, updates[i], step_size, state=self.state[p])
+            else:
+                torch._foreach_mul_(updates, -step_size)
 
-            # --- Update state steps in self.state ---
+            # Apply main update to params
+            torch._foreach_add_(g_params, updates)
+
+            # Weight decay
+            wd_scalar = weight_decay * decay_factor if weight_decay != 0 else None
+            cwd_scalar = cwd * decay_factor if cwd != 0 else None
+
+            if wd_scalar is not None or cwd_scalar is not None:
+                # Compute global indices for this group
+                group_start = 0
+                for gp in grouped.values():
+                    if gp is grouped[(g_params[0].device, g_params[0].dtype)]:
+                        break
+                    group_start += len(gp[0])
+                # Compute fisher_wd scalers if needed
+                if fisher_wd and wd_scalar is not None:
+                    for i, p in enumerate(g_params):
+                        idx = group_start + i
+                        wd_scaler = _get_fisher_wd_scaler(group, wd_scalers_init[idx], p, denom[i], use_atan2)
+                        wd_scalers_init[idx].copy_(wd_scaler)
+
+                # Standard weight decay
+                if wd_scalar is not None:
+                    if fisher_wd:
+                        for i, p in enumerate(g_params):
+                            idx = group_start + i
+                            scaled = wd_scalar * wd_scalers_init[idx]
+                            if cautious:
+                                mask = (g_params[i] * updates[i] >= 0).to(p.dtype)
+                                g_params[i].addcmul_(g_params[i], mask * scaled, value=-1.0)
+                                del mask
+                            else:
+                                g_params[i].mul_(1.0 - scaled)
+                    elif cautious:
+                        for i, p in enumerate(g_params):
+                            mask = (g_params[i] * updates[i] >= 0).to(p.dtype)
+                            g_params[i].addcmul_(g_params[i], mask * wd_scalar, value=-1.0)
+                            del mask
+                    else:
+                        torch._foreach_mul_(g_params, 1.0 - wd_scalar)
+
+                # Centered weight decay
+                if cwd_scalar is not None:
+                    for i, p in enumerate(g_params):
+                        idx = group_start + i
+                        anchor = anchors[idx]
+                        if anchor is not None:
+                            decay_target = g_params[i].sub(anchor)
+                            if cautious:
+                                mask = (g_params[i] * updates[i] >= 0).to(p.dtype)
+                                g_params[i].addcmul_(decay_target, mask * cwd_scalar, value=-1.0)
+                                del mask
+                            else:
+                                g_params[i].add_(decay_target, alpha=-cwd_scalar)
+                            del decay_target
+
+            # Update state steps in self.state
             for p, s in zip(g_params, g_steps):
                 self.state[p]['step'] = int(s)
 
