@@ -604,7 +604,6 @@ class AdamW_adv(torch.optim.Optimizer):
         fisher_wd = group.get('fisher_wd', False)
         spectral_norm = group.get('spectral_normalization', False)
         cwd = group.get('centered_wd', 0.0)
-        decay_factor = lr / self._init_lr
 
         # Orthogonalize gradients if needed
         ortho_mode = group.get('orthogonal_gradient', 'disabled')
@@ -670,8 +669,8 @@ class AdamW_adv(torch.optim.Optimizer):
             torch._foreach_add_(g_params, updates)
 
             # Weight decay
-            wd_scalar = weight_decay * decay_factor if weight_decay != 0 else None
-            cwd_scalar = cwd * decay_factor if cwd != 0 else None
+            wd_scalar = weight_decay * lr if weight_decay != 0 else None
+            cwd_scalar = cwd * lr if cwd != 0 else None
 
             if wd_scalar is not None or cwd_scalar is not None:
                 # Compute global indices for this group
