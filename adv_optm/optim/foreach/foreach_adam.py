@@ -2,7 +2,8 @@ import torch
 
 import math
 
-from ...util.scaled_optm import scale_update, scale_eps
+from ...util.scaled_optm import scale_eps
+from ...util.foreach.fh_scaled_optm import foreach_scale_update, _foreach_collect_spectral_vars
 
 from ...util.foreach.fh_orthograd import _foreach_orthogonalize_gradient
 from ...util.foreach.fh_param_update import foreach_apply_parameter_update
@@ -69,15 +70,12 @@ def foreach_step(self, group: dict) -> None:
 @torch.no_grad()
 def _foreach_step(self, group: dict, params, grads, exp_avgs, exp_avg_sqs, state_steps, anchors, wd_scalers_init, lr, adaptive_eps) -> None:
     beta1, beta2 = group['betas']
-    weight_decay = group['weight_decay']
     use_atan2 = group['use_atan2']
     nesterov = group.get('nesterov', False)
     nesterov_coef = group.get('nesterov_coef', None)
     use_mt = beta1 > 0
     use_bias_correction = group.get('use_bias_correction', True)
-    cautious = group.get('cautious_wd', False)
     fisher_wd = group.get('fisher_wd', False)
-    spectral_norm = group.get('spectral_normalization', False)
     cwd = group.get('centered_wd', 0.0)
 
     # Orthogonalize gradients if needed
@@ -131,9 +129,14 @@ def _foreach_step(self, group: dict, params, grads, exp_avgs, exp_avg_sqs, state
         else:
             torch._foreach_div_(updates, denom)
 
-        # Spectral normalization (per-parameter, applied to update)
-        if spectral_norm:
-            updates = tuple(scale_update(p, u, step_size, state=self.state[p]) for p, u in zip(g_params, updates))
+        # Spectral normalization via foreach_scale_update
+        if group.get('spectral_normalization', False):
+            u_states, v_states, spectral_targets = _foreach_collect_spectral_vars(self, g_params, self.state)
+            updates = foreach_scale_update(
+                g_params, updates, step_size,
+                u_state=u_states, v_state=v_states,
+                target_scale=spectral_targets,
+            )
         else:
             if use_atan2:
                 step_size = step_size * A

@@ -12,7 +12,6 @@ def foreach_scale_update(
     u_state: list[Tensor] | tuple[Tensor, ...] | None = None,
     v_state: list[Tensor] | tuple[Tensor, ...] | None = None,
     target_scale: list | None = None,
-    state: dict | None = None,
 ) -> tuple[Tensor, ...]:
     """
     Applies adaptive scaling to the parameter update based on the parameter's
@@ -45,14 +44,11 @@ def foreach_scale_update(
     # OFT Block Parameters: shape (k, C(b,2))
     # Direct spectral normalization on the skew-symmetric blocks.
     if oft_param:
-        return apply_foreach_spectral_riemannian_oft(params, update, lr, state)
+        return apply_foreach_spectral_riemannian_oft(params, update, u_state=u_state, v_state=v_state, lr=lr, target_scale=target_scale)
 
     # LoRA Factors or Full Finetuning weights
     # Scales update to maintain consistent spectral norm across different layer sizes and ranks.
     if spectral_param:
-        d_out = update.shape[0]
-        d_in = update.numel() // d_out
-        target_scale = 1 if getattr(p, '_is_lora_A', False) else math.sqrt(d_out / d_in)
         return foreach_spectral_normalization(update, u_state=u_state, v_state=v_state, lr=lr, target_scale=target_scale)
 
 @torch.no_grad()
@@ -67,17 +63,17 @@ def foreach_max_abs_normalization(update: list[Tensor] | tuple[Tensor, ...], lr:
     return torch._foreach_mul_(update, lr)
 
 def _foreach_collect_spectral_vars(
+    self,
     params: list[Tensor] | tuple[Tensor, ...],
-    state: dict,
 ) -> tuple[list[Tensor], list[Tensor]]:
     u_states = []
     v_states = []
     spectral_target = []
     for p in params:
-        p_state = state[p]
-        if 'spectral_u' in p_state:
-            u_states.append(p_state['spectral_u'])
-            v_states.append(p_state['spectral_v'])
+        state = self.state[p]
+        if 'spectral_u' in state:
+            u_states.append(state['spectral_u'])
+            v_states.append(state['spectral_v'])
         d_out = p.shape[0]
         d_in = p.numel() // d_out
         target_scale = 1 if getattr(p, '_is_lora_A', False) else math.sqrt(d_out / d_in)
@@ -219,8 +215,16 @@ def apply_foreach_spectral_riemannian_oft(
             G = G - G.transpose(-2, -1)
             G_list.append(G)
 
+        # Index into u/v states for this group only
+        g_u_state = [u_state[i] for i in indices]
+        g_v_state = [v_state[i] for i in indices]
+
+        # Unsqueeze u/v to 3D for bmm: (batch, block, 1)
+        u_3d = [u.unsqueeze(-1) for u in g_u_state]
+        v_3d = [v.unsqueeze(-1) for v in g_v_state]
+
         # Power Iteration - Update v (Right Singular Vector)
-        v_raws = [torch.bmm(G.mT, u) for G, u in zip(G_list, u_states)]
+        v_raws = [torch.bmm(G.mT, u) for G, u in zip(G_list, u_3d)]
         v_norms = [torch.linalg.vector_norm(v, dim=1, keepdim=True) for v in v_raws]
 
         # Stability mask: mask = (sign(norm - 1e-6) + 1) / 2
@@ -233,12 +237,15 @@ def apply_foreach_spectral_riemannian_oft(
         v_raws = torch._foreach_div(v_raws, v_norms)
 
         # In-place state update: v_state += mask_v * (candidate_v - v_state)
-        diff_v2 = torch._foreach_sub(v_raws, v_states)
+        diff_v2 = torch._foreach_sub(v_raws, v_3d)
         scaled_v = torch._foreach_mul(diff_v2, mask_v)
-        v_states = torch._foreach_add(v_states, scaled_v)
+        v_3d = torch._foreach_add(v_3d, scaled_v)
+        # Write back to global state lists
+        for idx, i in enumerate(indices):
+            v_state[i] = v_3d[idx].squeeze(-1)
 
         # Power Iteration - Update u (Left Singular Vector)
-        u_raws_pre = [torch.bmm(G, v) for G, v in zip(G_list, v_states)]
+        u_raws_pre = [torch.bmm(G, v) for G, v in zip(G_list, v_3d)]
         sigmas = [torch.linalg.vector_norm(u, dim=1, keepdim=True) for u in u_raws_pre]
 
         # Stability mask for u
@@ -254,13 +261,18 @@ def apply_foreach_spectral_riemannian_oft(
         u_raws_pre = torch._foreach_div(u_raws_pre, sigmas)
 
         # In-place state update: u_state += mask_u * (candidate_u - u_state)
-        diff_u2 = torch._foreach_sub(u_raws_pre, u_states)
+        diff_u2 = torch._foreach_sub(u_raws_pre, u_3d)
         scaled_u = torch._foreach_mul(diff_u2, mask_u)
-        u_states = torch._foreach_add(u_states, scaled_u)
+        u_3d = torch._foreach_add(u_3d, scaled_u)
 
-        # Compute sigma (spectral norm) for each block
+        # Compute sigma (spectral norm) for each block BEFORE squeezing
         # sigma = sum(next_u * u_raw_pre, dim=1) -> shape (batch_size, 1)
-        sigma_list = [torch.sum(u * ur, dim=1) for u, ur in zip(u_states, u_raws_for_sigma)]
+        sigma_list = [torch.sum(u * ur, dim=1) for u, ur in zip(u_3d, u_raws_for_sigma)]
+
+        # Squeeze back to 2D and write to global state lists
+        for idx, i in enumerate(indices):
+            u_state[i] = u_3d[idx].squeeze(-1)
+            v_state[i] = v_3d[idx].squeeze(-1)
 
         # Scale updates using foreach operations
         target_scale = 0.5 * scale_factor
