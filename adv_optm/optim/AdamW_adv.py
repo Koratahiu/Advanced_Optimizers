@@ -622,10 +622,8 @@ class AdamW_adv(torch.optim.Optimizer):
             # Bias correction
             if use_bias_correction:
                 step_tensor = g_steps[0]
-                bias_correction1 = 1.0 - beta1 ** step_tensor
-                sqrt_bias_correction2 = (1.0 - beta2 ** step_tensor) ** 0.5
-                bc1_scalar = float(bias_correction1)
-                sbc2_scalar = float(sqrt_bias_correction2)
+                bc1_scalar = 1.0 - beta1 ** step_tensor
+                sbc2_scalar = (1.0 - beta2 ** step_tensor) ** 0.5
             else:
                 bc1_scalar = 1.0
                 sbc2_scalar = 1.0
@@ -666,6 +664,8 @@ class AdamW_adv(torch.optim.Optimizer):
                 for i, p in enumerate(g_params):
                     updates[i] = scale_update(p, updates[i], step_size, state=self.state[p])
             else:
+                if use_atan2:
+                    step_size = step_size * A
                 torch._foreach_mul_(updates, -step_size)
 
             # Compute fisher_wd scalers if needed
