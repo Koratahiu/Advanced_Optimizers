@@ -4,14 +4,14 @@ from torch import Tensor
 from typing import Dict, Any
 
 def _apply_weight_decay(
-    p_calc: list[torch.Tensor],
-    update_calc: list[torch.Tensor],
+    p_calc: list[torch.Tensor] | tuple[Tensor, ...],
+    update_calc: list[torch.Tensor] | tuple[Tensor, ...],
     group: Dict[str, Any],
-    scaled_wd: float | Tensor | None,
-    scaled_cwd: float | Tensor | None,
+    scaled_wd: float | Tensor | list[Tensor] | tuple[Tensor, ...] | None,
+    scaled_cwd: float | Tensor | list[Tensor] | tuple[Tensor, ...] | None,
     wd_target: Tensor | None = None,
     cwd_target: Tensor | None = None,
-    anchors: list[torch.Tensor] | None = None,
+    anchors: list[torch.Tensor] | tuple[Tensor, ...] | None = None,
 ) -> None:
     """
     Apply decoupled weight decay (Standard and/or Centered) independently.
@@ -36,11 +36,17 @@ def _apply_weight_decay(
             if isinstance(scaled_wd, Tensor):
                 torch._foreach_mul_(masks, [scaled_wd])
                 torch._foreach_addcmul_(p_calc, wd_target, masks, value=-1.0)
+            elif isinstance(scaled_wd, (list, tuple)):
+                torch._foreach_mul_(masks, scaled_wd)
+                torch._foreach_addcmul_(p_calc, wd_target, masks, value=-1.0)
             else:
                 torch._foreach_addcmul_(p_calc, wd_target, masks, value=-scaled_wd)
         else:
             if isinstance(scaled_wd, Tensor):
                 scaled_targets = torch._foreach_mul(wd_target, [scaled_wd * (-1.0)])
+                torch._foreach_add_(p_calc, scaled_targets)
+            elif isinstance(scaled_wd, (list, tuple)):
+                scaled_targets = torch._foreach_mul(wd_target, scaled_wd)
                 torch._foreach_add_(p_calc, scaled_targets)
             else:
                 torch._foreach_add_(p_calc, wd_target, alpha=-scaled_wd)
@@ -69,11 +75,17 @@ def _apply_weight_decay(
             if isinstance(scaled_cwd, Tensor):
                 torch._foreach_mul_(masks, scaled_cwd)
                 torch._foreach_addcmul_(p_calc, decay_target, masks, value=-1.0)
+            elif isinstance(scaled_cwd, (list, tuple)):
+                torch._foreach_mul_(masks, scaled_cwd)
+                torch._foreach_addcmul_(p_calc, decay_target, masks, value=-1.0)
             else:
                 torch._foreach_addcmul_(p_calc, decay_target, masks, value=-scaled_cwd)
         else:
             if isinstance(scaled_cwd, torch.Tensor):
                 scaled_targets = torch._foreach_mul(decay_target, [scaled_cwd * (-1.0)])
+                torch._foreach_add_(p_calc, scaled_targets)
+            elif isinstance(scaled_cwd, (list, tuple)):
+                scaled_targets = torch._foreach_mul(decay_target, scaled_cwd)
                 torch._foreach_add_(p_calc, scaled_targets)
             else:
                 torch._foreach_add_(p_calc, decay_target, alpha=-scaled_cwd)
@@ -84,16 +96,16 @@ def _apply_weight_decay(
 
 def foreach_apply_parameter_update(
     self,
-    params: list[torch.Tensor],
+    params: list[torch.Tensor] | tuple[Tensor, ...],
     group: Dict[str, Any],
-    update: list[torch.Tensor],
+    update: list[torch.Tensor] | tuple[Tensor, ...],
     lr: float | Tensor,
     wd: float | None = None,
     decoupled: bool = False,
     wd_scaler: float | Tensor | None = None,
     wd_target: Tensor | None = None,
     cwd_target: Tensor | None = None,
-    anchors: list[torch.Tensor] | None = None,
+    anchors: list[torch.Tensor] | tuple[Tensor, ...] | None = None,
 ) -> None:
     """
     Applies decoupled weight decay (standard, cautious, centered) and the final
@@ -121,10 +133,16 @@ def foreach_apply_parameter_update(
     scaled_cwd = (cwd * decay_factor) if cwd != 0 else None
 
     if wd_scaler is not None:
-        if scaled_wd is not None:
-            scaled_wd = scaled_wd * wd_scaler
-        if scaled_cwd is not None:
-            scaled_cwd = scaled_cwd * wd_scaler
+        if isinstance(wd_scaler, (list, tuple)):
+            if scaled_wd is not None:
+                scaled_wd = torch._foreach_mul_(wd_scaler, scaled_wd)
+            if scaled_cwd is not None:
+                scaled_cwd = torch._foreach_mul_(wd_scaler, scaled_cwd)
+        else:
+            if scaled_wd is not None:
+                scaled_wd = scaled_wd * wd_scaler
+            if scaled_cwd is not None:
+                scaled_cwd = scaled_cwd * wd_scaler
 
     if scaled_wd is not None or scaled_cwd is not None:
         _apply_weight_decay(params, update, group, scaled_wd, scaled_cwd, wd_target, cwd_target, anchors)

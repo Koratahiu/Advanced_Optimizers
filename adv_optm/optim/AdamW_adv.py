@@ -14,6 +14,8 @@ from ..util.centered_decay import _init_anchor
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 
 from ..util.foreach.fh_orthograd import _foreach_orthogonalize_gradient
+from ..util.foreach.fh_param_update import foreach_apply_parameter_update
+from ..util.foreach.fh_update_util import _foreach_get_fisher_wd_scaler
 
 A = 4 / math.pi
 
@@ -666,61 +668,17 @@ class AdamW_adv(torch.optim.Optimizer):
             else:
                 torch._foreach_mul_(updates, -step_size)
 
-            # Apply main update to params
-            torch._foreach_add_(g_params, updates)
+            # Compute fisher_wd scalers if needed
+            wd_scalers = None
+            if fisher_wd:
+                wd_scalers = _foreach_get_fisher_wd_scaler(group, g_params, denom, group['eps'])
 
-            # Weight decay
-            wd_scalar = weight_decay * lr if weight_decay != 0 else None
-            cwd_scalar = cwd * lr if cwd != 0 else None
-
-            if wd_scalar is not None or cwd_scalar is not None:
-                # Compute global indices for this group
-                group_start = 0
-                for gp in grouped.values():
-                    if gp is grouped[(g_params[0].device, g_params[0].dtype)]:
-                        break
-                    group_start += len(gp[0])
-                # Compute fisher_wd scalers if needed
-                if fisher_wd and wd_scalar is not None:
-                    for i, p in enumerate(g_params):
-                        idx = group_start + i
-                        wd_scaler = _get_fisher_wd_scaler(group, wd_scalers_init[idx], p, denom[i], use_atan2)
-                        wd_scalers_init[idx].copy_(wd_scaler)
-
-                # Standard weight decay
-                if wd_scalar is not None:
-                    if fisher_wd:
-                        for i, p in enumerate(g_params):
-                            idx = group_start + i
-                            scaled = wd_scalar * wd_scalers_init[idx]
-                            if cautious:
-                                mask = (g_params[i] * updates[i] >= 0).to(p.dtype)
-                                g_params[i].addcmul_(g_params[i], mask * scaled, value=-1.0)
-                                del mask
-                            else:
-                                g_params[i].mul_(1.0 - scaled)
-                    elif cautious:
-                        for i, p in enumerate(g_params):
-                            mask = (g_params[i] * updates[i] >= 0).to(p.dtype)
-                            g_params[i].addcmul_(g_params[i], mask * wd_scalar, value=-1.0)
-                            del mask
-                    else:
-                        torch._foreach_mul_(g_params, 1.0 - wd_scalar)
-
-                # Centered weight decay
-                if cwd_scalar is not None:
-                    for i, p in enumerate(g_params):
-                        idx = group_start + i
-                        anchor = anchors[idx]
-                        if anchor is not None:
-                            decay_target = g_params[i].sub(anchor)
-                            if cautious:
-                                mask = (g_params[i] * updates[i] >= 0).to(p.dtype)
-                                g_params[i].addcmul_(decay_target, mask * cwd_scalar, value=-1.0)
-                                del mask
-                            else:
-                                g_params[i].add_(decay_target, alpha=-cwd_scalar)
-                            del decay_target
+            # Apply update and weight decay via foreach helper
+            foreach_apply_parameter_update(
+                self, g_params, group, updates, step_size,
+                wd_scaler=wd_scalers,
+                anchors=anchors if cwd != 0.0 else None,
+            )
 
     @staticmethod
     def _group_by_device_dtype(params, grads, exp_avgs, exp_avg_sqs, state_steps):
