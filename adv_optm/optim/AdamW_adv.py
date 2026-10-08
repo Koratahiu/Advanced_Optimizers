@@ -666,7 +666,7 @@ class AdamW_adv(torch.optim.Optimizer):
             else:
                 if use_atan2:
                     step_size = step_size * A
-                torch._foreach_mul_(updates, -step_size)
+                torch._foreach_mul_(updates, step_size)
 
             # Compute fisher_wd scalers if needed
             wd_scalers = None

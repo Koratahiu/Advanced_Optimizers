@@ -43,11 +43,11 @@ def _apply_weight_decay(
                 torch._foreach_addcmul_(p_calc, wd_target, masks, value=-scaled_wd)
         else:
             if isinstance(scaled_wd, Tensor):
-                scaled_targets = torch._foreach_mul(wd_target, [scaled_wd * (-1.0)])
+                scaled_targets = torch._foreach_mul(wd_target, -scaled_wd)
                 torch._foreach_add_(p_calc, scaled_targets)
             elif isinstance(scaled_wd, (list, tuple)):
                 scaled_targets = torch._foreach_mul(wd_target, scaled_wd)
-                torch._foreach_add_(p_calc, scaled_targets)
+                torch._foreach_add_(p_calc, scaled_targets, alpha=-1.0)
             else:
                 torch._foreach_add_(p_calc, wd_target, alpha=-scaled_wd)
 
@@ -82,11 +82,11 @@ def _apply_weight_decay(
                 torch._foreach_addcmul_(p_calc, decay_target, masks, value=-scaled_cwd)
         else:
             if isinstance(scaled_cwd, torch.Tensor):
-                scaled_targets = torch._foreach_mul(decay_target, [scaled_cwd * (-1.0)])
+                scaled_targets = torch._foreach_mul(decay_target, -scaled_cwd)
                 torch._foreach_add_(p_calc, scaled_targets)
             elif isinstance(scaled_cwd, (list, tuple)):
                 scaled_targets = torch._foreach_mul(decay_target, scaled_cwd)
-                torch._foreach_add_(p_calc, scaled_targets)
+                torch._foreach_add_(p_calc, scaled_targets, alpha=-1.0)
             else:
                 torch._foreach_add_(p_calc, decay_target, alpha=-scaled_cwd)
 
