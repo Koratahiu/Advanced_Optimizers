@@ -176,8 +176,6 @@ class AdamW_adv(torch.optim.Optimizer):
                 _foreach_unsupported.append("nnmf_factor / factored state")
             if vector_reshape:
                 _foreach_unsupported.append("vector_reshape")
-            if compiled_optimizer:
-                _foreach_unsupported.append("compiled_optimizer")
             if kourkoutas_beta:
                 _foreach_unsupported.append("kourkoutas_beta")
             if centered_wd != 0.0 and centered_wd_mode != 'full':
@@ -224,6 +222,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
         # Initialize compiled function (by parameter shape)
         self._compiled_step_fns = {}
+        self._compiled_foreach_step = None
 
     def load_state_dict(self, state_dict: dict) -> None:
         """
@@ -529,7 +528,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
         for group in self.param_groups:
             if group.get('foreach', False):
-                self._foreach_step(group)
+                self.foreach_step(group)
             else:
                 for i, p in enumerate(group['params']):
                     self.step_parameter(p, group, i)
@@ -537,7 +536,7 @@ class AdamW_adv(torch.optim.Optimizer):
         return loss
 
     @torch.no_grad()
-    def _foreach_step(self, group: dict) -> None:
+    def foreach_step(self, group: dict) -> None:
         """
         Foreach/multi-tensor optimization step.
         Uses torch._foreach_* ops where available; falls back to iterative
@@ -549,22 +548,20 @@ class AdamW_adv(torch.optim.Optimizer):
 
         grads = [p.grad for p in params]
 
-        # Orthogonalize gradients if needed
-        ortho_mode = group.get('orthogonal_gradient', 'disabled')
-        grads = _foreach_orthogonalize_gradient(params, grads, ortho_mode)
-
         exp_avgs = []
         exp_avg_sqs = []
         state_steps = []
         anchors = []
         wd_scalers_init = []
+        adaptive_eps = []
 
         for p in params:
             state = self.state[p]
             self.__init_state(p, group)
             exp_avgs.append(state['exp_avg'])
             exp_avg_sqs.append(state['exp_avg_sq'])
-            state_steps.append(torch.tensor(state['step'], dtype=torch.float32, device=p.device))
+            state['step'] += 1
+            state_steps.append(torch.tensor(state['step']))
 
             # Collect anchor for centered_wd (full mode only in foreach)
             cwd = group.get('centered_wd', 0.0)
@@ -574,11 +571,29 @@ class AdamW_adv(torch.optim.Optimizer):
                 anchors.append(None)
 
             # Collect initial wd_scaler for fisher_wd
-            wd_scalers_init.append(state.get("wd_scaler", torch.tensor(1.0, device=p.device)))
+            if group.get('fisher_wd', False):
+                wd_scalers_init.append(state.get("wd_scaler", torch.tensor(1.0, device=p.device)))
 
+            eps = group['eps']
+            adaptive_eps.append(scale_eps(eps, p))
+
+        lr = torch.as_tensor(group['lr']) if group.get('compiled_optimizer', False) else group['lr']
+        if group.get('compiled_optimizer', False):
+            self._compiled_foreach_step = torch.compile(
+                self._foreach_step,
+                fullgraph=True,
+                dynamic=False
+            )
+            foreach_step_fn = self._compiled_foreach_step
+        else:
+            foreach_step_fn = self._foreach_step
+
+        foreach_step_fn(group, params, grads, exp_avgs, exp_avg_sqs, state_steps, anchors, wd_scalers_init, lr, adaptive_eps)
+
+
+    @torch.no_grad()
+    def _foreach_step(self, group: dict, params, grads, exp_avgs, exp_avg_sqs, state_steps, anchors, wd_scalers_init, lr, adaptive_eps) -> None:
         beta1, beta2 = group['betas']
-        lr = group['lr']
-        eps = group['eps']
         weight_decay = group['weight_decay']
         use_atan2 = group['use_atan2']
         nesterov = group.get('nesterov', False)
@@ -590,7 +605,10 @@ class AdamW_adv(torch.optim.Optimizer):
         spectral_norm = group.get('spectral_normalization', False)
         cwd = group.get('centered_wd', 0.0)
         decay_factor = lr / self._init_lr
-        adaptive_eps = eps
+
+        # Orthogonalize gradients if needed
+        ortho_mode = group.get('orthogonal_gradient', 'disabled')
+        grads = _foreach_orthogonalize_gradient(params, grads, ortho_mode)
 
         # Group tensors by (device, dtype) for foreach ops
         grouped = self._group_by_device_dtype(params, grads, exp_avgs, exp_avg_sqs, state_steps)
@@ -598,9 +616,6 @@ class AdamW_adv(torch.optim.Optimizer):
         for (g_params, g_grads, g_exp_avgs, g_exp_avg_sqs, g_steps) in grouped.values():
             if len(g_params) == 0:
                 continue
-
-            # Update steps
-            torch._foreach_add_(g_steps, 1.0)
 
             # Bias correction
             if use_bias_correction:
@@ -626,33 +641,23 @@ class AdamW_adv(torch.optim.Optimizer):
             # Compute denom: sqrt(exp_avg_sq) / sbc2 + eps
             denom = torch._foreach_sqrt(g_exp_avg_sqs)
             torch._foreach_div_(denom, sbc2_scalar)
-            torch._foreach_add_(denom, adaptive_eps)
+            if not use_atan2:
+                torch._foreach_add_(denom, adaptive_eps)
 
             # Compute updates (unscaled)
-            if use_atan2:
-                # atan2 is not available as foreach op - fallback to iterative
-                updates = []
-                for i, p in enumerate(g_params):
-                    if use_mt:
-                        update = g_exp_avgs[i].clone()
-                        if nesterov:
-                            nv_coef = beta1 if nesterov_coef is None else nesterov_coef
-                            update = update.lerp_(g_grads[i], 1.0 - nv_coef)
-                        update.atan2_(denom[i])
-                    else:
-                        update = g_grads[i].clone()
-                        update.atan2_(denom[i])
-                    updates.append(update)
+            if use_mt:
+                updates = torch._foreach_clone(g_exp_avgs)
+                if nesterov:
+                    nv_coef = beta1 if nesterov_coef is None else nesterov_coef
+                    torch._foreach_lerp_(updates, g_grads, 1.0 - nv_coef)
             else:
-                if use_mt:
-                    updates = torch._foreach_clone(g_exp_avgs)
-                    if nesterov:
-                        nv_coef = beta1 if nesterov_coef is None else nesterov_coef
-                        torch._foreach_lerp_(updates, g_grads, 1.0 - nv_coef)
-                    torch._foreach_div_(updates, denom)
-                else:
-                    updates = torch._foreach_clone(g_grads)
-                    torch._foreach_div_(updates, denom)
+                updates = torch._foreach_clone(g_grads)
+
+            if use_atan2:
+                for i, p in enumerate(g_params):
+                    updates[i].atan2_(denom[i])
+            else:
+                torch._foreach_div_(updates, denom)
 
             # Spectral normalization (per-parameter, applied to update)
             if spectral_norm:
@@ -716,10 +721,6 @@ class AdamW_adv(torch.optim.Optimizer):
                             else:
                                 g_params[i].add_(decay_target, alpha=-cwd_scalar)
                             del decay_target
-
-            # Update state steps in self.state
-            for p, s in zip(g_params, g_steps):
-                self.state[p]['step'] = int(s)
 
     @staticmethod
     def _group_by_device_dtype(params, grads, exp_avgs, exp_avg_sqs, state_steps):
