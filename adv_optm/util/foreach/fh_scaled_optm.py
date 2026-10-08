@@ -4,6 +4,7 @@ from torch import Tensor
 import math
 
 from .. import scaled_optm
+from .. import param_update
 
 _OFT_INDICES_CACHE = {}
 
@@ -13,20 +14,21 @@ def foreach_scale_update(
     lr: float,
     u_state: list[Tensor] | tuple[Tensor, ...] | None = None,
     v_state: list[Tensor] | tuple[Tensor, ...] | None = None,
-    target_scale: list | None = None
-) -> Tensor:
+    target_scale: list | None = None,
+    state: dict | None = None,
+) -> tuple[Tensor, ...]:
     """
     Applies adaptive scaling to the parameter update based on the parameter's
     role (DoRA, OFT, or LoRA/Full Finetuning).
 
     Args:
-        p: The original parameter tensor.
-        update: The computed gradient/update tensor to be scaled.
+        params: The original parameter tensors.
+        update: The computed gradient/update tensors to be scaled.
         lr: The learning rate.
         state: The state dict used for spectral normalization.
 
     Returns:
-        The scaled update tensor.
+        The scaled update tensors.
     """
     vector_param = []
     oft_param = []
@@ -46,7 +48,7 @@ def foreach_scale_update(
     # OFT Block Parameters: shape (k, C(b,2))
     # Direct spectral normalization on the skew-symmetric blocks.
     if oft_param:
-        return apply_spectral_riemannian_oft(params, update, lr, state)
+        return apply_foreach_spectral_riemannian_oft(params, update, lr, state)
 
     # LoRA Factors or Full Finetuning weights
     # Scales update to maintain consistent spectral norm across different layer sizes and ranks.
@@ -167,3 +169,139 @@ def foreach_spectral_normalization(
     # Apply scaling in-place to all update tensors
     torch._foreach_mul_(update, sigmas)
     return tuple(update)
+
+@torch.no_grad()
+def apply_foreach_spectral_riemannian_oft(
+    params: list[Tensor] | tuple[Tensor, ...],
+    update: list[Tensor] | tuple[Tensor, ...],
+    lr: float,
+    state: dict | None = None,
+) -> tuple[Tensor, ...]:
+    """
+    Applies Spectral Normalization directly on the skew-symmetric gradient
+    using foreach operations for batched tensor processing.
+    Groups params by block_size so each group can use full foreach ops.
+    """
+    from collections import defaultdict
+
+    n = len(update)
+    if n == 0:
+        return tuple(update)
+
+    # Group params by block_size (different OFT layers can have different blocks)
+    groups = defaultdict(list)  # n_el -> list of indices
+    for i, p in enumerate(params):
+        groups[p.shape[-1]].append(i)
+
+    results = [None] * n
+
+    for n_el in groups:
+        indices = groups[n_el]
+        block_size = int((1 + math.sqrt(1 + 8 * n_el)) / 2)
+        g_params = [params[i] for i in indices]
+        g_updates = [update[i] for i in indices]
+        g_state = [state[params[i]] for i in indices]
+        device, dtype = g_params[0].device, g_params[0].dtype
+        rows, cols = scaled_optm.get_cached_structural_tensors(block_size, device)
+        scale_factor = getattr(g_params[0], '_oft_scale_factor', 1.0)
+        g_n = len(indices)
+
+        # Step 1: Flatten updates and construct skew-symmetric G matrices
+        G_list = []
+        update_flat_list = []
+        orig_shapes = []
+        for p, upd in zip(g_params, g_updates):
+            orig_shapes.append(p.shape)
+            upd_flat = upd.view(-1, n_el)
+            update_flat_list.append(upd_flat)
+            batch_size = upd_flat.shape[0]
+            G = torch.zeros(batch_size, block_size, block_size, device=device, dtype=dtype)
+            batch_idx = torch.arange(batch_size, device=device)[:, None]
+            G = G.index_put((batch_idx, rows, cols), upd_flat)
+            G = G - G.transpose(-2, -1)
+            G_list.append(G)
+
+        # Step 2: Gather (and initialize if needed) state vectors
+        u_states = []
+        v_states = []
+        for p, p_state in zip(g_params, g_state):
+            if 'spectral_u' not in p_state:
+                gen = param_update.get_generator(device)
+                batch_sz = p.numel() // n_el
+                v = torch.randn(batch_sz, block_size, device=device, dtype=dtype, generator=gen)
+                p_state['spectral_v'] = v.div_(v.norm(dim=1, keepdim=True).add_(1e-12))
+                u = torch.randn(batch_sz, block_size, device=device, dtype=dtype, generator=gen)
+                p_state['spectral_u'] = u.div_(u.norm(dim=1, keepdim=True).add_(1e-12))
+            u_states.append(p_state['spectral_u'].unsqueeze(-1))
+            v_states.append(p_state['spectral_v'].unsqueeze(-1))
+
+        # Step 3: Power Iteration - Update v (Right Singular Vector)
+        v_raws = [torch.bmm(G.mT, u) for G, u in zip(G_list, u_states)]
+        v_norms = [torch.linalg.vector_norm(v, dim=1, keepdim=True) for v in v_raws]
+
+        # Stability mask: mask = (sign(norm - 1e-6) + 1) / 2
+        diff_v = torch._foreach_sub(v_norms, 1e-6)
+        torch._foreach_sign_(diff_v)
+        mask_v = torch._foreach_div_(torch._foreach_add_(diff_v, 1.0), 2.0)
+
+        # In-place normalization: candidate_v = v_raws / clamp_min(v_norms, 1e-8)
+        torch._foreach_clamp_min_(v_norms, 1e-8)
+        v_raws = torch._foreach_div(v_raws, v_norms)
+
+        # In-place state update: v_state += mask_v * (candidate_v - v_state)
+        diff_v2 = torch._foreach_sub(v_raws, v_states)
+        scaled_v = torch._foreach_mul(diff_v2, mask_v)
+        v_states = torch._foreach_add(v_states, scaled_v)
+
+        # Step 4: Power Iteration - Update u (Left Singular Vector)
+        u_raws_pre = [torch.bmm(G, v) for G, v in zip(G_list, v_states)]
+        sigmas = [torch.linalg.vector_norm(u, dim=1, keepdim=True) for u in u_raws_pre]
+
+        # Stability mask for u
+        diff_u = torch._foreach_sub(sigmas, 1e-6)
+        torch._foreach_sign_(diff_u)
+        mask_u = torch._foreach_div_(torch._foreach_add_(diff_u, 1.0), 2.0)
+
+        # Save pre-normalization u_raws for sigma computation
+        u_raws_for_sigma = list(torch._foreach_clone(u_raws_pre))
+
+        # In-place normalization: candidate_u = u_raws / clamp_min(sigmas, 1e-8)
+        torch._foreach_clamp_min_(sigmas, 1e-8)
+        u_raws_pre = torch._foreach_div(u_raws_pre, sigmas)
+
+        # In-place state update: u_state += mask_u * (candidate_u - u_state)
+        diff_u2 = torch._foreach_sub(u_raws_pre, u_states)
+        scaled_u = torch._foreach_mul(diff_u2, mask_u)
+        u_states = torch._foreach_add(u_states, scaled_u)
+
+        # Step 5: Compute sigma (spectral norm) for each block
+        # sigma = sum(next_u * u_raw_pre, dim=1) -> shape (batch_size, 1)
+        sigma_list = [torch.sum(u * ur, dim=1) for u, ur in zip(u_states, u_raws_for_sigma)]
+
+        # Step 6: Scale updates using foreach operations
+        target_scale = 0.5 * scale_factor
+        spectral_eps = 1.0 / (2.0 * math.sqrt(block_size))
+
+        # Create per-tensor epsilons in a single batched allocation
+        eps_buf = torch.tensor(
+            [spectral_eps] * g_n,
+            device=device,
+            dtype=sigma_list[0].dtype,
+        )
+        eps_tensors = eps_buf.unbind(0)
+
+        # Apply clamp and scaling block-wise via fused foreach ops:
+        # scale = lr * target_scale / max(sigma, eps)
+        torch._foreach_maximum_(sigma_list, eps_tensors)
+        torch._foreach_reciprocal_(sigma_list)
+        torch._foreach_mul_(sigma_list, lr * target_scale)
+
+        # Apply scaling in-place to all flat updates
+        # sigma_list[i] has shape (batch_size, 1); update_flat_list[i] has shape (batch_size, n_el)
+        scaled_updates = torch._foreach_mul(update_flat_list, sigma_list)
+
+        # Reshape back to original shapes and place in results
+        for idx, (i, su) in enumerate(zip(indices, scaled_updates)):
+            results[i] = su.reshape(orig_shapes[idx])
+
+    return tuple(results)
