@@ -197,7 +197,6 @@ def apply_foreach_spectral_riemannian_oft(
         g_updates = [update[i] for i in indices]
         device, dtype = g_params[0].device, g_params[0].dtype
         rows, cols = scaled_optm.get_cached_structural_tensors(block_size, device)
-        scale_factor = getattr(g_params[0], '_oft_scale_factor', 1.0)
         g_n = len(indices)
 
         # Construct skew-symmetric G matrices
@@ -275,7 +274,9 @@ def apply_foreach_spectral_riemannian_oft(
             v_state[i] = v_3d[idx].squeeze(-1)
 
         # Scale updates using foreach operations
-        target_scale = 0.5 * scale_factor
+        # Per-param scale factors (different OFT layers can have different scales)
+        per_param_scale_factors = [getattr(p, '_oft_scale_factor', 1.0) for p in g_params]
+        target_scales = [0.5 * sf * lr for sf in per_param_scale_factors]
         spectral_eps = 1.0 / (2.0 * math.sqrt(block_size))
 
         # Create per-tensor epsilons in a single batched allocation
@@ -285,12 +286,18 @@ def apply_foreach_spectral_riemannian_oft(
             dtype=sigma_list[0].dtype,
         )
         eps_tensors = eps_buf.unbind(0)
+        target_scale_buf = torch.tensor(
+            target_scales,
+            device=device,
+            dtype=sigma_list[0].dtype,
+        )
+        target_scale_tensors = target_scale_buf.unbind(0)
 
         # Apply clamp and scaling block-wise via fused foreach ops:
         # scale = lr * target_scale / max(sigma, eps)
         torch._foreach_maximum_(sigma_list, eps_tensors)
         torch._foreach_reciprocal_(sigma_list)
-        torch._foreach_mul_(sigma_list, lr * target_scale)
+        torch._foreach_mul_(sigma_list, target_scale_tensors)
 
         # Apply scaling in-place to all flat updates
         # sigma_list[i] has shape (batch_size, 1); update_flat_list[i] has shape (batch_size, n_el)
