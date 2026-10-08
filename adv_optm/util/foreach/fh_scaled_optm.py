@@ -4,9 +4,6 @@ from torch import Tensor
 import math
 
 from .. import scaled_optm
-from .. import param_update
-
-_OFT_INDICES_CACHE = {}
 
 def foreach_scale_update(
     params: list[Tensor] | tuple[Tensor, ...],
@@ -94,7 +91,7 @@ def foreach_spectral_normalization(
     u_state: list[Tensor] | tuple[Tensor, ...],
     v_state: list[Tensor] | tuple[Tensor, ...],
     lr: float,
-    target_scale: float,
+    target_scale: float | list
 ) -> tuple[Tensor, ...]:
     """Applies Spectral Normalization via a single step of Power Iteration
     using foreach operations for batched tensor processing.
@@ -174,8 +171,10 @@ def foreach_spectral_normalization(
 def apply_foreach_spectral_riemannian_oft(
     params: list[Tensor] | tuple[Tensor, ...],
     update: list[Tensor] | tuple[Tensor, ...],
+    u_state: list[Tensor] | tuple[Tensor, ...],
+    v_state: list[Tensor] | tuple[Tensor, ...],
     lr: float,
-    state: dict | None = None,
+    target_scale: float | list
 ) -> tuple[Tensor, ...]:
     """
     Applies Spectral Normalization directly on the skew-symmetric gradient
@@ -200,13 +199,12 @@ def apply_foreach_spectral_riemannian_oft(
         block_size = int((1 + math.sqrt(1 + 8 * n_el)) / 2)
         g_params = [params[i] for i in indices]
         g_updates = [update[i] for i in indices]
-        g_state = [state[params[i]] for i in indices]
         device, dtype = g_params[0].device, g_params[0].dtype
         rows, cols = scaled_optm.get_cached_structural_tensors(block_size, device)
         scale_factor = getattr(g_params[0], '_oft_scale_factor', 1.0)
         g_n = len(indices)
 
-        # Step 1: Flatten updates and construct skew-symmetric G matrices
+        # Construct skew-symmetric G matrices
         G_list = []
         update_flat_list = []
         orig_shapes = []
@@ -221,21 +219,7 @@ def apply_foreach_spectral_riemannian_oft(
             G = G - G.transpose(-2, -1)
             G_list.append(G)
 
-        # Step 2: Gather (and initialize if needed) state vectors
-        u_states = []
-        v_states = []
-        for p, p_state in zip(g_params, g_state):
-            if 'spectral_u' not in p_state:
-                gen = param_update.get_generator(device)
-                batch_sz = p.numel() // n_el
-                v = torch.randn(batch_sz, block_size, device=device, dtype=dtype, generator=gen)
-                p_state['spectral_v'] = v.div_(v.norm(dim=1, keepdim=True).add_(1e-12))
-                u = torch.randn(batch_sz, block_size, device=device, dtype=dtype, generator=gen)
-                p_state['spectral_u'] = u.div_(u.norm(dim=1, keepdim=True).add_(1e-12))
-            u_states.append(p_state['spectral_u'].unsqueeze(-1))
-            v_states.append(p_state['spectral_v'].unsqueeze(-1))
-
-        # Step 3: Power Iteration - Update v (Right Singular Vector)
+        # Power Iteration - Update v (Right Singular Vector)
         v_raws = [torch.bmm(G.mT, u) for G, u in zip(G_list, u_states)]
         v_norms = [torch.linalg.vector_norm(v, dim=1, keepdim=True) for v in v_raws]
 
@@ -253,7 +237,7 @@ def apply_foreach_spectral_riemannian_oft(
         scaled_v = torch._foreach_mul(diff_v2, mask_v)
         v_states = torch._foreach_add(v_states, scaled_v)
 
-        # Step 4: Power Iteration - Update u (Left Singular Vector)
+        # Power Iteration - Update u (Left Singular Vector)
         u_raws_pre = [torch.bmm(G, v) for G, v in zip(G_list, v_states)]
         sigmas = [torch.linalg.vector_norm(u, dim=1, keepdim=True) for u in u_raws_pre]
 
@@ -274,11 +258,11 @@ def apply_foreach_spectral_riemannian_oft(
         scaled_u = torch._foreach_mul(diff_u2, mask_u)
         u_states = torch._foreach_add(u_states, scaled_u)
 
-        # Step 5: Compute sigma (spectral norm) for each block
+        # Compute sigma (spectral norm) for each block
         # sigma = sum(next_u * u_raw_pre, dim=1) -> shape (batch_size, 1)
         sigma_list = [torch.sum(u * ur, dim=1) for u, ur in zip(u_states, u_raws_for_sigma)]
 
-        # Step 6: Scale updates using foreach operations
+        # Scale updates using foreach operations
         target_scale = 0.5 * scale_factor
         spectral_eps = 1.0 / (2.0 * math.sqrt(block_size))
 
