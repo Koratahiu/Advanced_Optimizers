@@ -8,11 +8,12 @@ from ..util import param_update
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
 from ..util.update_util import _init_fisher_wd_scaler, _get_fisher_wd_scaler
 from ..util.OrthoGrad import _orthogonalize_gradient
-from ..util.foreach_util import _foreach_orthogonalize_gradient
 from ..util.Kourkoutas import KourkoutasHelper
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm, scale_eps
 from ..util.centered_decay import _init_anchor
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
+
+from ..util.foreach.fh_orthograd import _foreach_orthogonalize_gradient
 
 A = 4 / math.pi
 

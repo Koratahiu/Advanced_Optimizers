@@ -1,6 +1,8 @@
 import torch
 import math
 
+# foreach version of adv_optm\util\OrthoGrad.py
+
 def _foreach_orthogonalize_gradient(p: torch.Tensor, grad: torch.Tensor, mode: str) -> torch.Tensor:
     """
     Projects the gradient `grad` to be orthogonal to the parameter `p`.
