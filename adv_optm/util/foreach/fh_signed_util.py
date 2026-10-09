@@ -7,7 +7,7 @@ def apply_stochastic_sign_(
         update: list[torch.Tensor],
         noise: list[torch.Tensor] | None,
         is_vector: bool = False
-        ) -> torch.Tensor:
+        ) -> tuple[torch.Tensor, ...]:
     """
     Applies the Iterative L-infinity Stochastic Sign operator.
     Uses uniform noise injection to compute the stochastic sign.
@@ -40,7 +40,7 @@ def foreach_get_signsgd_wd_target(
     stochastic_sign: bool = False,
     noise: list[torch.Tensor] | None = None,
     is_vector: bool = False,
-):
+) -> tuple[torch.Tensor, ...]:
     """
     Computes a signed weight decay target.
     """

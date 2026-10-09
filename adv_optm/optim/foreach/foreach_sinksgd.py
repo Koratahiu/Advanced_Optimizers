@@ -179,9 +179,9 @@ def _foreach_step_matrix(
         # Compute buf^2, then mean along each dim
         buf_sq = torch._foreach_mul(momentum_buffers, momentum_buffers)
         for i, b_sq in enumerate(buf_sq):
-            b_sq = b_sq[i].view(b_sq[i].shape[0], -1)
-            vt_row.append(torch.mean(b_sq, dim=1))
-            vt_col.append(torch.mean(b_sq, dim=0))
+            b_sq_2d = b_sq.view(b_sq.shape[0], -1)
+            vt_row.append(torch.mean(b_sq_2d, dim=1))
+            vt_col.append(torch.mean(b_sq_2d, dim=0))
         del buf_sq
 
         for v_list in (vt_row, vt_col):

@@ -1,15 +1,16 @@
 import math
 import torch
+from torch import Tensor
 
 # foreach version of adv_optm\util\sinkhorn.py
 
 
 def foreach_apply_sr_sinkhorn(
-    updates: list[torch.Tensor],
+    updates: list[Tensor] | tuple[Tensor, ...],
     iters: int = 5,
-    params: list[torch.Tensor] | None = None,
+    params: list[Tensor] | tuple[Tensor, ...] | None = None,
     ortho_project: bool = False,
-) -> list[torch.Tensor]:
+) -> tuple[Tensor, ...]:
     """
     Applies Square-Root Sinkhorn (SR-Sinkhorn) multi-normalization to a list of
     update tensors using torch._foreach ops where available.
@@ -37,11 +38,11 @@ def foreach_apply_sr_sinkhorn(
 
 
 def _foreach_sinkhorn_matrix(
-    updates_2d: list[torch.Tensor],
-    params_2d: list[torch.Tensor | None],
+    updates_2d: list[Tensor] | tuple[Tensor, ...],
+    params_2d: list[Tensor] | tuple[Tensor, ...],
     iters: int,
     ortho_project: bool,
-) -> list[torch.Tensor]:
+) -> tuple[Tensor, ...]:
     """
     Foreach implementation of SR-Sinkhorn for 2D matrices.
     """
@@ -108,12 +109,12 @@ def _foreach_sinkhorn_matrix(
 
 
 def _foreach_ortho_project_matrix(
-    grads: list[torch.Tensor],
-    params: list[torch.Tensor],
-    p_norm_sq: list[torch.Tensor],
+    grads: list[Tensor] | tuple[Tensor, ...],
+    params: list[Tensor] | tuple[Tensor, ...],
+    p_norm_sq: list[Tensor] | tuple[Tensor, ...],
     dim: int,
     scale_factors: list[float],
-) -> list[torch.Tensor]:
+) -> tuple[Tensor, ...]:
     """
     Projects each gradient to be orthogonal to the corresponding parameter
     along `dim` and restores the original norm.
@@ -136,10 +137,10 @@ def _foreach_ortho_project_matrix(
 
 
 def foreach_get_sinkhorn_wd_scaler(
-    params: list[torch.Tensor],
-    row_denom: list[torch.Tensor] | None = None,
-    col_denom: list[torch.Tensor] | None = None,
-) -> list[torch.Tensor]:
+    params: list[Tensor] | tuple[Tensor, ...],
+    row_denom: list[Tensor] | tuple[Tensor, ...] | None = None,
+    col_denom: list[Tensor] | tuple[Tensor, ...] | None = None,
+) -> tuple[Tensor, ...]:
     """
     Computes a structural weight decay multiplier for a list of parameters
     using foreach operations where available.
@@ -173,4 +174,5 @@ def foreach_get_sinkhorn_wd_scaler(
     torch._foreach_clamp_min_(means, 1e-8)
     torch._foreach_div_(wd_scaler, means)
 
-    return wd_scaler
+    # Reshape back to original parameter shapes
+    return [ws.reshape(p.shape) for ws, p in zip(wd_scaler, params)]

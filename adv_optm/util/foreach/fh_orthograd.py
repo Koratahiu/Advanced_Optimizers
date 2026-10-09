@@ -47,7 +47,7 @@ def foreach_iterative_ortho_project(
     else:
         mat_results = []
 
-    # Reassemble in original order
+    # Reassemble in original order, restoring original shapes for matrices
     result = []
     vi = mi = 0
     for p, g in zip(params, grads):
@@ -56,7 +56,7 @@ def foreach_iterative_ortho_project(
             result.append(vec_results[vi])
             vi += 1
         else:
-            result.append(mat_results[mi])
+            result.append(mat_results[mi].view(g.shape))
             mi += 1
     return result
 
