@@ -85,7 +85,6 @@ This major update introduces a complete architectural refactor of the library:
 
 ```python
 from adv_optm import AdamW_adv
-# AdamW with spectral normalization and centered weight decay
 optimizer = AdamW_adv(
     model.parameters(),
     lr=1e-3,
