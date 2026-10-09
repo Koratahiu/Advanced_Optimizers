@@ -489,11 +489,11 @@ class Adopt_adv(torch.optim.Optimizer):
                 set_state(state, 'exp_avg_sq', vt, actual_precision, random_int_state_tensor, non_neg=True)
             del random_int_state_tensor
 
-        update_scaling = lr * A if self.use_atan2 else lr
 
         if group.get('spectral_normalization', False):
-            update = scale_update(p, update, update_scaling, state=state)
+            update = scale_update(p, update, lr, state=state)
         else:
+            update_scaling = lr * A if self.use_atan2 else lr
             update.mul_(update_scaling)
 
         # Parameter Update
