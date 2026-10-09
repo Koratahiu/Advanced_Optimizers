@@ -378,12 +378,10 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 cwd_target = get_signsgd_wd_target(p.sub(anchor), denom=denom)
                 del anchor
 
-        update_scaling = step_size
         if group.get('spectral_normalization', False):
-            update = scale_update(p, update, update_scaling, state=state)
+            update = scale_update(p, update, step_size, state=state)
         else:
-            if snr_cond:
-                update_scaling = update_scaling * (4/math.pi)
+            update_scaling = step_size * (4/math.pi) if snr_cond else step_size
             update.mul_(update_scaling)
 
         param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor, wd_scaler=wd_scaler, wd_target=wd_target, cwd_target=cwd_target)
