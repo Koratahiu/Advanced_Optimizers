@@ -12,15 +12,13 @@ def apply_sr_sinkhorn(update: torch.Tensor, iters: int = 5, p: torch.Tensor | No
     """
     original_shape = update.shape
     original_dtype = update.dtype
-    update = update.float()
 
     # 1D Vector Case
     if update.dim() == 1:
         if ortho_project:
-            p_float = p.float()
-            p_norm_sq = torch.dot(p_float, p_float).add_(1e-30)
-            proj = torch.dot(p_float, update) / p_norm_sq
-            update.sub_(p_float * proj) 
+            p_norm_sq = torch.dot(p, p).add_(1e-30)
+            proj = torch.dot(p, update) / p_norm_sq
+            update.sub_(p * proj) 
         norm = update.norm(p=2).clamp_min_(1e-12)
         return update.mul_(math.sqrt(update.numel()) / norm).view(original_shape).to(original_dtype)
 
@@ -40,7 +38,7 @@ def apply_sr_sinkhorn(update: torch.Tensor, iters: int = 5, p: torch.Tensor | No
     scale_second = math.sqrt(n if scale_cond else m)
 
     if ortho_project:
-        param_2d = p.float().view(p.shape[0], -1)
+        param_2d = p.view(p.shape[0], -1)
         p_norm_sq_dim = torch.sum(param_2d * param_2d, dim=dim, keepdim=True).add_(1e-30)
         p_norm_sq_adim = torch.sum(param_2d * param_2d, dim=1-dim, keepdim=True).add_(1e-30)
 

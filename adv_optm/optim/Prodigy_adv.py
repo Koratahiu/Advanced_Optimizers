@@ -514,10 +514,10 @@ class Prodigy_adv(torch.optim.Optimizer):
 
             del denom
 
-        update_scaling = dlr * A if group['use_atan2'] else dlr
         if group.get('spectral_normalization', False):
-            update = scale_update(p, update, update_scaling, state=state)
+            update = scale_update(p, update, dlr, state=state)
         else:
+            update_scaling = dlr * A if group['use_atan2'] else dlr
             update.mul_(update_scaling)
 
         # --- Accumulate Prodigy stats ---
