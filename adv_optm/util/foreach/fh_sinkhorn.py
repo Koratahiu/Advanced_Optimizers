@@ -91,7 +91,7 @@ def _foreach_sinkhorn_matrix(
         torch._foreach_mul_(g, [scale_firsts[j] / norm1[j] for j in range(len(g))])
 
         if ortho_project and w[0] is not None:
-            g = _foreach_ortho_project_matrix(g, w, p_norm_sq_dim, dims[it % len(g)])
+            g = _foreach_ortho_project_matrix(g, w, p_norm_sq_dim, dims[it % len(g)], scale_firsts)
 
         # Second normalization step (1-dim)
         norm2 = [
@@ -102,7 +102,7 @@ def _foreach_sinkhorn_matrix(
         torch._foreach_mul_(g, [scale_seconds[j] / norm2[j] for j in range(len(g))])
 
         if ortho_project and w[0] is not None:
-            g = _foreach_ortho_project_matrix(g, w, p_norm_sq_adim, 1 - dims[it % len(g)])
+            g = _foreach_ortho_project_matrix(g, w, p_norm_sq_adim, 1 - dims[it % len(g)], scale_seconds)
 
     return g
 
@@ -112,17 +112,19 @@ def _foreach_ortho_project_matrix(
     params: list[torch.Tensor],
     p_norm_sq: list[torch.Tensor],
     dim: int,
+    scale_factors: list[float],
 ) -> list[torch.Tensor]:
     """
     Projects each gradient to be orthogonal to the corresponding parameter
     along `dim` and restores the original norm.
     """
-    target_norm = [torch.linalg.vector_norm(g_i, dim=dim, keepdim=True) for g_i in grads]
+    target_norm = [torch.full_like(g_i[:, :1], scale_factors[i]) for i, g_i in enumerate(grads)]
     norm_lb = 1 / math.sqrt(grads[0].shape[dim])
     torch._foreach_clamp_min_(target_norm, 1e-8)
 
     # Project: g_orth = g - (p * <p, g> / ||p||^2)
-    dots = [torch.sum(p_i * g_i, dim=dim, keepdim=True) for p_i, g_i in zip(params, grads)]
+    p_dot_g = torch._foreach_mul(params, grads)
+    dots = [torch.sum(x_i, dim=dim, keepdim=True) for x_i in p_dot_g]
     projs = torch._foreach_div_(dots, p_norm_sq)
     torch._foreach_addcmul_(grads, projs, params, value=-1.0)
 
