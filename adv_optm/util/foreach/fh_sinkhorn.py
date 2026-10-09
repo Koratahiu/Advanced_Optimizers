@@ -88,7 +88,7 @@ def _foreach_sinkhorn_matrix(
             for g_i in g
         ]
         torch._foreach_clamp_min_(norm1, [norm_lb_dims[j] for j in range(len(g))])
-        torch._foreach_mul_(g, [scale_firsts[j] / norm1[j].item() for j in range(len(g))])
+        torch._foreach_mul_(g, [scale_firsts[j] / norm1[j] for j in range(len(g))])
 
         if ortho_project and w[0] is not None:
             g = _foreach_ortho_project_matrix(g, w, p_norm_sq_dim, dims[it % len(g)])
@@ -99,7 +99,7 @@ def _foreach_sinkhorn_matrix(
             for g_i in g
         ]
         torch._foreach_clamp_min_(norm2, [norm_lb_adims[j] for j in range(len(g))])
-        torch._foreach_mul_(g, [scale_seconds[j] / norm2[j].item() for j in range(len(g))])
+        torch._foreach_mul_(g, [scale_seconds[j] / norm2[j] for j in range(len(g))])
 
         if ortho_project and w[0] is not None:
             g = _foreach_ortho_project_matrix(g, w, p_norm_sq_adim, 1 - dims[it % len(g)])
