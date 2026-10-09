@@ -195,6 +195,9 @@ def _foreach_step_matrix(
     # Compute update (keep as list for in-place mutation)
     if momentum != 0:
         updates = torch._foreach_clone(momentum_buffers)
+        if nesterov:
+            nv_coef = momentum if nesterov_coef is None else nesterov_coef
+            torch._foreach_lerp_(updates, grads, 1.0 - nv_coef)
     else:
         updates = torch._foreach_clone(grads)
 
@@ -207,7 +210,7 @@ def _foreach_step_matrix(
 
     # Apply Sinkhorn to update if not normed_momentum
     if not normed_mt:
-        update = foreach_apply_sr_sinkhorn(update, iters=sinkhorn_iterations, params=params, ortho_project=orthogonal_sinkhorn)
+        updates = foreach_apply_sr_sinkhorn(updates, iters=sinkhorn_iterations, params=params, ortho_project=orthogonal_sinkhorn)
 
     # Compute geometric_wd scaler if needed
     wd_scalers = None
@@ -260,6 +263,9 @@ def _foreach_step_vector(
     # Compute update
     if momentum != 0:
         updates = torch._foreach_clone(momentum_buffers)
+        if nesterov:
+            nv_coef = momentum if nesterov_coef is None else nesterov_coef
+            torch._foreach_lerp_(updates, grads, 1.0 - nv_coef)
     else:
         updates = torch._foreach_clone(grads)
 
