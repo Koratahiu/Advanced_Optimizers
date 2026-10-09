@@ -125,11 +125,11 @@ def _foreach_step(self, group: dict, params, grads, exp_avgs, exp_avg_sqs, state
                 g_grads[i].atan2_(denom[i])
         else:
             torch._foreach_div_(g_grads, denom)
-            # Clip normalized gradient (clamp not available as foreach op)
+            # Clip normalized gradient
             if clip_lambda is not None:
-                clip_val = clip_lambda(g_steps[0].item())
-                for g in g_grads:
-                    g.clamp_(-clip_val, clip_val)
+                clip_val = clip_lambda(g_steps[0])
+                torch._foreach_clamp_min_(g_grads, -clip_val)
+                torch._foreach_clamp_max_(g_grads, clip_val)
 
         # First moment update: m_t = lerp(m_{t-1}, normalized_grad, 1 - beta1)
         if use_mt:
