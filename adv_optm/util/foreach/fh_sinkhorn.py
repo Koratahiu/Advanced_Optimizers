@@ -24,9 +24,6 @@ def foreach_apply_sr_sinkhorn(
     original_shapes = [u.shape for u in updates]
     original_dtypes = [u.dtype for u in updates]
 
-    # Cast to float for numerical stability
-    updates = [u.float() for u in updates]
-
     mat_updates = [u.view(u.shape[0], -1) for u in updates]
     mat_params = [
         p.view(p.shape[0], -1) if p is not None else None for p in (params if params is not None else [None] * len(updates))
