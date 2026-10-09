@@ -40,6 +40,16 @@ def foreach_step(self, group: dict) -> None:
 
         eps = group['eps']
         adaptive_eps.append(scale_eps(eps, p))
+        if state['step'] == 0:
+            _foreach_init_vt(state, p.grad)
+
+    # Early return on first step for non-atan2, non-spectral modes
+    # (v is already initialized above; no update needed on step 0)
+    if not self.use_atan2 and not group.get('spectral_normalization', False):
+        if any(s == 0 for s in state_steps):
+            for p in params:
+                self.state[p]['step'] += 1
+            return
 
     # Group anchors and adaptive_eps by (device, dtype) to match the parameter grouping
     anchor_groups: dict = {}
@@ -90,24 +100,6 @@ def _foreach_step(self, group: dict, params, grads, exp_avgs, exp_avg_sqs, state
     grouped = _group_by_device_dtype(params, grads, exp_avgs, exp_avg_sqs, state_steps)
 
     for (g_params, g_grads, g_exp_avgs, g_exp_avg_sqs, g_steps) in grouped.values():
-        if len(g_params) == 0:
-            continue
-
-        step_tensor = g_steps[0]
-
-        # ADOPT: initialize v_0 = g_0^2 on the very first step (step == 0).
-        is_init_step = (g_steps[0] == 0)
-        if is_init_step:
-            # Initialize v_0 = g_0^2
-            g_square = torch._foreach_mul(g_grads, g_grads)
-            torch._foreach_copy_(g_exp_avg_sqs, g_square)
-            del g_square
-            # When use_atan2 is True, the first step still performs a full update
-            # because atan2 is scale-invariant and does not need v initialization.
-            if not use_atan2 and not group.get('spectral_normalization', False):
-                # Increment step and skip (init-only)
-                torch._foreach_add_(g_steps, 1)
-                continue
 
         # Compute denom = sqrt(v_{t-1}) for normalization BEFORE updating v_t
         denom = torch._foreach_sqrt(g_exp_avg_sqs)
@@ -188,3 +180,9 @@ def _group_by_device_dtype(params, grads, exp_avgs, exp_avg_sqs, state_steps):
         groups[key][3].append(exp_avg_sqs[i])
         groups[key][4].append(state_steps[i])
     return groups
+
+@torch.no_grad()
+def _foreach_init_vt(state, grad):
+    vt_init = grad.pow(2)
+    state['exp_avg_sq'].copy_(vt_init)
+    del vt_init
