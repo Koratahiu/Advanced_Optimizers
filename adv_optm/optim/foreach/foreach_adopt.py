@@ -146,7 +146,7 @@ def _foreach_step(self, group: dict, params, grads, exp_avgs, exp_avg_sqs, state
 
         # Spectral normalization via foreach_scale_update
         if group.get('spectral_normalization', False):
-            u_states, v_states, spectral_targets = _foreach_collect_spectral_vars(self, g_params, self.state)
+            u_states, v_states, spectral_targets = _foreach_collect_spectral_vars(self, g_params, lr)
             updates = foreach_scale_update(
                 g_params, updates, lr,
                 u_state=u_states, v_state=v_states,

@@ -44,12 +44,12 @@ def foreach_scale_update(
     # OFT Block Parameters: shape (k, C(b,2))
     # Direct spectral normalization on the skew-symmetric blocks.
     if oft_param:
-        return apply_foreach_spectral_riemannian_oft(params, update, u_state=u_state, v_state=v_state, lr=lr, target_scale=target_scale)
+        return apply_foreach_spectral_riemannian_oft(params, update, u_state=u_state, v_state=v_state, lr=lr)
 
     # LoRA Factors or Full Finetuning weights
     # Scales update to maintain consistent spectral norm across different layer sizes and ranks.
     if spectral_param:
-        return foreach_spectral_normalization(update, u_state=u_state, v_state=v_state, lr=lr, target_scale=target_scale)
+        return foreach_spectral_normalization(update, u_state=u_state, v_state=v_state, target_scale=target_scale)
 
 @torch.no_grad()
 def foreach_max_abs_normalization(update: list[Tensor] | tuple[Tensor, ...], lr: float) -> tuple[Tensor, ...]:
@@ -65,6 +65,7 @@ def foreach_max_abs_normalization(update: list[Tensor] | tuple[Tensor, ...], lr:
 def _foreach_collect_spectral_vars(
     self,
     params: list[Tensor] | tuple[Tensor, ...],
+    lr: float | Tensor,
 ) -> tuple[list[Tensor], list[Tensor]]:
     u_states = []
     v_states = []
@@ -77,7 +78,7 @@ def _foreach_collect_spectral_vars(
         d_out = p.shape[0]
         d_in = p.numel() // d_out
         target_scale = 1 if getattr(p, '_is_lora_A', False) else math.sqrt(d_out / d_in)
-        spectral_target.append(target_scale)
+        spectral_target.append(lr * target_scale)
     return u_states, v_states, spectral_target
 
 
@@ -86,7 +87,6 @@ def foreach_spectral_normalization(
     update: list[Tensor] | tuple[Tensor, ...],
     u_state: list[Tensor] | tuple[Tensor, ...],
     v_state: list[Tensor] | tuple[Tensor, ...],
-    lr: float,
     target_scale: float | list
 ) -> tuple[Tensor, ...]:
     """Applies Spectral Normalization via a single step of Power Iteration
@@ -155,7 +155,7 @@ def foreach_spectral_normalization(
     # scale = (lr * target_scale) / max(sigma, eps)
     torch._foreach_maximum_(sigmas, eps_tensors)
     torch._foreach_reciprocal_(sigmas)
-    torch._foreach_mul_(sigmas, lr * target_scale)
+    torch._foreach_mul_(sigmas, target_scale)
 
     # Apply scaling in-place to all update tensors
     torch._foreach_mul_(update, sigmas)
@@ -168,7 +168,6 @@ def apply_foreach_spectral_riemannian_oft(
     u_state: list[Tensor] | tuple[Tensor, ...],
     v_state: list[Tensor] | tuple[Tensor, ...],
     lr: float,
-    target_scale: float | list
 ) -> tuple[Tensor, ...]:
     """
     Applies Spectral Normalization directly on the skew-symmetric gradient
