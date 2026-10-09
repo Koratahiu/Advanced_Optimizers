@@ -28,7 +28,6 @@ def foreach_step(self, group: dict) -> None:
     exp_avg_sqs = []
     state_steps = []
     anchors = []
-    wd_scalers_init = []
     adaptive_eps = []
 
     for p in params:
@@ -43,12 +42,6 @@ def foreach_step(self, group: dict) -> None:
         cwd = group.get('centered_wd', 0.0)
         if cwd != 0.0 and 'anchor_data' in state:
             anchors.append(state['anchor_data'])
-        else:
-            anchors.append(None)
-
-        # Collect initial wd_scaler for fisher_wd
-        if group.get('fisher_wd', False):
-            wd_scalers_init.append(state.get("wd_scaler", torch.tensor(1.0, device=p.device)))
 
         eps = group['eps']
         adaptive_eps.append(scale_eps(eps, p))
@@ -64,11 +57,11 @@ def foreach_step(self, group: dict) -> None:
     else:
         foreach_step_fn = _foreach_step
 
-    foreach_step_fn(self, group, params, grads, exp_avgs, exp_avg_sqs, state_steps, anchors, wd_scalers_init, lr, adaptive_eps)
+    foreach_step_fn(self, group, params, grads, exp_avgs, exp_avg_sqs, state_steps, anchors, lr, adaptive_eps)
 
 
 @torch.no_grad()
-def _foreach_step(self, group: dict, params, grads, exp_avgs, exp_avg_sqs, state_steps, anchors, wd_scalers_init, lr, adaptive_eps) -> None:
+def _foreach_step(self, group: dict, params, grads, exp_avgs, exp_avg_sqs, state_steps, anchors, lr, adaptive_eps) -> None:
     beta1, beta2 = group['betas']
     use_atan2 = group['use_atan2']
     nesterov = group.get('nesterov', False)
