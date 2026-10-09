@@ -93,8 +93,6 @@ def foreach_spectral_normalization(
     using foreach operations for batched tensor processing.
     """
     n = len(update)
-    if n == 0:
-        return tuple(update)
 
     d_outs = [u.shape[0] for u in update]
     d_ins = [u.numel() // d_out for u, d_out in zip(update, d_outs)]
@@ -104,7 +102,7 @@ def foreach_spectral_normalization(
         torch.mv(update[i].view(d_outs[i], d_ins[i]).mT, u_state[i])
         for i in range(n)
     ]
-    v_norms = list(torch._foreach_norm(v_raws))
+    v_norms = torch._foreach_norm(v_raws)
 
     # Stability mask: mask = (sign(norm - 1e-6) + 1) / 2  (1.0 if >= 1e-6 else 0.0)
     diff_v = torch._foreach_sub(v_norms, 1e-6)
@@ -161,7 +159,7 @@ def foreach_spectral_normalization(
 
     # Apply scaling in-place to all update tensors
     torch._foreach_mul_(update, sigmas)
-    return tuple(update)
+    return update
 
 @torch.no_grad()
 def apply_foreach_spectral_riemannian_oft(
@@ -180,8 +178,6 @@ def apply_foreach_spectral_riemannian_oft(
     from collections import defaultdict
 
     n = len(update)
-    if n == 0:
-        return tuple(update)
 
     # Group params by block_size (different OFT layers can have different blocks)
     groups = defaultdict(list)  # n_el -> list of indices
@@ -253,7 +249,7 @@ def apply_foreach_spectral_riemannian_oft(
         mask_u = torch._foreach_div_(torch._foreach_add_(diff_u, 1.0), 2.0)
 
         # Save pre-normalization u_raws for sigma computation
-        u_raws_for_sigma = list(torch._foreach_clone(u_raws_pre))
+        u_raws_for_sigma = torch._foreach_clone(u_raws_pre)
 
         # In-place normalization: candidate_u = u_raws / clamp_min(sigmas, 1e-8)
         torch._foreach_clamp_min_(sigmas, 1e-8)
@@ -307,4 +303,4 @@ def apply_foreach_spectral_riemannian_oft(
         for idx, (i, su) in enumerate(zip(indices, scaled_updates)):
             results[i] = su.reshape(orig_shapes[idx])
 
-    return tuple(results)
+    return results
