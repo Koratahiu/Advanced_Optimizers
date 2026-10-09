@@ -60,7 +60,8 @@ def foreach_max_abs_normalization(update: list[Tensor] | tuple[Tensor, ...], lr:
     norm = torch._foreach_norm(update, float('inf'))
     torch._foreach_clamp_min_(norm, 1e-8)
     torch._foreach_div_(update, norm)
-    return torch._foreach_mul_(update, lr)
+    torch._foreach_mul_(update, lr)
+    return update
 
 def _foreach_collect_spectral_vars(
     self,

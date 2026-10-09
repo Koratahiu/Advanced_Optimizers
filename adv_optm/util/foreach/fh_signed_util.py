@@ -13,7 +13,7 @@ def apply_stochastic_sign_(
     Uses uniform noise injection to compute the stochastic sign.
     Uses torch._foreach_ operations.
     """
-    if is_vector or update.dim() < 2:
+    if is_vector:
         torch._foreach_sign_(update)
         return update
 
@@ -34,7 +34,7 @@ def apply_stochastic_sign_(
     torch._foreach_sign_(update)
     return update
 
-def get_signsgd_wd_target(
+def foreach_get_signsgd_wd_target(
     params: list[torch.Tensor],
     denom: list[torch.Tensor] | None = None,
     stochastic_sign: bool = False,
@@ -47,7 +47,7 @@ def get_signsgd_wd_target(
     if stochastic_sign:
         # Uncorrelated "new" uniform noise in [-1, 1) without calling RNG again.
         # This uses the chaotic Tent Map: f(x) = 2|x| - 1.
-        if noise is not None:
+        if noise:
             # noise.abs_().mul_(2.0).sub_(1.0)
             torch._foreach_abs_(noise)
             torch._foreach_mul_(noise, 2)
@@ -57,8 +57,8 @@ def get_signsgd_wd_target(
     else:
         wd_target = torch._foreach_sign(params)
 
-    if denom is not None:
-        for i, p in enumerate(wd_target):
+    if denom:
+        for i, _ in enumerate(wd_target):
             wd_target[i].atan2_(denom[i])
         target_norm = torch._foreach_norm(wd_target, ord=2)
         torch._foreach_clamp_min_(target_norm, 1e-8)
