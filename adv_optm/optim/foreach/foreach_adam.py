@@ -46,6 +46,19 @@ def foreach_step(self, group: dict) -> None:
         eps = group['eps']
         adaptive_eps.append(scale_eps(eps, p))
 
+    # Group anchors and adaptive_eps by (device, dtype) to match the parameter grouping
+    anchor_groups: dict = {}
+    eps_groups: dict = {}
+    for i, p in enumerate(params):
+        key = (p.device, p.dtype)
+        if cwd != 0.0 and i < len(anchors):
+            if key not in anchor_groups:
+                anchor_groups[key] = []
+            anchor_groups[key].append(anchors[i])
+        if key not in eps_groups:
+            eps_groups[key] = []
+        eps_groups[key].append(adaptive_eps[i])
+
     lr = torch.as_tensor(group['lr']) if group.get('compiled_optimizer', False) else group['lr']
     if group.get('compiled_optimizer', False):
         self._compiled_foreach_step = torch.compile(
@@ -57,11 +70,11 @@ def foreach_step(self, group: dict) -> None:
     else:
         foreach_step_fn = _foreach_step
 
-    foreach_step_fn(self, group, params, grads, exp_avgs, exp_avg_sqs, state_steps, anchors, lr, adaptive_eps)
+    foreach_step_fn(self, group, params, grads, exp_avgs, exp_avg_sqs, state_steps, anchors, anchor_groups, eps_groups, lr, adaptive_eps)
 
 
 @torch.no_grad()
-def _foreach_step(self, group: dict, params, grads, exp_avgs, exp_avg_sqs, state_steps, anchors, lr, adaptive_eps) -> None:
+def _foreach_step(self, group: dict, params, grads, exp_avgs, exp_avg_sqs, state_steps, anchors, anchor_groups, eps_groups, lr, adaptive_eps) -> None:
     beta1, beta2 = group['betas']
     use_atan2 = group['use_atan2']
     nesterov = group.get('nesterov', False)
@@ -105,7 +118,8 @@ def _foreach_step(self, group: dict, params, grads, exp_avgs, exp_avg_sqs, state
         denom = torch._foreach_sqrt(g_exp_avg_sqs)
         torch._foreach_div_(denom, sbc2_scalar)
         if not use_atan2:
-            torch._foreach_add_(denom, adaptive_eps)
+            group_adaptive_eps = eps_groups.get((g_params[0].device, g_params[0].dtype), None)
+            torch._foreach_add_(denom, group_adaptive_eps)
 
         # Compute updates (unscaled)
         if use_mt:
@@ -141,10 +155,11 @@ def _foreach_step(self, group: dict, params, grads, exp_avgs, exp_avg_sqs, state
             wd_scalers = _foreach_get_fisher_wd_scaler(group, g_params, denom, group['eps'])
 
         # Apply update and weight decay via foreach helper
+        group_anchors = anchor_groups.get((g_params[0].device, g_params[0].dtype), None) if cwd != 0.0 else None
         foreach_apply_parameter_update(
             self, g_params, group, updates, step_size,
             wd_scaler=wd_scalers,
-            anchors=anchors if cwd != 0.0 else None,
+            anchors=group_anchors if cwd != 0.0 else None,
         )
 
 def _group_by_device_dtype(params, grads, exp_avgs, exp_avg_sqs, state_steps):

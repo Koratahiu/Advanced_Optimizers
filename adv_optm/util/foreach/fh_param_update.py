@@ -34,7 +34,10 @@ def _apply_weight_decay(
             torch._foreach_add_(masks, 1.0)
             torch._foreach_clamp_max_(masks, 1.0)  # 1.0 for dot>=0, 0.0 for dot<0
             if isinstance(scaled_wd, Tensor):
-                torch._foreach_mul_(masks, [scaled_wd])
+                if scaled_wd.dim() == 0:
+                    torch._foreach_mul_(masks, scaled_wd)
+                else:
+                    torch._foreach_mul_(masks, [scaled_wd])
                 torch._foreach_addcmul_(p_calc, wd_target, masks, value=-1.0)
             elif isinstance(scaled_wd, (list, tuple)):
                 torch._foreach_mul_(masks, scaled_wd)
@@ -73,7 +76,10 @@ def _apply_weight_decay(
             torch._foreach_clamp_max_(masks, 1.0) # Produces 1.0 for >= 0, 0.0 for < 0
 
             if isinstance(scaled_cwd, Tensor):
-                torch._foreach_mul_(masks, scaled_cwd)
+                if scaled_cwd.dim() == 0:
+                    torch._foreach_mul_(masks, scaled_cwd)
+                else:
+                    torch._foreach_mul_(masks, [scaled_cwd])
                 torch._foreach_addcmul_(p_calc, decay_target, masks, value=-1.0)
             elif isinstance(scaled_cwd, (list, tuple)):
                 torch._foreach_mul_(masks, scaled_cwd)
