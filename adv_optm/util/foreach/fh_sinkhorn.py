@@ -147,39 +147,30 @@ def foreach_get_sinkhorn_wd_scaler(
     while protecting parameters in under-utilized/noisy rows/columns from decay.
     """
     results = []
-    for p in params:
-        p_2d = p.view(p.shape[0], -1)
 
-        # Lower bounds based on the effective 2D shapes
-        row_lb = 1 / math.sqrt(p_2d.shape[1])
-        col_lb = 1 / math.sqrt(p_2d.shape[0])
+    row_norms = [torch.linalg.vector_norm(p.view(p.shape[0], -1), ord=2, dim=1, keepdim=True) for p in params]
+    col_norms = [torch.linalg.vector_norm(p.view(p.shape[0], -1), ord=2, dim=0, keepdim=True) for p in params]
+    torch._foreach_clamp_min_(row_norms, 1e-8)
+    torch._foreach_clamp_min_(col_norms, 1e-8)
+    torch._foreach_sqrt_(row_norms)
+    torch._foreach_sqrt_(col_norms)
 
-        # Get the norms
-        row_norms = torch.linalg.vector_norm(p_2d, ord=2, dim=1, keepdim=True).clamp_min_(row_lb)
-        col_norms = torch.linalg.vector_norm(p_2d, ord=2, dim=0, keepdim=True).clamp_min_(col_lb)
+    if row_denom:
+        torch._foreach_sqrt_(row_denom)
+        torch._foreach_sqrt_(col_denom)
+        for i, rd in enumerate(row_denom):
+            row_norms[i].atan2_(row_denom[i])
+            col_norms[i].atan2_(col_denom[i])
 
-        # Compute the structural scaler
-        row_factor = row_norms.sqrt_()
-        col_factor = col_norms.sqrt_()
+    # Outer product: merges the row and column confidences into a 2D matrix
+    wd_scaler = torch._foreach_mul(row_norms, col_norms)
 
-        if row_denom is not None:
-            # Find corresponding denom indices (assumes same ordering as params)
-            idx = params.index(p)
-            rd = row_denom[idx].sqrt().view(p_2d.shape[0], 1)
-            cd = col_denom[idx].sqrt().view(1, p_2d.shape[1]) if col_denom is not None else None
+    # Normalize the scaler so its mean is 1.0
+    # TODO, workaround for torch._foreach_mean
+    numels = [ws.numel() for ws in wd_scaler]
+    sums = torch._foreach_norm(wd_scaler, ord=1)
+    means = torch._foreach_div(sums, numels)
+    torch._foreach_clamp_min_(means, 1e-8)
+    torch._foreach_div_(wd_scaler, means)
 
-            # High denom (noise) -> smaller angle (protects weights)
-            # Low denom (confident) -> larger angle (decays weights)
-            row_factor.atan2_(rd)
-            if cd is not None:
-                col_factor.atan2_(cd)
-
-        # Outer product: merges the row and column confidences into a 2D matrix
-        wd_scaler = row_factor * col_factor
-
-        # Normalize the scaler so its mean is exactly 1.0
-        wd_scaler.div_(wd_scaler.mean().clamp_min_(1e-12))
-
-        results.append(wd_scaler.view_as(p))
-
-    return results
+    return wd_scaler
