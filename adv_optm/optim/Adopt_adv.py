@@ -12,6 +12,8 @@ from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm, sc
 from ..util.centered_decay import _init_anchor
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 
+from .foreach import foreach_adopt
+
 A = 4 / math.pi
 
 class Adopt_adv(torch.optim.Optimizer):
@@ -94,6 +96,9 @@ class Adopt_adv(torch.optim.Optimizer):
         state_precision (str): Precision method for Adopt states. Options: 'auto'
             (parameter precision), 'fp32', 'factored' (SMMF low-rank FP32), 'bf16_sr' (with
             stochastic rounding), 'fp16' , 'int8_sr'. (default: 'auto')
+        foreach (bool | None): If True, uses foreach/multi-tensor operations for
+            improved throughput on small matrices. Only supports a subset of features.
+            (default: False)
     """
 
     def __init__(
@@ -139,6 +144,8 @@ class Adopt_adv(torch.optim.Optimizer):
         vector_reshape: bool = False,
         # torch.compile
         compiled_optimizer: bool = False,
+        # Foreach / multi-tensor
+        foreach: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -151,6 +158,27 @@ class Adopt_adv(torch.optim.Optimizer):
         if kourkoutas_beta and not (betas[1] > beta2_min):
             raise ValueError(f"For Kourkoutas-β, betas[1] (as beta2_max) must be > beta2_min. Got {betas[1]} and {beta2_min}")
 
+        # Foreach mode only supports a subset of features (designed for small matrices)
+        if foreach:
+            _foreach_unsupported = []
+            if state_precision not in ("auto", "fp32"):
+                _foreach_unsupported.append(f"state_precision='{state_precision}'")
+            if factored_2nd:
+                _foreach_unsupported.append("factored_2nd")
+            if nnmf_factor or state_precision == "factored":
+                _foreach_unsupported.append("nnmf_factor / factored state")
+            if vector_reshape:
+                _foreach_unsupported.append("vector_reshape")
+            if kourkoutas_beta:
+                _foreach_unsupported.append("kourkoutas_beta")
+            if centered_wd != 0.0 and centered_wd_mode != 'full':
+                _foreach_unsupported.append(f"centered_wd (mode='{centered_wd_mode}')")
+            if _foreach_unsupported:
+                raise ValueError(
+                    f"foreach=True does not support the following features: {', '.join(_foreach_unsupported)}. "
+                    "Foreach is intended for small-matrix training and does not implement "
+                    "memory-saving or advanced features."
+                )
 
         state_precision = state_precision.lower()
         valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp16", "int8_sr"}
@@ -173,6 +201,7 @@ class Adopt_adv(torch.optim.Optimizer):
             "state_precision": state_precision,
             "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape, "factored_2nd": factored_2nd,
             "compiled_optimizer": compiled_optimizer,
+            "foreach": foreach,
         }
         self.clip_lambda = clip_lambda
         self.stochastic_rounding = stochastic_rounding
@@ -196,6 +225,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
         # Initialize compiled function (by parameter shape)
         self._compiled_step_fns = {}
+        self._compiled_foreach_step = None
 
     def load_state_dict(self, state_dict: dict) -> None:
         """
@@ -207,6 +237,11 @@ class Adopt_adv(torch.optim.Optimizer):
         super().load_state_dict(state_dict)
         param_update.post_process_loaded_state(self)
         self.init_step()
+
+    @torch.no_grad()
+    def _init_state(self, p, group):
+        """Alias for __init_state to support foreach path."""
+        return self._Adopt_adv__init_state(p, group)
 
     @property
     def supports_fused_back_pass(self):
@@ -508,7 +543,10 @@ class Adopt_adv(torch.optim.Optimizer):
                 loss = closure()
 
         for group in self.param_groups:
-            for i, p in enumerate(group['params']):
-                self.step_parameter(p, group, i)
+            if group.get('foreach', False):
+                foreach_adopt.foreach_step(self, group)
+            else:
+                for i, p in enumerate(group['params']):
+                    self.step_parameter(p, group, i)
 
         return loss

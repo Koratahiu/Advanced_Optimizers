@@ -13,6 +13,8 @@ from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm, sc
 from ..util.centered_decay import _init_anchor
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
 
+from .foreach import foreach_adam
+
 A = 4 / math.pi
 
 class AdamW_adv(torch.optim.Optimizer):
@@ -91,6 +93,9 @@ class AdamW_adv(torch.optim.Optimizer):
         state_precision (str): Precision method for Adopt states. Options: 'auto'
             (parameter precision), 'fp32', 'factored' (SMMF low-rank FP32), 'bf16_sr' (with
             stochastic rounding), 'fp16' , 'int8_sr'. (default: 'auto')
+        foreach (bool | None): If True, uses foreach/multi-tensor operations for
+            improved throughput on small matrices. Only supports a subset of features.
+            (default: False)
     """
 
     def __init__(
@@ -138,6 +143,8 @@ class AdamW_adv(torch.optim.Optimizer):
         vector_reshape: bool = False,
         # torch.compile
         compiled_optimizer: bool = False,
+        # Foreach / multi-tensor
+        foreach: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -159,6 +166,28 @@ class AdamW_adv(torch.optim.Optimizer):
         if nnmf_factor:
             state_precision = "factored"
 
+        # Foreach mode only supports a subset of features (designed for small matrices)
+        if foreach:
+            _foreach_unsupported = []
+            if state_precision not in ("auto", "fp32"):
+                _foreach_unsupported.append(f"state_precision='{state_precision}'")
+            if factored_2nd:
+                _foreach_unsupported.append("factored_2nd")
+            if nnmf_factor or state_precision == "factored":
+                _foreach_unsupported.append("nnmf_factor / factored state")
+            if vector_reshape:
+                _foreach_unsupported.append("vector_reshape")
+            if kourkoutas_beta:
+                _foreach_unsupported.append("kourkoutas_beta")
+            if centered_wd != 0.0 and centered_wd_mode != 'full':
+                _foreach_unsupported.append(f"centered_wd (mode='{centered_wd_mode}')")
+            if _foreach_unsupported:
+                raise ValueError(
+                    f"foreach=True does not support the following features: {', '.join(_foreach_unsupported)}. "
+                    "Foreach is intended for small-matrix training and does not implement "
+                    "memory-saving or advanced features."
+                )
+
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
             "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
@@ -171,7 +200,8 @@ class AdamW_adv(torch.optim.Optimizer):
             "spectral_normalization": spectral_normalization,
             "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
             "state_precision": state_precision,
-            "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape, "factored_2nd": factored_2nd
+            "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape, "factored_2nd": factored_2nd,
+            "foreach": foreach,
         }
         self.stochastic_rounding = stochastic_rounding
         self.kourkoutas_beta = kourkoutas_beta
@@ -193,6 +223,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
         # Initialize compiled function (by parameter shape)
         self._compiled_step_fns = {}
+        self._compiled_foreach_step = None
 
     def load_state_dict(self, state_dict: dict) -> None:
         """
@@ -228,10 +259,10 @@ class AdamW_adv(torch.optim.Optimizer):
         """Initializes optimizer state for all parameters across all parameter groups."""
         for group in self.param_groups:
             for i, p in enumerate(group['params']):
-                self.__init_state(p, group)
+                self._init_state(p, group)
 
     @torch.no_grad()
-    def __init_state(self, p, group):
+    def _init_state(self, p, group):
         state = self.state[p]
 
         # State Initialization
@@ -296,7 +327,7 @@ class AdamW_adv(torch.optim.Optimizer):
 
         grad = p.grad
         state = self.state[p]
-        self.__init_state(p, group)
+        self._init_state(p, group)
 
         beta1, beta2 = group['betas']
 
@@ -497,7 +528,10 @@ class AdamW_adv(torch.optim.Optimizer):
                 loss = closure()
 
         for group in self.param_groups:
-            for i, p in enumerate(group['params']):
-                self.step_parameter(p, group, i)
+            if group.get('foreach', False):
+                foreach_adam.foreach_step(self, group)
+            else:
+                for i, p in enumerate(group['params']):
+                    self.step_parameter(p, group, i)
 
         return loss

@@ -11,6 +11,8 @@ from ..util.state_util import init_state_tensor, get_state, set_state, upcast_gr
 from ..util.sinkhorn import apply_sr_sinkhorn, get_sinkhorn_wd_scaler
 from ..util.signed_util import get_signsgd_wd_target
 
+from .foreach import foreach_sinksgd
+
 class SinkSGD_adv(torch.optim.Optimizer):
     """
     Implements an advanced Stochastic Gradient Descent (SGD) with Sinkhorn Iterative Normalization (SinkSGD) algorithm.
@@ -89,6 +91,8 @@ class SinkSGD_adv(torch.optim.Optimizer):
         vector_reshape: bool = False,
         # torch.compile
         compiled_optimizer: bool = False,
+        # Foreach / multi-tensor
+        foreach: bool = False,
     ):
         if not (lr >= 0.0):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
@@ -98,6 +102,24 @@ class SinkSGD_adv(torch.optim.Optimizer):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
         if snr_cond and not normed_momentum and not momentum > 0:
             raise NotImplementedError(f"snr_cond is intended to be used with normed_momentum.")
+
+        # Foreach mode only supports a subset of features (designed for small matrices)
+        if foreach:
+            _foreach_unsupported = []
+            if state_precision not in ("auto", "fp32"):
+                _foreach_unsupported.append(f"state_precision='{state_precision}'")
+            if nnmf_factor or state_precision == "factored":
+                _foreach_unsupported.append("nnmf_factor / factored state")
+            if vector_reshape:
+                _foreach_unsupported.append("vector_reshape")
+            if centered_wd != 0.0 and centered_wd_mode != 'full':
+                _foreach_unsupported.append(f"centered_wd (mode='{centered_wd_mode}')")
+            if _foreach_unsupported:
+                raise ValueError(
+                    f"foreach=True does not support the following features: {', '.join(_foreach_unsupported)}. "
+                    "Foreach is intended for small-matrix training and does not implement "
+                    "memory-saving or advanced features."
+                )
 
         state_precision = state_precision.lower()
         valid_precisions = {"auto", "fp32", "factored", "bf16_sr", "fp16", "int8_sr"}
@@ -118,7 +140,8 @@ class SinkSGD_adv(torch.optim.Optimizer):
             "spectral_normalization": spectral_normalization,
             "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
             "state_precision": state_precision,
-            "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape
+            "nnmf_factor": nnmf_factor, "vector_reshape": vector_reshape,
+            "foreach": foreach,
         }
         self.stochastic_rounding = stochastic_rounding
         self._init_lr = lr if lr > 0 else 1
@@ -133,6 +156,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
 
         # Initialize compiled function (by parameter shape)
         self._compiled_step_fns = {}
+        self._compiled_foreach_step = None
 
     def load_state_dict(self, state_dict: dict) -> None:
         """
@@ -395,7 +419,10 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 loss = closure()
 
         for group in self.param_groups:
-            for i, p in enumerate(group['params']):
-                self.step_parameter(p, group, i)
+            if group.get('foreach', False):
+                foreach_sinksgd.foreach_step(self, group)
+            else:
+                for i, p in enumerate(group['params']):
+                    self.step_parameter(p, group, i)
 
         return loss

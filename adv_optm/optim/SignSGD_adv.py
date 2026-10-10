@@ -3,6 +3,7 @@ import math
 
 from typing import Optional
 
+from .foreach import foreach_signsgd
 from ..util import param_update
 from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.factorization_util import _get_effective_shape, _reconstruct_state, _factorize_state
@@ -92,6 +93,8 @@ class SignSGD_adv(torch.optim.Optimizer):
         vector_reshape: bool = False,
         # torch.compile
         compiled_optimizer: bool = False,
+        # Foreach / multi-tensor
+        foreach: bool = False,
     ):
         if not lr > 0.0:
             raise ValueError(f"Learning rate must be > 0.0, but got {lr}")
@@ -110,6 +113,24 @@ class SignSGD_adv(torch.optim.Optimizer):
         # Legacy backwards compatibility support for `nnmf_factor=True`
         if nnmf_factor:
             state_precision = "factored"
+
+        # Foreach mode only supports a subset of features (designed for small matrices)
+        if foreach:
+            _foreach_unsupported = []
+            if state_precision not in ("auto", "fp32"):
+                _foreach_unsupported.append(f"state_precision='{state_precision}'")
+            if nnmf_factor or state_precision == "factored":
+                _foreach_unsupported.append("nnmf_factor / factored state")
+            if vector_reshape:
+                _foreach_unsupported.append("vector_reshape")
+            if centered_wd != 0.0 and centered_wd_mode != 'full':
+                _foreach_unsupported.append(f"centered_wd (mode='{centered_wd_mode}')")
+            if _foreach_unsupported:
+                raise ValueError(
+                    f"foreach=True does not support the following features: {', '.join(_foreach_unsupported)}. "
+                    "Foreach is intended for small-matrix training and does not implement "
+                    "memory-saving or advanced features."
+                )
 
         defaults = dict(
             lr=lr,
@@ -130,6 +151,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             state_precision=state_precision,
             nnmf_factor=nnmf_factor,
             compiled_optimizer=compiled_optimizer,
+            foreach=foreach,
         )
         self.stochastic_rounding = stochastic_rounding
         self._init_lr = lr if lr > 0 else 1
@@ -146,6 +168,7 @@ class SignSGD_adv(torch.optim.Optimizer):
 
         # Initialize compiled function (by parameter shape)
         self._compiled_step_fns = {}
+        self._compiled_foreach_step = None
 
     def load_state_dict(self, state_dict: dict) -> None:
         """
@@ -387,8 +410,11 @@ class SignSGD_adv(torch.optim.Optimizer):
                 loss = closure()
 
         for group in self.param_groups:
-            for i, p in enumerate(group["params"]):
-                if p.grad is not None:
-                    self.step_parameter(p, group, i)
+            if group.get('foreach', False):
+                foreach_signsgd.foreach_step(self, group)
+            else:
+                for i, p in enumerate(group["params"]):
+                    if p.grad is not None:
+                        self.step_parameter(p, group, i)
 
         return loss
