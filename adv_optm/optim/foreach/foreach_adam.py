@@ -24,6 +24,7 @@ def foreach_step(self, group: dict) -> None:
 
     grads = [p.grad for p in params]
 
+    beta1 = group['betas'][0]
     exp_avgs = []
     exp_avg_sqs = []
     state_steps = []
@@ -33,7 +34,8 @@ def foreach_step(self, group: dict) -> None:
     for p in params:
         state = self.state[p]
         self._init_state(p, group)
-        exp_avgs.append(state['exp_avg'])
+        if beta1 > 0:
+            exp_avgs.append(state['exp_avg'])
         exp_avg_sqs.append(state['exp_avg_sq'])
         state['step'] += 1
         state_steps.append(torch.tensor(state['step']))
@@ -171,7 +173,10 @@ def _group_by_device_dtype(params, grads, exp_avgs, exp_avg_sqs, state_steps):
             groups[key] = [[], [], [], [], []]
         groups[key][0].append(params[i])
         groups[key][1].append(grads[i])
-        groups[key][2].append(exp_avgs[i])
+        if exp_avgs:
+            groups[key][2].append(exp_avgs[i])
+        else:
+            groups[key][2].append(None)
         groups[key][3].append(exp_avg_sqs[i])
         groups[key][4].append(state_steps[i])
     return groups
