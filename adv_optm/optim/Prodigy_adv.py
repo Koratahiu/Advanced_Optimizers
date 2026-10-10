@@ -173,7 +173,7 @@ class Prodigy_adv(torch.optim.Optimizer):
             raise ValueError(f"Learning-rate should be >= 0.0. Got {lr}")
         if not (0.0 <= betas[0] < 1.0 and 0.0 <= betas[1] < 1.0):
             raise ValueError(f"Betas should be in [0.0, 1.0). Got {betas}")
-        if not (eps >= 0.0):
+        if eps is not None and not (eps >= 0.0):
             raise ValueError(f"Epsilon should be >= 0.0. Got {eps}")
         if not (weight_decay >= 0.0):
             raise ValueError(f"Weight-decay should be >= 0.0. Got {weight_decay}")
