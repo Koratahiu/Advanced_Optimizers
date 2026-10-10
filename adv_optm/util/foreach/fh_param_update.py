@@ -56,7 +56,7 @@ def _apply_weight_decay(
 
 
     # Normalize cwd_target to a list (single Tensor passed in is wrapped)
-    if cwd_target is not None and not isinstance(cwd_target, list):
+    if cwd_target is not None and not isinstance(cwd_target, (list, tuple)):
         cwd_target = [cwd_target]
 
     # Centered Weight Decay (pulls toward anchor)
