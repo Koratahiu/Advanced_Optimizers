@@ -19,7 +19,7 @@ def _apply_weight_decay(
     cautious = group.get('cautious_wd', False)
 
     # Normalize wd_target to a list (single Tensor passed in is wrapped)
-    if wd_target is not None and not isinstance(wd_target, list):
+    if wd_target is not None and not isinstance(wd_target, (list, tuple)):
         wd_target = [wd_target]
 
     # Standard Weight Decay (pulls toward zero)

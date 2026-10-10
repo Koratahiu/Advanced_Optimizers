@@ -45,11 +45,13 @@ def foreach_step(self, group: dict) -> None:
         if cwd != 0.0 and 'anchor_data' in state:
             anchors.append(state['anchor_data'])
 
-    # Group anchors by (device, dtype) to match the parameter grouping
+    # Group anchors by (device, dtype, is_vector) to match the matrix/vector
+    # parameter grouping used by the step functions.
     anchor_groups: dict = {}
     cwd = group.get('centered_wd', 0.0)
     for i, p in enumerate(params):
-        key = (p.device, p.dtype)
+        is_vector = p.ndim < 2 or getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False)
+        key = (p.device, p.dtype, is_vector)
         if cwd != 0.0 and i < len(anchors):
             if key not in anchor_groups:
                 anchor_groups[key] = []
@@ -123,7 +125,8 @@ def _foreach_step(
                 momentum, normed_mt, nesterov, nesterov_coef,
                 snr_cond, geometric_wd, lr,
             )
-            group_anchors = anchor_groups.get((mat_params[0].device, mat_params[0].dtype), None) if cwd != 0.0 else None
+            group_anchors = anchor_groups.get(
+                (mat_params[0].device, mat_params[0].dtype, False), None) if cwd != 0.0 else None
             foreach_apply_parameter_update(
                 self, mat_params, group, mat_updates, lr,
                 wd_scaler=mat_wd_scalers,
@@ -137,7 +140,8 @@ def _foreach_step(
                 momentum, normed_mt, nesterov, nesterov_coef,
                 snr_cond, geometric_wd, lr,
             )
-            group_anchors = anchor_groups.get((vec_params[0].device, vec_params[0].dtype), None) if cwd != 0.0 else None
+            group_anchors = anchor_groups.get(
+                (vec_params[0].device, vec_params[0].dtype, True), None) if cwd != 0.0 else None
             foreach_apply_parameter_update(
                 self, vec_params, group, vec_updates, lr,
                 wd_target=vec_wd_targets,
@@ -195,14 +199,23 @@ def _foreach_step_matrix(
     # Compute update (keep as list for in-place mutation)
     if momentum != 0:
         updates = torch._foreach_clone(momentum_buffers)
-        if nesterov:
+        if nesterov and normed_mt:
+            # When normed_momentum is True, scale the normalized gradient
+            # using empirical buffer magnitude (SNR recovery)
+            nv_coef = momentum if nesterov_coef is None else nesterov_coef
+            # normed_grad = buf.abs() * grad (element-wise)
+            normed_grads = torch._foreach_abs(momentum_buffers)
+            torch._foreach_mul_(normed_grads, grads)
+            torch._foreach_lerp_(updates, normed_grads, 1.0 - nv_coef)
+            del normed_grads
+        elif nesterov:
             nv_coef = momentum if nesterov_coef is None else nesterov_coef
             torch._foreach_lerp_(updates, grads, 1.0 - nv_coef)
     else:
         updates = torch._foreach_clone(grads)
 
     # SNR conditioning: row/col precondition + atan
-    if snr_cond:
+    if snr_cond and momentum != 0:
         update_2d = [updates[i].view(updates[i].shape[0], -1) for i, _ in enumerate(params)]
         torch._foreach_mul_(update_2d, vt_row)
         torch._foreach_mul_(update_2d, vt_col)
@@ -263,14 +276,22 @@ def _foreach_step_vector(
     # Compute update
     if momentum != 0:
         updates = torch._foreach_clone(momentum_buffers)
-        if nesterov:
+        if nesterov and normed_mt:
+            # When normed_momentum is True, scale the normalized gradient
+            # using empirical buffer magnitude (SNR recovery)
+            nv_coef = momentum if nesterov_coef is None else nesterov_coef
+            normed_grads = torch._foreach_abs(momentum_buffers)
+            torch._foreach_mul_(normed_grads, grads)
+            torch._foreach_lerp_(updates, normed_grads, 1.0 - nv_coef)
+            del normed_grads
+        elif nesterov:
             nv_coef = momentum if nesterov_coef is None else nesterov_coef
             torch._foreach_lerp_(updates, grads, 1.0 - nv_coef)
     else:
         updates = torch._foreach_clone(grads)
 
     # SNR conditioning: atan2 with denom
-    if snr_cond:
+    if snr_cond and momentum != 0:
         for i, _ in enumerate(updates):
             updates[i].atan2_(denom[i])
 
@@ -283,7 +304,7 @@ def _foreach_step_vector(
         wd_targets = foreach_get_signsgd_wd_target(params, denom=denom)
 
     if group.get('spectral_normalization', False):
-        update = foreach_max_abs_normalization(update, lr)
+        updates = foreach_max_abs_normalization(updates, lr)
     else:
         # Scale updates
         scaling = lr
