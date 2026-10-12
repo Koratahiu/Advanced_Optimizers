@@ -80,27 +80,27 @@ def _foreach_sinkhorn_matrix(
         p_norm_sq_adim = None
 
     for it in range(iters):
-        # First normalization step (dim)
+        # First normalization step (per-tensor dim)
         norm1 = [
-            torch.linalg.vector_norm(g_i, ord=2, dim=dims[it % len(g)], keepdim=True)
-            for g_i in g
+            torch.linalg.vector_norm(g_i, ord=2, dim=dims[j], keepdim=True)
+            for j, g_i in enumerate(g)
         ]
         torch._foreach_clamp_min_(norm1, [norm_lb_dims[j] for j in range(len(g))])
         torch._foreach_mul_(g, [scale_firsts[j] / norm1[j] for j in range(len(g))])
 
         if ortho_project and w[0] is not None:
-            g = _foreach_ortho_project_matrix(g, w, p_norm_sq_dim, dims[it % len(g)], scale_firsts)
+            g = _foreach_ortho_project_matrix(g, w, p_norm_sq_dim, dims, scale_firsts)
 
-        # Second normalization step (1-dim)
+        # Second normalization step (1 - per-tensor dim)
         norm2 = [
-            torch.linalg.vector_norm(g_i, ord=2, dim=1 - dims[it % len(g)], keepdim=True)
-            for g_i in g
+            torch.linalg.vector_norm(g_i, ord=2, dim=1 - dims[j], keepdim=True)
+            for j, g_i in enumerate(g)
         ]
         torch._foreach_clamp_min_(norm2, [norm_lb_adims[j] for j in range(len(g))])
         torch._foreach_mul_(g, [scale_seconds[j] / norm2[j] for j in range(len(g))])
 
         if ortho_project and w[0] is not None:
-            g = _foreach_ortho_project_matrix(g, w, p_norm_sq_adim, 1 - dims[it % len(g)], scale_seconds)
+            g = _foreach_ortho_project_matrix(g, w, p_norm_sq_adim, [1 - d for d in dims], scale_seconds)
 
     return g
 
@@ -109,25 +109,31 @@ def _foreach_ortho_project_matrix(
     grads: list[Tensor] | tuple[Tensor, ...],
     params: list[Tensor] | tuple[Tensor, ...],
     p_norm_sq: list[Tensor] | tuple[Tensor, ...],
-    dim: int,
+    dim: int | list[int],
     scale_factors: list[float],
 ) -> tuple[Tensor, ...]:
     """
     Projects each gradient to be orthogonal to the corresponding parameter
     along `dim` and restores the original norm.
     """
+    # Resolve per-tensor dims
+    if isinstance(dim, int):
+        dims = [dim] * len(grads)
+    else:
+        dims = list(dim)
+
     target_norm = [torch.full_like(g_i[:, :1], scale_factors[i]) for i, g_i in enumerate(grads)]
-    norm_lb = 1 / math.sqrt(grads[0].shape[dim])
+    norm_lb = 1 / math.sqrt(grads[0].shape[dims[0]])
     torch._foreach_clamp_min_(target_norm, 1e-8)
 
     # Project: g_orth = g - (p * <p, g> / ||p||^2)
     p_dot_g = torch._foreach_mul(params, grads)
-    dots = [torch.sum(x_i, dim=dim, keepdim=True) for x_i in p_dot_g]
+    dots = [torch.sum(x_i, dim=dims[i], keepdim=True) for i, x_i in enumerate(p_dot_g)]
     projs = torch._foreach_div_(dots, p_norm_sq)
     torch._foreach_addcmul_(grads, projs, params, value=-1.0)
 
     # Magnitude Preservation
-    g_orth_norms = [torch.linalg.vector_norm(g_i, dim=dim, keepdim=True).clamp_min_(norm_lb) for g_i in grads]
+    g_orth_norms = [torch.linalg.vector_norm(g_i, dim=dims[i], keepdim=True).clamp_min_(norm_lb) for i, g_i in enumerate(grads)]
     scales = torch._foreach_div(target_norm, g_orth_norms)
     torch._foreach_mul_(grads, scales)
     return grads
