@@ -123,7 +123,9 @@ def _foreach_ortho_project_matrix(
         dims = list(dim)
 
     target_norm = [torch.full_like(g_i[:, :1], scale_factors[i]) for i, g_i in enumerate(grads)]
-    norm_lb = 1 / math.sqrt(grads[0].shape[dims[0]])
+    # Per-tensor norm lower bound (mirrors ortho_normed, which derives it from
+    # each tensor's own shape — a shared bound is wrong for mixed shapes).
+    norm_lbs = [1 / math.sqrt(g_i.shape[dims[i]]) for i, g_i in enumerate(grads)]
     torch._foreach_clamp_min_(target_norm, 1e-8)
 
     # Project: g_orth = g - (p * <p, g> / ||p||^2)
@@ -133,7 +135,8 @@ def _foreach_ortho_project_matrix(
     torch._foreach_addcmul_(grads, projs, params, value=-1.0)
 
     # Magnitude Preservation
-    g_orth_norms = [torch.linalg.vector_norm(g_i, dim=dims[i], keepdim=True).clamp_min_(norm_lb) for i, g_i in enumerate(grads)]
+    g_orth_norms = [torch.linalg.vector_norm(g_i, dim=dims[i], keepdim=True) for i, g_i in enumerate(grads)]
+    torch._foreach_clamp_min_(g_orth_norms, norm_lbs)
     scales = torch._foreach_div(target_norm, g_orth_norms)
     torch._foreach_mul_(grads, scales)
     return grads
