@@ -172,9 +172,10 @@ def _foreach_step_matrix(
     if normed_mt:
         grads = foreach_apply_sr_sinkhorn(grads, iters=sinkhorn_iterations, params=params, ortho_project=orthogonal_sinkhorn)
 
-    # Update momentum buffer
-    if momentum != 0:
-        torch._foreach_lerp_(momentum_buffers, grads, 1.0 - momentum)
+    normed_grads = None
+    if momentum != 0 and nesterov and normed_mt:
+        normed_grads = torch._foreach_abs(momentum_buffers)
+        torch._foreach_mul_(normed_grads, grads)
 
     # Compute SNR conditioning denominators if needed
     vt_row = []
@@ -196,6 +197,10 @@ def _foreach_step_matrix(
         vt_row = [v.unsqueeze_(1) for v in vt_row]
         vt_col = [v.unsqueeze_(0) for v in vt_col]
 
+    # Update momentum buffer
+    if momentum != 0:
+        torch._foreach_lerp_(momentum_buffers, grads, 1.0 - momentum)
+
     # Compute update (keep as list for in-place mutation)
     if momentum != 0:
         updates = torch._foreach_clone(momentum_buffers)
@@ -203,9 +208,7 @@ def _foreach_step_matrix(
             # When normed_momentum is True, scale the normalized gradient
             # using empirical buffer magnitude (SNR recovery)
             nv_coef = momentum if nesterov_coef is None else nesterov_coef
-            # normed_grad = buf.abs() * grad (element-wise)
-            normed_grads = torch._foreach_abs(momentum_buffers)
-            torch._foreach_mul_(normed_grads, grads)
+            # normed_grads was computed from the pre-update buffer above
             torch._foreach_lerp_(updates, normed_grads, 1.0 - nv_coef)
             del normed_grads
         elif nesterov:
@@ -264,6 +267,11 @@ def _foreach_step_vector(
     if normed_mt:
         torch._foreach_sign_(grads)
 
+    normed_grads = None
+    if momentum != 0 and nesterov and normed_mt:
+        normed_grads = torch._foreach_abs(momentum_buffers)
+        torch._foreach_mul_(normed_grads, grads)
+
     # Compute SNR conditioning denominator if needed
     denom = None
     if snr_cond and momentum != 0:
@@ -273,6 +281,10 @@ def _foreach_step_vector(
         torch._foreach_clamp_min_(denom, 1e-30)
         torch._foreach_sqrt_(denom)
 
+    # Update momentum buffer
+    if momentum != 0:
+        torch._foreach_lerp_(momentum_buffers, grads, 1.0 - momentum)
+
     # Compute update
     if momentum != 0:
         updates = torch._foreach_clone(momentum_buffers)
@@ -280,8 +292,7 @@ def _foreach_step_vector(
             # When normed_momentum is True, scale the normalized gradient
             # using empirical buffer magnitude (SNR recovery)
             nv_coef = momentum if nesterov_coef is None else nesterov_coef
-            normed_grads = torch._foreach_abs(momentum_buffers)
-            torch._foreach_mul_(normed_grads, grads)
+            # normed_grads was computed from the pre-update buffer above
             torch._foreach_lerp_(updates, normed_grads, 1.0 - nv_coef)
             del normed_grads
         elif nesterov:
