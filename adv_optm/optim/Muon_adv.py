@@ -475,6 +475,8 @@ class Muon_adv(torch.optim.Optimizer):
 
         grad = _orthogonalize_gradient(p, grad, group.get("orthogonal_gradient"))
 
+        original_shape = p.shape
+
         if state['factored']: # Factored Muon
             d1, d2 = state['effective_shape']
             grad_reshaped = grad.view(d1, d2)
@@ -521,7 +523,6 @@ class Muon_adv(torch.optim.Optimizer):
 
             if len(p.shape) >= 2:
 
-                original_shape = p.shape
                 actual_precision = group['actual_state_precision']
 
                 # Momentum update
