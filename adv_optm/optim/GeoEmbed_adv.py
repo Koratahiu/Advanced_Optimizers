@@ -106,6 +106,10 @@ class GeoEmbed_adv(Optimizer):
                 # Multi-Token Polar Decoupling with re-projection
                 u_tangent = gram_condition(K, g_tangent, p_2d, eps=eps)
 
+                # Geodesic Manifold Anchor Pull
+                if wd > 0.0:
+                    u_tangent = geodesic_decay(u_tangent, p_2d, a_2d, p_norm_sq, wd, eps=eps)
+
                 # Riemannian Momentum Integration
                 if mu > 0.0:
                     if "momentum_buffer" not in state:
@@ -126,24 +130,16 @@ class GeoEmbed_adv(Optimizer):
                 else:
                     update_vec = u_tangent
 
-                if wd > 0.0:
-                    update = geodesic_decay(
-                        update_vec, p_2d, a_2d, p_norm_sq, wd, 
-                        active_mask=active_mask, eps=eps
-                    )
-                else:
-                    update = update_vec
-
                 # Geodesic Exponential Map Flow
-                v_norm = torch.linalg.vector_norm(update.float(), ord=2, dim=-1, keepdim=True).to(p.dtype)
+                v_norm = torch.linalg.vector_norm(update_vec.float(), ord=2, dim=-1, keepdim=True).to(p.dtype)
                 act_v = (v_norm > eps) & active_mask
                 cond_act = act_v.any()
 
                 p_next = p_2d.clone()
                 if cond_act:
                     # Unit direction along the tangent geodesic
-                    u_hat = torch.zeros_like(update)
-                    u_hat[act_v.squeeze(-1)] = update[act_v.squeeze(-1)] / v_norm[act_v.squeeze(-1)]
+                    u_hat = torch.zeros_like(update_vec)
+                    u_hat[act_v.squeeze(-1)] = update_vec[act_v.squeeze(-1)] / v_norm[act_v.squeeze(-1)]
 
                     # Angular step: smoothly scale with norm, saturating at lr radians
                     theta = lr * torch.tanh(v_norm) * act_v.float()
