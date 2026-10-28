@@ -1,117 +1,87 @@
 import torch
-
+import math
 
 def reshape_2d(p, grad, anchor, radius):
     if p.ndim == 1:
         return p.view(1, -1), grad.view(1, -1), anchor.view(1, -1), radius.view(1, 1)
     return p.view(-1, p.shape[-1]), grad.view(-1, p.shape[-1]), anchor.view(-1, p.shape[-1]), radius.view(-1, 1)
 
-
 def radial_projection(p_2d: torch.Tensor, g_2d: torch.Tensor, p_norm_sq: torch.Tensor) -> torch.Tensor:
     """Projects Euclidean gradient onto tangent space T_p S^{D-1}."""
     radial_comp = torch.sum(p_2d * g_2d, dim=-1, keepdim=True) / p_norm_sq
     return g_2d - radial_comp * p_2d
 
-
-def gram_condition(K: int, g_tangent: torch.Tensor, p_2d: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """
-    Löwdin symmetric orthogonalization over ACTIVE tokens only,
-    followed by re-projection to guarantee tangent space membership.
-    """
+def gram_condition(K: int, g_tangent: torch.Tensor, eps: float) -> torch.Tensor:
+    """Inter-token polar orthogonalization (Löwdin symmetric orthogonalization)."""
     g_norms = torch.linalg.vector_norm(g_tangent, ord=2, dim=-1, keepdim=True)
-    active_idx = (g_norms.squeeze(-1) > eps).nonzero(as_tuple=True)[0]
-    
-    if len(active_idx) == 0:
-        return torch.zeros_like(g_tangent)
+    active_mask = (g_norms > eps).float()
 
-    u_tangent = torch.zeros_like(g_tangent)
+    if K > 1:
+        try:
+            # Gram matrix in tangent space (K, K)
+            gram = torch.matmul(g_tangent, g_tangent.mT)
+            U, S, Vh = torch.linalg.svd(gram.float())
+            inv_sqrt_S = torch.diag_embed(1.0 / torch.sqrt(S.clamp_min(eps)))
+            inv_sqrt_gram = (U @ inv_sqrt_S @ Vh).to(g_tangent.dtype)
 
-    if len(active_idx) > 1:
-        g_act = g_tangent[active_idx]  # (K_act, D)
-        # Gram matrix: (K_act, K_act)
-        gram = torch.matmul(g_act, g_act.mT)
+            # Orthonormal basis
+            u_ortho = torch.matmul(inv_sqrt_gram, g_tangent)
 
-        # SVD of Gram matrix
-        U, S, Vh = torch.linalg.svd(gram)
-
-        # Truncated pseudo-inverse square root
-        max_s = S[0].clamp_min(eps)
-        rel_thresh = max_s * 1e-4
-        valid_mask = S > rel_thresh
-
-        inv_sqrt_S = torch.zeros_like(S)
-        inv_sqrt_S[valid_mask] = 1.0 / torch.sqrt(S[valid_mask])
-        inv_sqrt_gram = U @ torch.diag_embed(inv_sqrt_S) @ Vh
-
-        u_act = (inv_sqrt_gram @ g_act).to(g_tangent.dtype)
-        u_tangent[active_idx] = u_act
+            # Re-apply gradient magnitudes so step size scales with loss
+            u_tangent = u_ortho * g_norms
+        except Exception:
+            u_tangent = g_tangent
     else:
-        idx = active_idx[0]
-        u_tangent[idx] = g_tangent[idx] / g_norms[idx].clamp_min(eps).to(g_tangent.dtype)
+        u_tangent = g_tangent
 
-    # Re-project onto each token's tangent space T_{p_i}
-    p_norm_sq = torch.sum(p_2d * p_2d, dim=-1, keepdim=True).clamp_min(eps)
-    u_tangent = radial_projection(p_2d, u_tangent, p_norm_sq)
-
-    # Normalize active tangent vectors to unit norm
-    u_norms = torch.linalg.vector_norm(u_tangent, ord=2, dim=-1, keepdim=True).clamp_min(eps).to(u_tangent.dtype)
-    u_tangent[active_idx] = u_tangent[active_idx] / u_norms[active_idx]
-
-    return u_tangent
-
+    return u_tangent * active_mask
 
 def geodesic_decay(
     u_tangent: torch.Tensor,
     p_2d: torch.Tensor,
     a_2d: torch.Tensor,
     p_norm_sq: torch.Tensor,
+    r_2d: torch.Tensor,
     wd: float,
-    eps: float = 1e-8
+    eps: float
 ) -> torch.Tensor:
     """
-    Riemannian anchor pull along geodesic: grad(1/2 * dist^2(p, a)) = -log_p(a).
+    Pulls tangent direction toward the Riemannian anchor along the geodesic.
+    Fixed sign: Moves along -anchor_tangent in the exponential map.
     """
-    p_norm = torch.linalg.vector_norm(p_2d, dim=-1, keepdim=True).clamp_min(eps)
-    a_norm = torch.linalg.vector_norm(a_2d, dim=-1, keepdim=True).clamp_min(eps)
+    anchor_radial = torch.sum(p_2d * a_2d, dim=-1, keepdim=True) / p_norm_sq
+    anchor_tangent = a_2d - anchor_radial * p_2d
+    anchor_norm = torch.linalg.vector_norm(anchor_tangent, ord=2, dim=-1, keepdim=True).clamp_min(eps)
+    anchor_dir = anchor_tangent / anchor_norm
 
-    # Tangent vector pointing from p towards anchor a
-    anchor_radial = (torch.sum(p_2d * a_2d, dim=-1, keepdim=True) / p_norm_sq)
-    anchor_tangent = (a_2d - anchor_radial * p_2d)
-    anchor_tangent_norm = torch.linalg.vector_norm(anchor_tangent, ord=2, dim=-1, keepdim=True).clamp_min(eps)
-    anchor_dir = (anchor_tangent / anchor_tangent_norm)
-
-    # Angular distance
-    cos_dist = (torch.sum(p_2d * a_2d, dim=-1, keepdim=True) / (p_norm * a_norm)).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
+    # Geodesic distance (angle along the sphere arc)
+    cos_dist = (torch.sum(p_2d * a_2d, dim=-1, keepdim=True) / (r_2d * r_2d)).clamp(-1.0 + eps, 1.0 - eps)
     geo_angle = torch.acos(cos_dist)
 
-    # Add restoring force towards anchor (subtract from descent direction)
+    # SUBTRACT anchor_dir because exponential flow subtracts u_tangent!
+    # - (-anchor_dir) = +anchor_dir (moves TOWARD anchor)
     return u_tangent - (wd * geo_angle * anchor_dir)
-
 
 def parallel_transport(
     p: torch.Tensor,
     p_next: torch.Tensor,
     v: torch.Tensor,
+    r_norm_sq: torch.Tensor,
+    cos_theta: torch.Tensor,
     eps: float = 1e-8
 ) -> torch.Tensor:
     """
-    Levi-Civita Parallel Transport along great-circle arc:
-    Transports v from T_p S^{D-1} to T_{p_next} S^{D-1}.
+    Symmetric Levi-Civita Parallel Transport on S^{D-1}(R).
+    Transports tangent vector v from T_p S^{D-1} to T_{p_next} S^{D-1} along the geodesic.
+    Guarantees: <p_next, v_trans> = 0 and ||v_trans|| = ||v||.
     """
-    p_2d = p
-    q_f = p_next
-    v_f = v
-
-    dot_qv = torch.sum(q_f * v_f, dim=-1, keepdim=True)
-    dot_pp = torch.sum(p_2d * p_2d, dim=-1, keepdim=True)
-    dot_pq = torch.sum(p_2d * q_f, dim=-1, keepdim=True)
-
-    denom = (dot_pp + dot_pq).clamp_min(eps)
-    v_trans = v_f - (dot_qv / denom) * (p_2d + q_f)
-
-    # Clean up numerical float drift to ensure strict tangency <q, v_trans> = 0
-    q_norm_sq = torch.sum(q_f * q_f, dim=-1, keepdim=True).clamp_min(eps)
-    radial_leak = torch.sum(q_f * v_trans, dim=-1, keepdim=True) / q_norm_sq
-    v_trans = v_trans - radial_leak * q_f
-
-    return v_trans.to(v.dtype)
+    # <p_next, v>
+    dot_qv = torch.sum(p_next * v, dim=-1, keepdim=True)
+    
+    # Denominator: R^2 * (1 + cos(theta))
+    denom = r_norm_sq * (1.0 + cos_theta).clamp_min(eps)
+    
+    # Transport formula: v - (<p_next, v> / denom) * (p + p_next)
+    v_transported = v - (dot_qv / denom) * (p + p_next)
+    
+    return v_transported

@@ -6,7 +6,6 @@ from .Muon_adv import Muon_adv
 from .AdaMuon_adv import AdaMuon_adv
 from .SignSGD_adv import SignSGD_adv
 from .SinkSGD_adv import SinkSGD_adv
-from .GeoEmbed_adv import GeoEmbed_adv
 
 __all__ = [
     "AdamW_adv",
@@ -17,5 +16,4 @@ __all__ = [
     "AdaMuon_adv",
     "SignSGD_adv",
     "SinkSGD_adv",
-    "GeoEmbed_adv",
 ]

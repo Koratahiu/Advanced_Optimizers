@@ -48,6 +48,7 @@ class GeoEmbed_adv(Optimizer):
 
     @torch.no_grad()
     def init_anchors(self):
+        """Stores the initial embedding vectors as Riemannian anchors."""
         for group in self.param_groups:
             for p in group["params"]:
                 self._init_anchors(p)
@@ -57,6 +58,7 @@ class GeoEmbed_adv(Optimizer):
         state = self.state[p]
         if "anchor" not in state:
             state["anchor"] = p.detach().clone()
+            # Pre-calculate target manifold radius per token
             if p.ndim == 1:
                 state["radius"] = p.norm(p=2).clamp_min(1e-8)
             else:
@@ -88,77 +90,74 @@ class GeoEmbed_adv(Optimizer):
                 anchor = state["anchor"]
                 radius = state["radius"]
 
+                # Ensure 2D representation: (K, D) where K is token count, D is dimension
                 orig_shape = p.shape
                 p_2d, g_2d, a_2d, r_2d = reshape_2d(p, grad, anchor, radius)
                 K, D = p_2d.shape
 
-                # Mask active tokens
-                g_norm = torch.linalg.vector_norm(g_2d.float(), ord=2, dim=-1, keepdim=True)
-                active_mask = (g_norm > eps)
-                if not active_mask.any():
+                # Detect active gradient mask to prevent idle token norm shrinkage
+                g_norm = torch.linalg.vector_norm(g_2d, ord=2, dim=-1, keepdim=True)
+                active_tokens = (g_norm > eps).float()
+
+                if active_tokens.sum() == 0:
                     continue
 
                 p_norm_sq = torch.sum(p_2d * p_2d, dim=-1, keepdim=True).clamp_min(eps)
 
-                # Project Gradient onto Tangent Bundle T_p S^{D-1}
+                # Project Gradient onto Tangent Bundle T_e S^{D-1}
+                # Radial projection: alpha = <p, g> / ||p||^2
                 g_tangent = radial_projection(p_2d, g_2d, p_norm_sq)
 
-                # Multi-Token Polar Decoupling with re-projection
-                u_tangent = gram_condition(K, g_tangent, p_2d, eps=eps)
+                # Multi-Token Polar Decoupling (Instantaneous Gram-Schmidt)
+                u_tangent = gram_condition(K, g_tangent, eps)
 
-                # Geodesic Manifold Anchor Pull
+                # Geodesic Decay (Manifold Anchor Pull)
                 if wd > 0.0:
-                    u_tangent = geodesic_decay(u_tangent, p_2d, a_2d, p_norm_sq, wd, eps=eps)
+                    u_tangent = geodesic_decay(u_tangent, p_2d, a_2d, p_norm_sq, r_2d, wd, eps)
 
                 # Riemannian Momentum Integration
                 if mu > 0.0:
                     if "momentum_buffer" not in state:
-                        buf = torch.zeros_like(u_tangent)
-                        buf[active_mask.squeeze(-1)] = u_tangent[active_mask.squeeze(-1)]
-                        state["momentum_buffer"] = buf
+                        # First step: initialize buffer in current tangent space
+                        buf = u_tangent.clone()
                     else:
+                        # Buffer was already parallel-transported to T_p S^{D-1} at the end of last step!
                         buf = state["momentum_buffer"]
-                        # Only update momentum for active tokens; leave inactive tokens frozen
-                        act_idx = active_mask.squeeze(-1)
-                        buf[act_idx] = buf[act_idx] * mu + u_tangent[act_idx] * (1.0 - mu)
+                        buf.mul_(mu).add_(u_tangent, alpha=1.0 - mu)
 
                     if nesterov:
-                        nv = mu if nesterov_coef is None else nesterov_coef
-                        update_vec = u_tangent.lerp(buf, nv)
+                        nv_coef = mu if nesterov_coef is None else nesterov_coef
+                        update_direction = u_tangent.lerp(buf, nv_coef)
                     else:
-                        update_vec = buf
+                        update_direction = buf
                 else:
-                    update_vec = u_tangent
+                    update_direction = u_tangent
+
+                dir_norm = torch.linalg.vector_norm(update_direction, ord=2, dim=-1, keepdim=True)
+                u_unit = update_direction / dir_norm.clamp_min(eps)
+
+                # Smoothly saturate large steps, decay to 0 near minimum
+                theta = lr * torch.atan(dir_norm) * active_tokens
 
                 # Geodesic Exponential Map Flow
-                v_norm = torch.linalg.vector_norm(update_vec.float(), ord=2, dim=-1, keepdim=True).to(p.dtype)
-                act_v = (v_norm > eps) & active_mask
-                cond_act = act_v.any()
+                cos_theta = torch.cos(theta)
+                sin_theta = torch.sin(theta)
 
-                p_next = p_2d.clone()
-                if cond_act:
-                    # Unit direction along the tangent geodesic
-                    u_hat = torch.zeros_like(update_vec)
-                    u_hat[act_v.squeeze(-1)] = update_vec[act_v.squeeze(-1)] / v_norm[act_v.squeeze(-1)]
-
-                    # Angular step: smoothly scale with norm, saturating at lr radians
-                    theta = lr * torch.tanh(v_norm) * act_v.float()
-
-                    cos_theta = torch.cos(theta)
-                    sin_theta = torch.sin(theta)
-
-                    # Geodesic flow formula preserving exact sphere radius ||p_next|| == ||p|| == R
-                    p_next = p_2d * cos_theta - r_2d * u_hat * sin_theta
+                # Exponential flow
+                p_next = p_2d * cos_theta - r_2d * u_unit * sin_theta
 
                 # Parallel Transport Momentum Buffer to T_{p_next} for the Next Step
-                if mu > 0.0 and cond_act:
+                if mu > 0.0:
                     state["momentum_buffer"] = parallel_transport(
                         p=p_2d,
                         p_next=p_next,
-                        v=state["momentum_buffer"],
+                        v=buf,
+                        r_norm_sq=p_norm_sq,
+                        cos_theta=cos_theta,
                         eps=eps
                     )
 
+                # Write directly in-place
                 p.copy_(p_next.view(orig_shape))
 
         return loss

@@ -7,7 +7,6 @@ from .optim import (
     AdaMuon_adv,
     SignSGD_adv,
     SinkSGD_adv,
-    GeoEmbed_adv,
 )
 
 __all__ = [
@@ -19,7 +18,6 @@ __all__ = [
     "AdaMuon_adv",
     "SignSGD_adv",
     "SinkSGD_adv",
-    "GeoEmbed_adv",
 ]
 
 __version__ = "2.5.16"
