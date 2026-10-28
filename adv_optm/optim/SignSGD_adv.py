@@ -67,6 +67,7 @@ class SignSGD_adv(torch.optim.Optimizer):
         # weight decay features
         geometric_wd: bool = False,
         cautious_wd: bool = False,
+        scaled_wd: bool = False,
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
         # OrthoGrad
@@ -116,6 +117,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             momentum=momentum,
             weight_decay=weight_decay,
             cautious_wd=cautious_wd,
+            scaled_wd=scaled_wd,
             geometric_wd=geometric_wd,
             vector_reshape=vector_reshape,
             orthogonal_gradient=orthogonal_gradient,
