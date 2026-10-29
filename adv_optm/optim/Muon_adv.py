@@ -30,6 +30,7 @@ class Muon_adv(torch.optim.Optimizer):
         cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
             applied only to parameter coordinates where the sign of the parameter
             and the sign of the optimizer update align (default: False).
+        scaled_wd (bool): Enables scale-invariant, dimension-scaled weight decay. If True, weight decay is scaled by the relative learning rate and parameter dimension. (default: False).
         nesterov (bool): enables Nesterov momentum (default: True).
         nesterov_coef (float, optional): Nesterov coefficient (default: None).
         ns_steps (int): number of Newton-Schulz iterations to perform (default: 5).
@@ -114,6 +115,7 @@ class Muon_adv(torch.optim.Optimizer):
         # Decoupled/cautious weight decay
         weight_decay: float = 0.0,
         cautious_wd: bool = False,
+        scaled_wd: bool = False,
         # Nesterov momentum
         nesterov: bool = True,
         nesterov_coef: float | None = None,
@@ -204,7 +206,7 @@ class Muon_adv(torch.optim.Optimizer):
         defaults = {
             "lr": lr, "beta1": beta1, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
             "nesterov": nesterov, "nesterov_coef": nesterov_coef, "ns_steps": ns_steps, "ns_eps": ns_eps,
-            "ns_coeffs": ns_coeffs, "nnmf_factor": nnmf_factor,
+            "ns_coeffs": ns_coeffs, "nnmf_factor": nnmf_factor, "scaled_wd": scaled_wd,
             "vector_reshape": vector_reshape,  "rms_rescaling": rms_rescaling,
             "orthogonal_gradient": orthogonal_gradient,
             'compiled_optimizer': compiled_optimizer,

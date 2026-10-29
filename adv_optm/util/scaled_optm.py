@@ -3,27 +3,17 @@ import torch
 from . import param_update
 
 import math
+from functools import lru_cache
 
-_OFT_INDICES_CACHE = {}
-_OFT_IDENTITY_CACHE = {}
-
-def get_cached_structural_tensors(b: int, device: torch.device):
+@lru_cache()
+def get_cached_structural_tensors(b: int, batch_size: int, device: torch.device):
     """
     Retrieves or creates structural tensors (indices) for OFT exact geometry.
-    Caches them globally to prevent redundant memory allocation across thousands of layers.
+    Caches them globally to prevent redundant memory allocation.
     """
-    global _OFT_INDICES_CACHE
-
-    # Cache for Indices
-    idx_key = (b, device)
-    if idx_key not in _OFT_INDICES_CACHE:
-        rows, cols = torch.triu_indices(b, b, 1, device=device)
-        _OFT_INDICES_CACHE[idx_key] = (rows, cols)
-    else:
-        rows, cols = _OFT_INDICES_CACHE[idx_key]
-
-
-    return rows, cols
+    rows, cols = torch.triu_indices(b, b, 1, device=device)
+    batch_idx = torch.arange(batch_size, device=device)[:, None]
+    return rows, cols, batch_idx
 
 def scale_update(
     p: torch.Tensor,
@@ -97,6 +87,25 @@ def adjust_wds(wd: float, cwd: float, p: torch.Tensor) -> tuple[float, float]:
         # Centered WD safely regularizes the delta without collapsing base feature variance.
         return wd, cwd
 
+def scale_wd(wd: float | None, p: torch.Tensor, skip_vectors: bool = False) -> float:
+    """
+    Scale-invariant, dimension-scaled weight decay.
+    """
+    if wd is None:
+        return wd
+    if getattr(p, '_is_oft', False):
+        n_el = p.shape[-1]
+        b = (1.0 + math.sqrt(1.0 + 8.0 * n_el)) / 2.0
+        wd = (2 * wd) / (b - 1)
+        return wd
+
+    is_vector = p.ndim < 2 or getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False) 
+    if is_vector:
+        return 0.0 if skip_vectors else wd
+
+    if p.ndim >= 2:
+        width = p.numel() // p.shape[0]
+        return wd / width
 
 def is_spectral(p: torch.Tensor) -> bool:
     """Determines if a parameter should undergo spectral normalization updates."""
@@ -114,9 +123,9 @@ def init_spectral_norm(state: dict, p: torch.Tensor):
     if getattr(p, '_is_oft', False):
         n_el = p.shape[-1]
         b = int((1.0 + math.sqrt(1.0 + 8.0 * n_el)) / 2.0)
-        get_cached_structural_tensors(b, p.device)
-        gen = param_update.get_generator(p.device)
         batch_size = p.numel() // n_el
+        get_cached_structural_tensors(b, batch_size, p.device)
+        gen = param_update.get_generator(p.device)
         # Initialize v (Right singular vector)
         v = torch.randn(batch_size, b, device=p.device, dtype=p.dtype, generator=gen)
         state['spectral_v'] = v.div_(v.norm(dim=1, keepdim=True).add_(1e-12))
@@ -174,7 +183,8 @@ def apply_spectral_riemannian_oft(
     n_el = p.shape[-1]
     block_size = int((1 + math.sqrt(1 + 8 * n_el)) / 2)
     device, dtype = p.device, p.dtype
-    rows, cols = get_cached_structural_tensors(block_size, device)
+    batch_size = update.shape[0]
+    rows, cols, batch_idx = get_cached_structural_tensors(block_size, batch_size, device)
 
     # Flatten any prepended batch dimensions for processing
     orig_shape = p.shape
@@ -182,16 +192,12 @@ def apply_spectral_riemannian_oft(
     # Align the scale of p with the forward pass
     scale_factor = getattr(p, '_oft_scale_factor', 1.0)
 
-    update_flat = update.view(-1, n_el)
-    batch_size = update_flat.shape[0]
-
     # Initialize matrices
     G = torch.zeros(batch_size, block_size, block_size, device=device, dtype=dtype)
-    batch_idx = torch.arange(batch_size, device=device)[:, None]
 
     # Construct skew-symmetric gradient matrix G
-    G = G.index_put((batch_idx, rows, cols), update_flat)
-    G = G - G.transpose(-2, -1)
+    G.index_put_((batch_idx, rows, cols), update)
+    G.index_put_((batch_idx, cols, rows), -update)
 
     # Spectral Normalization on G
     u_state = state['spectral_u'].unsqueeze(-1).to(dtype)
@@ -222,7 +228,7 @@ def apply_spectral_riemannian_oft(
     # Apply the clamp and scaling block-wise
     scale = lr * (target_scale / sigma.clamp_min(spectral_eps))
 
-    return update_flat.mul_(scale).view(orig_shape)
+    return update.mul_(scale).view(orig_shape)
 
 
 @torch.no_grad()

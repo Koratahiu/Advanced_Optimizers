@@ -8,7 +8,7 @@ from ..util.OrthoGrad import _orthogonalize_gradient
 from ..util.scaled_optm import scale_update, is_spectral, init_spectral_norm
 from ..util.centered_decay import _init_anchor, dequantize_anchor
 from ..util.state_util import init_state_tensor, get_state, set_state, upcast_grad_for_precision
-from ..util.sinkhorn import apply_sr_sinkhorn, get_sinkhorn_wd_scaler
+from ..util.sinkhorn import apply_sr_sinkhorn, get_sinkhorn_wd_scaler, apply_oft_sinkhorn, apply_spectral_oft_sinkhorn
 from ..util.signed_util import get_signsgd_wd_target
 
 class SinkSGD_adv(torch.optim.Optimizer):
@@ -29,12 +29,14 @@ class SinkSGD_adv(torch.optim.Optimizer):
         cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
             applied only to parameter coordinates where the sign of the parameter
             and the sign of the optimizer update align (default: False).
+        scaled_wd (bool): Enables scale-invariant, dimension-scaled weight decay. If True, weight decay is scaled by the relative learning rate and parameter dimension. (default: False).
         vector_reshape (bool): whether to reshape 1D vectors into 2D
             matrices to apply low-rank compression (default: True).
         stochastic_rounding (bool): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
         sinkhorn_iterations (int): Number of Sinkhorn iterations for normalization. (default: 5)
         orthogonal_sinkhorn (bool): Whether to use orthogonal Sinkhorn normalization. (default: False)
+        oft_mode (bool): Enables OFT-specific skew-symmetric Sinkhorn normalization. If True, uses skew-symmetric Sinkhorn for OFT parameters instead of standard SR-Sinkhorn. (default: False)
         normed_momentum (bool): whether to compute the first moment on the normalized gradient. (default: False)
         snr_cond (bool): whether to apply SNR conditioning. (default: False).
         geometric_wd (bool): Enables geometric weight decay. (default: False).
@@ -63,6 +65,8 @@ class SinkSGD_adv(torch.optim.Optimizer):
         # Sinkhorn Iterative Normalization
         sinkhorn_iterations: int = 5,
         orthogonal_sinkhorn: bool = False,
+        # OFT-specific Sinkhorn (symmetric)
+        oft_mode: bool = False,
         # Normalization then Momentum
         normed_momentum: bool = False,
         # SNR Precondition (requires normed_momentum)
@@ -73,6 +77,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         # weight decay features
         geometric_wd: bool = False,
         cautious_wd: bool = False,
+        scaled_wd: bool = False,
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
         # OrthoGrad
@@ -110,11 +115,11 @@ class SinkSGD_adv(torch.optim.Optimizer):
         defaults = {
             "lr": lr, "momentum": momentum,
             "weight_decay": weight_decay, "nesterov": nesterov, "nesterov_coef": nesterov_coef, "normed_momentum": normed_momentum, "snr_cond": snr_cond,
-            "geometric_wd": geometric_wd, "cautious_wd": cautious_wd,
+            "geometric_wd": geometric_wd, "cautious_wd": cautious_wd, "scaled_wd": scaled_wd,
             "orthogonal_gradient": orthogonal_gradient, 
             "compiled_optimizer": compiled_optimizer,
             "sinkhorn_iterations": sinkhorn_iterations,
-            "orthogonal_sinkhorn": orthogonal_sinkhorn,
+            "orthogonal_sinkhorn": orthogonal_sinkhorn, "oft_mode": oft_mode,
             "spectral_normalization": spectral_normalization,
             "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
             "state_precision": state_precision,
@@ -254,6 +259,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         nesterov = group['nesterov']
         nesterov_coef = group.get('nesterov_coef', None)
         snr_cond = group.get('snr_cond', False)
+        oft_sym = group.get('oft_mode', False)
 
         vt_row = None
         vt_col = None
@@ -266,9 +272,12 @@ class SinkSGD_adv(torch.optim.Optimizer):
         grad = _orthogonalize_gradient(p, grad, group["orthogonal_gradient"])
 
         if normed_mt:
+            # Sinkhorn iterative normalization
             if not is_vector:
-                # Sinkhorn iterative normalization
-                grad = apply_sr_sinkhorn(grad, iters=sinkhorn_iterations, p=p, ortho_project=orthogonal_sinkhorn)
+                if not oft_sym:
+                    grad = apply_sr_sinkhorn(grad, iters=sinkhorn_iterations, p=p, ortho_project=orthogonal_sinkhorn)
+                else:
+                    grad = apply_oft_sinkhorn(grad, iters=sinkhorn_iterations, p=p, ortho_project=orthogonal_sinkhorn)
             else:
                 # For vectors, apply sign operation
                 grad = grad.sign_()
@@ -360,9 +369,15 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 update.atan2_(denom)
 
         if not group.get('normed_momentum', False):
+            # Sinkhorn iterative normalization
             if not is_vector:
-                # Sinkhorn iterative normalization
-                update = apply_sr_sinkhorn(update, iters=sinkhorn_iterations, p=p, ortho_project=orthogonal_sinkhorn)
+                if not oft_sym:
+                    update = apply_sr_sinkhorn(update, iters=sinkhorn_iterations, p=p, ortho_project=orthogonal_sinkhorn)
+                else:
+                    if group.get('spectral_normalization', False):
+                        update = apply_spectral_oft_sinkhorn(p, update, iters=sinkhorn_iterations, lr=step_size, state=state, ortho_project=orthogonal_sinkhorn)
+                    else:
+                        update = apply_oft_sinkhorn(update, iters=sinkhorn_iterations, p=p, ortho_project=orthogonal_sinkhorn)
             else:
                 # For vectors, apply sign operation
                 update = update.sign_()
@@ -378,10 +393,16 @@ class SinkSGD_adv(torch.optim.Optimizer):
                 cwd_target = get_signsgd_wd_target(p.sub(anchor), denom=denom)
                 del anchor
 
-        if group.get('spectral_normalization', False):
-            update = scale_update(p, update, step_size, state=state)
-        else:
-            update_scaling = step_size * (4/math.pi) if snr_cond else step_size
+        update_scaling = step_size
+
+        # If spectral normalization was already applied natively in the OFT sinkhorn, skip the scaling block
+        spectral_sinkhorn_applied = oft_sym and not normed_mt and group.get('spectral_normalization', False)
+
+        if group.get('spectral_normalization', False) and not spectral_sinkhorn_applied:
+            update = scale_update(p, update, update_scaling, state=state)
+        elif not spectral_sinkhorn_applied:
+            if snr_cond:
+                update_scaling = update_scaling * (4/math.pi)
             update.mul_(update_scaling)
 
         param_update.apply_parameter_update(self, p, group, update, step_size, random_int_tensor=random_int_tensor, wd_scaler=wd_scaler, wd_target=wd_target, cwd_target=cwd_target)

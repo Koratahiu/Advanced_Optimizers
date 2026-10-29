@@ -28,6 +28,7 @@ class SignSGD_adv(torch.optim.Optimizer):
         cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
             applied only to parameter coordinates where the sign of the parameter
             and the sign of the optimizer update align (default: False).
+        scaled_wd (bool): Enables scale-invariant, dimension-scaled weight decay. If True, weight decay is scaled by the relative learning rate and parameter dimension. (default: False).
         vector_reshape (bool, optional): whether to reshape 1D vectors into 2D
             matrices to apply low-rank compression (default: True).
         stochastic_rounding (bool, optional): whether to use stochastic
@@ -67,6 +68,7 @@ class SignSGD_adv(torch.optim.Optimizer):
         # weight decay features
         geometric_wd: bool = False,
         cautious_wd: bool = False,
+        scaled_wd: bool = False,
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
         # OrthoGrad
@@ -116,6 +118,7 @@ class SignSGD_adv(torch.optim.Optimizer):
             momentum=momentum,
             weight_decay=weight_decay,
             cautious_wd=cautious_wd,
+            scaled_wd=scaled_wd,
             geometric_wd=geometric_wd,
             vector_reshape=vector_reshape,
             orthogonal_gradient=orthogonal_gradient,

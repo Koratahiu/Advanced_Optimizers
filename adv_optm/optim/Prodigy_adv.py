@@ -38,6 +38,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
             applied only to parameter coordinates where the sign of the parameter
             and the sign of the optimizer update align (default: False).
+        scaled_wd (bool): Enables scale-invariant, dimension-scaled weight decay. If True, weight decay is scaled by the relative learning rate and parameter dimension. (default: False).
         vector_reshape (bool): whether to reshape 1D vectors into 2D
             matrices to apply low-rank compression (default: True).
         stochastic_rounding (bool): whether to use stochastic
@@ -127,6 +128,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         weight_decay: float = 0.0,
         fisher_wd: bool = False,
         cautious_wd: bool = False,
+        scaled_wd: bool = False,
         # Stochastic Rounding for BF16
         stochastic_rounding: bool = True,
         # Adam_atan2 (scale invariant)
@@ -193,7 +195,7 @@ class Prodigy_adv(torch.optim.Optimizer):
 
         defaults = {
             "lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
-            "fisher_wd": fisher_wd, "cautious_wd": cautious_wd,
+            "fisher_wd": fisher_wd, "cautious_wd": cautious_wd, "scaled_wd": scaled_wd,
             "use_atan2": use_atan2,
             "orthogonal_gradient": orthogonal_gradient,
             "compiled_optimizer": compiled_optimizer,
@@ -213,6 +215,7 @@ class Prodigy_adv(torch.optim.Optimizer):
         self.kourkoutas_beta = kourkoutas_beta
         self.layer_key_fn = layer_key_fn
 
+        self._init_lr = lr if lr > 0 else 1
         super().__init__(params, defaults)
 
         # Use the device of the first parameter to avoid hardcoding '.cuda()'

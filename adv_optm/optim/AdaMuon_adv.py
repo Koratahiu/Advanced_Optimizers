@@ -44,6 +44,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
             applied only to parameter coordinates where the sign of the parameter
             and the sign of the optimizer update align (default: False).
+        scaled_wd (bool): Enables scale-invariant, dimension-scaled weight decay. If True, weight decay is scaled by the relative learning rate and parameter dimension. (default: False).
         eps (float): term added to the denominator for adaptive scaling to improve
             numerical stability (default: 1e-8).
         rms_rescaling (bool): Use Root-Mean-Square for the final update
@@ -142,6 +143,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
         # Decoupled/cautious weight decay
         weight_decay: float = 0,
         cautious_wd: bool = False,
+        scaled_wd: bool = False,
         # Nesterov momentum
         nesterov: bool = True,
         nesterov_coef: float | None = None,
@@ -232,7 +234,7 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
         defaults = {
             "lr": lr, "betas": betas, "weight_decay": weight_decay, "cautious_wd": cautious_wd,
-            "eps": eps, "rms_rescaling": rms_rescaling, "ns_steps": ns_steps,
+            "eps": eps, "rms_rescaling": rms_rescaling, "ns_steps": ns_steps, "scaled_wd": scaled_wd,
             "ns_eps": ns_eps, "ns_coeffs": ns_coeffs, "nnmf_factor": nnmf_factor,
             "vector_reshape": vector_reshape,
             "nesterov":nesterov, "nesterov_coef": nesterov_coef, "use_atan2":use_atan2,
