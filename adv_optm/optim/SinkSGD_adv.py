@@ -259,7 +259,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         nesterov = group['nesterov']
         nesterov_coef = group.get('nesterov_coef', None)
         snr_cond = group.get('snr_cond', False)
-        oft_sym = group.get('oft_mode', False) and getattr(p, '_is_oft', False)
+        oft_sym = group.get('oft_mode', False)
 
         vt_row = None
         vt_col = None
