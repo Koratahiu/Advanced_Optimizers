@@ -29,12 +29,14 @@ class SinkSGD_adv(torch.optim.Optimizer):
         cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
             applied only to parameter coordinates where the sign of the parameter
             and the sign of the optimizer update align (default: False).
+        scaled_wd (bool): Enables scale-invariant, dimension-scaled weight decay. If True, weight decay is scaled by the relative learning rate and parameter dimension. (default: False).
         vector_reshape (bool): whether to reshape 1D vectors into 2D
             matrices to apply low-rank compression (default: True).
         stochastic_rounding (bool): whether to use stochastic
             rounding for BF16 parameter updates (default: True).
         sinkhorn_iterations (int): Number of Sinkhorn iterations for normalization. (default: 5)
         orthogonal_sinkhorn (bool): Whether to use orthogonal Sinkhorn normalization. (default: False)
+        skew_sinkoft (bool): Enables OFT-specific skew-symmetric Sinkhorn normalization. If True, uses skew-symmetric Sinkhorn for OFT parameters instead of standard SR-Sinkhorn. (default: False)
         normed_momentum (bool): whether to compute the first moment on the normalized gradient. (default: False)
         snr_cond (bool): whether to apply SNR conditioning. (default: False).
         geometric_wd (bool): Enables geometric weight decay. (default: False).

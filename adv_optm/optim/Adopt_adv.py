@@ -41,6 +41,7 @@ class Adopt_adv(torch.optim.Optimizer):
         cautious_wd (bool): Enables Cautious Weight Decay. If True, weight decay is
             applied only to parameter coordinates where the sign of the parameter
             and the sign of the optimizer update align (default: False).
+        scaled_wd (bool): Enables scale-invariant, dimension-scaled weight decay. If True, weight decay is scaled by the relative learning rate and parameter dimension. (default: False).
         clip_lambda (Callable, optional): A function that takes the current step
             and returns a value to clip the normalized gradient. Only used when
             `use_atan2` is False. (default: `lambda step: step**0.25`)
