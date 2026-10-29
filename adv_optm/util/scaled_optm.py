@@ -3,6 +3,7 @@ import torch
 from . import param_update
 
 import math
+_OFT_STRUCTURAL_CACHE = {}
 
 def get_cached_structural_tensors(b: int, batch_size: int, device: torch.device):
     """
