@@ -3,22 +3,17 @@ import torch
 from . import param_update
 
 import math
-_OFT_STRUCTURAL_CACHE = {}
+from functools import lru_cache
 
+@lru_cache()
 def get_cached_structural_tensors(b: int, batch_size: int, device: torch.device):
     """
     Retrieves or creates structural tensors (indices) for OFT exact geometry.
     Caches them globally to prevent redundant memory allocation.
     """
-    global _OFT_STRUCTURAL_CACHE
-
-    idx_key = (b, batch_size, device)
-    if idx_key not in _OFT_STRUCTURAL_CACHE:
-        rows, cols = torch.triu_indices(b, b, 1, device=device)
-        batch_idx = torch.arange(batch_size, device=device)[:, None]
-        _OFT_STRUCTURAL_CACHE[idx_key] = (rows, cols, batch_idx)
-
-    return _OFT_STRUCTURAL_CACHE[idx_key]
+    rows, cols = torch.triu_indices(b, b, 1, device=device)
+    batch_idx = torch.arange(batch_size, device=device)[:, None]
+    return rows, cols, batch_idx
 
 def scale_update(
     p: torch.Tensor,
