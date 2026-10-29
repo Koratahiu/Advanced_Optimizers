@@ -36,7 +36,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
             rounding for BF16 parameter updates (default: True).
         sinkhorn_iterations (int): Number of Sinkhorn iterations for normalization. (default: 5)
         orthogonal_sinkhorn (bool): Whether to use orthogonal Sinkhorn normalization. (default: False)
-        skew_sinkoft (bool): Enables OFT-specific skew-symmetric Sinkhorn normalization. If True, uses skew-symmetric Sinkhorn for OFT parameters instead of standard SR-Sinkhorn. (default: False)
+        oft_mode (bool): Enables OFT-specific skew-symmetric Sinkhorn normalization. If True, uses skew-symmetric Sinkhorn for OFT parameters instead of standard SR-Sinkhorn. (default: False)
         normed_momentum (bool): whether to compute the first moment on the normalized gradient. (default: False)
         snr_cond (bool): whether to apply SNR conditioning. (default: False).
         geometric_wd (bool): Enables geometric weight decay. (default: False).
@@ -66,7 +66,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         sinkhorn_iterations: int = 5,
         orthogonal_sinkhorn: bool = False,
         # OFT-specific Sinkhorn (symmetric)
-        skew_sinkoft: bool = False,
+        oft_mode: bool = False,
         # Normalization then Momentum
         normed_momentum: bool = False,
         # SNR Precondition (requires normed_momentum)
@@ -119,7 +119,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
             "orthogonal_gradient": orthogonal_gradient, 
             "compiled_optimizer": compiled_optimizer,
             "sinkhorn_iterations": sinkhorn_iterations,
-            "orthogonal_sinkhorn": orthogonal_sinkhorn, "skew_sinkoft": skew_sinkoft,
+            "orthogonal_sinkhorn": orthogonal_sinkhorn, "oft_mode": oft_mode,
             "spectral_normalization": spectral_normalization,
             "centered_wd": centered_wd, "centered_wd_mode": centered_wd_mode,
             "state_precision": state_precision,
@@ -259,7 +259,7 @@ class SinkSGD_adv(torch.optim.Optimizer):
         nesterov = group['nesterov']
         nesterov_coef = group.get('nesterov_coef', None)
         snr_cond = group.get('snr_cond', False)
-        oft_sym = group.get('skew_sinkoft', False) and getattr(p, '_is_oft', False)
+        oft_sym = group.get('oft_mode', False) and getattr(p, '_is_oft', False)
 
         vt_row = None
         vt_col = None
