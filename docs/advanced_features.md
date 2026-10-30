@@ -99,7 +99,6 @@ Variance/Confidence preconditioning that scales updates by the signal-to-noise r
 * EXPERIMENTAL
 * Available on: `SignSGD_adv`, `SinkSGD_adv`.
 * Requires `normed_momentum=True`
-* Read more: [AASS](https://koratahiu.github.io/aass/) & [sink-v](https://koratahiu.github.io/sink-v/)
 
 **Example:**
 ```python
