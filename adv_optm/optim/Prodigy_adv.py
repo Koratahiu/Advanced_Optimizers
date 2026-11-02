@@ -431,7 +431,7 @@ class Prodigy_adv(torch.optim.Optimizer):
 
                 if nesterov:
                     nv_coef = self.beta1 if nesterov_coef is None else nesterov_coef
-                    update_mt = update_mt.lerp_(grad_reshaped, 1-nv_coef)
+                    update_mt = update_mt.lerp_(grad_reshaped * d, 1-nv_coef)
 
             vt = _reconstruct_state((state['mu_v_nmf'], state['mv_v_nmf']), signed=False, shifter=state['shifter'])
 
@@ -475,7 +475,7 @@ class Prodigy_adv(torch.optim.Optimizer):
 
                 if nesterov:
                     nv_coef = self.beta1 if nesterov_coef is None else nesterov_coef
-                    update_mt = update_mt.lerp_(grad, 1-nv_coef)
+                    update_mt = update_mt.lerp_(grad * d, 1-nv_coef)
 
                 set_state(state, 'exp_avg', exp_avg, actual_precision, random_int_state_tensor)
 
