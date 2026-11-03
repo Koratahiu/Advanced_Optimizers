@@ -424,7 +424,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
                 if nesterov:
                     nv_coef = beta1 if nesterov_coef is None else nesterov_coef
-                    update_mt = update_mt.lerp_(grad_reshaped, 1-nv_coef)
+                    update_mt = update_mt.lerp_(normalized_grad, 1-nv_coef)
 
             if use_mt:
                 update = update_mt
@@ -466,7 +466,7 @@ class Adopt_adv(torch.optim.Optimizer):
 
                 if nesterov:
                     nv_coef = beta1 if nesterov_coef is None else nesterov_coef
-                    update_mt = update_mt.lerp_(grad, 1-nv_coef)
+                    update_mt = update_mt.lerp_(normalized_grad, 1-nv_coef)
 
                 set_state(state, 'exp_avg', mt, actual_precision, random_int_state_tensor)
 
