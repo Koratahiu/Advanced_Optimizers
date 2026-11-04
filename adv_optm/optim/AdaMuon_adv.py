@@ -476,6 +476,10 @@ class AdaMuon_adv(torch.optim.Optimizer):
 
             adam_step_param(self, p, grad, state, group, beta1_adam, beta2_adam, sqrt_bias_correction2, step_size, random_int_tensor, random_int_state_tensor)
 
+            if hasattr(self, 'kourkoutas_helper') and self.kourkoutas_helper:
+                # Accumulate current grad's norm for the *next* step
+                self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
+
             state['step'] += 1
 
         else: # Muon path
