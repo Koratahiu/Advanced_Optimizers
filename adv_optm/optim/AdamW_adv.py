@@ -345,6 +345,10 @@ class AdamW_adv(torch.optim.Optimizer):
 
         step_param_fn(p, grad, state, group, step_size, beta1, beta2, sqrt_bias_correction2, random_int_tensor, random_int_state_tensor)
 
+        if group.get('kourkoutas_beta', False):
+            # Accumulate current grad's norm for the *next* step
+            self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
+
         state['step'] += 1
 
     def _step_parameter(self, p, grad, state, group, step_size, beta1, beta2, sqrt_bias_correction2, random_int_tensor, random_int_state_tensor):
@@ -355,10 +359,6 @@ class AdamW_adv(torch.optim.Optimizer):
         nesterov = group.get('nesterov', False)
         nesterov_coef = group.get('nesterov_coef', None)
         use_mt = group['betas'][0] > 0
-
-        if group.get('kourkoutas_beta', False):
-            # Accumulate current grad's norm for the *next* step
-            self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
 
         adaptive_eps = scale_eps(group['eps'], p)
 

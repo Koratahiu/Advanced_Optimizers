@@ -337,9 +337,11 @@ class Adopt_adv(torch.optim.Optimizer):
 
         random_int_tensor = None
         random_int_state_tensor = None
+        clip_val = self.clip_lambda(state['step']) if self.clip_lambda is not None else None
 
         if group.get('compiled_optimizer', False):
             lr = torch.as_tensor(group['lr'])
+            clip_val = torch.as_tensor(clip_val) if clip_val is not None else None
             if p.dtype == torch.bfloat16 and self.stochastic_rounding:
                 # Pre-generate random tensor for stochastic rounding if needed.
                 random_int_tensor = param_update._get_random_int_for_sr(p)
@@ -361,11 +363,15 @@ class Adopt_adv(torch.optim.Optimizer):
             lr = group['lr']
             step_param_fn = self._step_parameter
 
-        step_param_fn(p, grad, state, group, lr, beta1, beta2, random_int_tensor, random_int_state_tensor)
+        step_param_fn(p, grad, state, group, lr, beta1, beta2, clip_val, random_int_tensor, random_int_state_tensor)
+
+        if group.get('kourkoutas_beta', False):
+            # Accumulate current grad's norm for the *next* step
+            self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
 
         state['step'] += 1
 
-    def _step_parameter(self, p, grad, state, group, lr, beta1, beta2, random_int_tensor, random_int_state_tensor):
+    def _step_parameter(self, p, grad, state, group, lr, beta1, beta2, clip_val, random_int_tensor, random_int_state_tensor):
         grad = upcast_grad_for_precision(grad, state, group['state_precision'])
 
         grad = _orthogonalize_gradient(p, grad, group["orthogonal_gradient"])
@@ -373,10 +379,6 @@ class Adopt_adv(torch.optim.Optimizer):
         nesterov = group.get('nesterov', False)
         nesterov_coef = group.get('nesterov_coef', None)
         use_mt = group['betas'][0] > 0
-
-        if group.get('kourkoutas_beta', False):
-            # Accumulate current grad's norm for the *next* step
-            self.kourkoutas_helper.accumulate_gradient_sq_norm(p, grad)
 
         adaptive_eps = scale_eps(group['eps'], p)
 
@@ -407,7 +409,6 @@ class Adopt_adv(torch.optim.Optimizer):
             else:
                 normalized_grad = torch.div(grad_reshaped, denom.add_(adaptive_eps), out=denom)
                 if self.clip_lambda is not None:
-                    clip_val = self.clip_lambda(state['step'])
                     normalized_grad.clamp_(-clip_val, clip_val)
 
             # ADOPT Step B: Update momentum m_t using normalized gradient
@@ -454,7 +455,6 @@ class Adopt_adv(torch.optim.Optimizer):
             else:
                 normalized_grad = torch.div(grad, denom.add_(adaptive_eps), out=denom)
                 if self.clip_lambda is not None:
-                    clip_val = self.clip_lambda(state['step'])
                     normalized_grad.clamp_(-clip_val, clip_val)
 
             # ADOPT Step B: Update momentum m_t
