@@ -111,6 +111,7 @@ class Lion_adv(torch.optim.Optimizer):
             nnmf_factor=nnmf_factor,
             centered_wd= centered_wd,
             centered_wd_mode= centered_wd_mode,
+            compiled_optimizer=compiled_optimizer
         )
         self.stochastic_rounding = stochastic_rounding
         self._init_lr = lr if lr > 0 else 1
