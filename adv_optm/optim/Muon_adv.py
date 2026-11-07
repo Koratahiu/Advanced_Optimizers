@@ -404,6 +404,7 @@ class Muon_adv(torch.optim.Optimizer):
             random_int_state_tensor = None
             if is_compiled:
                 step_size = torch.as_tensor(step_size)
+                sqrt_bias_correction2 = torch.as_tensor(sqrt_bias_correction2)
                 # Cache compiled function per-shape
                 cache_key = (p.shape, state.get('factored', False))
                 if cache_key not in self._compiled_adam_step_fns:
